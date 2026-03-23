@@ -1,0 +1,287 @@
+"""
+LangGraph node functions for the neuroimaging pipeline.
+
+Each node receives the full NeuroimagingState, performs its action,
+and returns a (partial) state dict with the fields it modifies.
+"""
+
+import uuid
+from pathlib import Path
+
+import cv2
+import numpy as np
+import torchvision.transforms as T
+from PIL import Image
+
+from config import BEST_CNN_PER_TASK, DEFAULT_CONFIG, RoutingConfig
+from explainability.saliency import (
+    GRADCAM_TARGET_LAYERS,
+    GradCAMPlusPlus,
+    IntegratedGradientsForCNN,
+)
+from pipeline.state import NeuroimagingState
+
+# ── Tool instances are passed in at graph-build time via closure ──────────────
+# (avoids re-loading multi-GB models on every invocation)
+
+
+def make_triage_node(agent, routing_cfg: RoutingConfig = None):
+    """
+    Factory: returns a triage node function that calls MedGemmaAgent.diagnose().
+    Runs system_prompt.txt → structured MedicalDiagnosis → derives routing decision.
+    """
+    cfg = routing_cfg or DEFAULT_CONFIG.routing
+
+    def triage_node(state: NeuroimagingState) -> dict:
+        dx, routing = agent.diagnose(state["image_path"])
+
+        return {
+            "routing_decision": routing.routing_decision,
+            "routing_confidence": routing.confidence,
+            "routing_reasoning": routing.reasoning,
+            "suspected_pathology": routing.suspected_pathology,
+            "medgemma_diagnosis": dx.model_dump(),
+            "routing_path": state["routing_path"] + ["triage"],
+        }
+
+    return triage_node
+
+
+def make_cnn_node(cnn_tool):
+    """CNN classifier node. Uses best-performing model per task (from cnns.tex)."""
+
+    def cnn_node(state: NeuroimagingState) -> dict:
+        result = cnn_tool.classify(state["image_path"], state["task"])
+        return {
+            "classification_result": result,
+            "routing_path": state["routing_path"] + ["cnn_classify"],
+        }
+
+    return cnn_node
+
+
+def make_sam3_node(sam3_tool):
+    """SAM3 segmentation node. Produces mask + bbox overlay for downstream nodes."""
+
+    def sam3_node(state: NeuroimagingState) -> dict:
+        pathology = state.get("suspected_pathology") or "brain lesion"
+        result = sam3_tool.segment(state["image_path"], text_prompt=pathology)
+        return {
+            "segmentation_result": result,
+            "routing_path": state["routing_path"] + ["sam3_segment"],
+        }
+
+    return sam3_node
+
+
+def make_cnn_with_mask_node(cnn_tool, agent=None):
+    """
+    CNN node that operates on the SAM3 bbox-guided image.
+    Also runs MedGemma with system_prompt_bbox.txt on the overlay image
+    to get a spatially-informed diagnosis alongside the CNN result.
+    """
+
+    def cnn_with_mask_node(state: NeuroimagingState) -> dict:
+        seg = state.get("segmentation_result")
+        seg_valid = seg and not seg.get("skipped")
+
+        # CNN classifies the original image
+        result = cnn_tool.classify(state["image_path"], state["task"])
+
+        updates = {
+            "classification_result": result,
+            "routing_path": state["routing_path"] + ["cnn_with_mask"],
+        }
+
+        # MedGemma gets the red overlay for spatially-guided diagnosis
+        if agent is not None:
+            overlay_path = (
+                seg["guided_image_path"]
+                if seg_valid and seg.get("guided_image_path")
+                else state["image_path"]
+            )
+            bbox_dx = agent.diagnose_with_bbox(overlay_path)
+            updates["medgemma_bbox_diagnosis"] = bbox_dx.model_dump()
+
+        return updates
+
+    return cnn_with_mask_node
+
+
+def make_biomedclip_node(biomedclip_tool, routing_cfg: RoutingConfig = None):
+    """
+    BiomedCLIP node using layer-18 features (from clip.tex).
+    Also used as a re-ranking step if CNN confidence is below threshold.
+    """
+    cfg = routing_cfg or DEFAULT_CONFIG.routing
+
+    def biomedclip_node(state: NeuroimagingState) -> dict:
+        result = biomedclip_tool.classify(state["image_path"], state["task"])
+        return {
+            "biomedclip_result": result,
+            "routing_path": state["routing_path"] + ["biomedclip"],
+        }
+
+    return biomedclip_node
+
+
+def make_report_node(agent):
+    """
+    MedGemma report generation node.
+    Synthesizes all tool outputs into a structured triage report.
+    Determines final predicted class and whether human review is needed.
+    """
+
+    def report_node(state: NeuroimagingState) -> dict:
+        report = agent.generate_report(
+            image_path=state["image_path"],
+            task=state["task"],
+            routing_path=state["routing_path"],
+            medgemma_dx=state.get("medgemma_bbox_diagnosis")
+            or state.get("medgemma_diagnosis"),
+            cnn_result=state.get("classification_result"),
+            sam3_result=state.get("segmentation_result"),
+            biomedclip_result=state.get("biomedclip_result"),
+        )
+
+        # Determine final prediction: prefer CNN result, fall back to BiomedCLIP
+        cnn = state.get("classification_result")
+        clip = state.get("biomedclip_result")
+        if cnn:
+            final_class = cnn["predicted_class"]
+            final_conf = cnn["confidence"]
+        elif clip:
+            final_class = clip["top_label"]
+            final_conf = clip["top_score"]
+        else:
+            final_class = state.get("suspected_pathology", "unknown")
+            final_conf = state.get("routing_confidence", 0.0)
+
+        return {
+            "final_report": report,
+            "final_predicted_class": final_class,
+            "final_confidence": final_conf,
+            "requires_human_review": final_conf
+            < DEFAULT_CONFIG.routing.human_review_threshold,
+            "routing_path": state["routing_path"] + ["report"],
+        }
+
+    return report_node
+
+
+def make_explainability_node(cnn_tool, output_dir: str = "outputs/explainability"):
+    """
+    Optional post-classification node: generates Grad-CAM++ and Integrated Gradients
+    for the CNN's prediction on the current image.
+
+    Outputs are saved as PNG files; paths are stored in state["explainability_result"].
+    Only runs if a classification_result exists (i.e., a CNN was used).
+
+    Controlled by PipelineConfig.generate_explainability (default False).
+    """
+    out_path = Path(output_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
+
+    _preprocess = T.Compose(
+        [
+            T.Resize((224, 224)),
+            T.ToTensor(),
+            T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ]
+    )
+
+    def explainability_node(state: NeuroimagingState) -> dict:
+        cnn_result = state.get("classification_result")
+        if cnn_result is None:
+            # No CNN ran — nothing to explain
+            return {"explainability_result": None}
+
+        task = state["task"]
+        image_path = state["image_path"]
+
+        # Resolve the model and its class mapping
+        model, class_names = cnn_tool.get_model_and_classes(task)
+        if model is None:
+            return {"explainability_result": None}
+
+        predicted_class = cnn_result["predicted_class"]
+        target_idx = next(
+            (i for i, c in enumerate(class_names) if c == predicted_class),
+            0,
+        )
+
+        # Preprocess image (grayscale → 3-channel, same as cnn_tool.classify)
+        pil_img = Image.open(image_path).convert("L").convert("RGB")
+        img_tensor = _preprocess(pil_img).unsqueeze(0).to(cnn_tool.device)
+
+        uid = uuid.uuid4().hex[:8]
+        paths = {}
+        orig_np = np.array(pil_img.resize((224, 224)))
+
+        # ── Grad-CAM++ ────────────────────────────────────────────────────────
+        model_name = BEST_CNN_PER_TASK.get(task, "")
+        target_layer_fn = GRADCAM_TARGET_LAYERS.get(model_name)
+        if target_layer_fn is not None:
+            target_layer = target_layer_fn(model)
+            gc_pp = GradCAMPlusPlus(model, target_layer)
+            cam = gc_pp.generate_cam(img_tensor, target_idx)
+            gc_pp.cleanup()
+
+            cam_r = cv2.resize(cam, (224, 224))
+            hm = cv2.applyColorMap(np.uint8(cam_r * 255), cv2.COLORMAP_JET)
+            hm = cv2.cvtColor(hm, cv2.COLOR_BGR2RGB)
+            overlay = (0.5 * orig_np + 0.5 * hm).astype(np.uint8)
+            gc_path = str(out_path / f"gradcam_pp_{uid}.png")
+            Image.fromarray(overlay).save(gc_path)
+            paths["gradcam_pp"] = gc_path
+
+        # ── Integrated Gradients ──────────────────────────────────────────────
+        ig = IntegratedGradientsForCNN(
+            model, steps=30
+        )  # 30 steps is fast enough for inference
+        attr_map = ig.attribute(img_tensor, target_idx)
+        attr_r = cv2.resize(attr_map, (224, 224))
+        hm_ig = cv2.applyColorMap(np.uint8(attr_r * 255), cv2.COLORMAP_INFERNO)
+        hm_ig = cv2.cvtColor(hm_ig, cv2.COLOR_BGR2RGB)
+        overlay_ig = (0.5 * orig_np + 0.5 * hm_ig).astype(np.uint8)
+        ig_path = str(out_path / f"ig_{uid}.png")
+        Image.fromarray(overlay_ig).save(ig_path)
+        paths["integrated_gradients"] = ig_path
+
+        return {
+            "explainability_result": paths,
+            "routing_path": state["routing_path"] + ["explainability"],
+        }
+
+    return explainability_node
+
+
+def human_review_node(state: NeuroimagingState) -> dict:
+    """Terminal node: flags the case for radiologist review."""
+    print(
+        f"[HumanReview] Case flagged: {state['image_path']} "
+        f"(confidence={state['routing_confidence']:.2f}, "
+        f"pathology={state.get('suspected_pathology', 'unknown')})"
+    )
+    return {
+        "requires_human_review": True,
+        "final_report": (
+            f"FLAGGED FOR HUMAN REVIEW\n"
+            f"Reason: Low routing confidence ({state['routing_confidence']:.2f})\n"
+            f"Suspected: {state.get('suspected_pathology', 'unknown')}\n"
+            f"Routing reasoning: {state.get('routing_reasoning', '')}"
+        ),
+        "routing_path": state["routing_path"] + ["human_review"],
+    }
+
+
+# ── Edge condition ─────────────────────────────────────────────────────────────
+
+
+def route_from_triage(state: NeuroimagingState) -> str:
+    """
+    Conditional edge: maps triage routing_decision to the next node name.
+    Also handles post-CNN routing: if CNN confidence is low on multiclass,
+    fall through to BiomedCLIP re-ranking.
+    """
+    return state["routing_decision"]
