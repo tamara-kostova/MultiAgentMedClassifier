@@ -7,6 +7,7 @@ Wraps the best-performing CNN per task from cnns.tex:
   - stroke          → DenseNet169 (97.7% acc)
 """
 
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -38,26 +39,102 @@ CLASS_NAMES = {
 }
 
 
-def _build_model(arch: str, num_classes: int) -> nn.Module:
+def _unwrap_state_dict(state: object) -> dict:
+    """Extract a model state dict from common checkpoint wrappers."""
+    if isinstance(state, dict) and "model_state_dict" in state:
+        state = state["model_state_dict"]
+    if not isinstance(state, dict):
+        raise ValueError(f"Unsupported checkpoint format: {type(state).__name__}")
+    if state and all(isinstance(k, str) and k.startswith("module.") for k in state):
+        state = {k.removeprefix("module."): v for k, v in state.items()}
+    return state
+
+
+def _infer_resnet_variant(state_dict: dict) -> str:
+    block_ids = set()
+    for key in state_dict:
+        parts = key.split(".")
+        if len(parts) > 2 and parts[0] == "layer3" and parts[1].isdigit():
+            block_ids.add(int(parts[1]))
+    return "resnet101" if block_ids and max(block_ids) >= 22 else "resnet50"
+
+
+def _infer_arch_from_state_dict(state_dict: dict) -> str | None:
+    """Infer the torchvision architecture from checkpoint key patterns."""
+    if "features.conv0.weight" in state_dict:
+        classifier = state_dict.get("classifier.weight")
+        if classifier is not None and getattr(classifier, "ndim", 0) == 2:
+            in_features = int(classifier.shape[1])
+            if in_features == 1664:
+                return "densenet169"
+            if in_features == 1024:
+                return "densenet121"
+        return "densenet169"
+
+    if "classifier.6.weight" in state_dict:
+        return "vgg16"
+
+    if "fc.weight" in state_dict:
+        return _infer_resnet_variant(state_dict)
+
+    return None
+
+
+def _build_model(
+    arch: str, num_classes: int, use_imagenet_weights: bool = True
+) -> nn.Module:
     """Instantiate an architecture with a replaced classification head."""
     if arch == "vgg16":
-        model = models.vgg16(weights=models.VGG16_Weights.IMAGENET1K_V1)
+        weights = models.VGG16_Weights.IMAGENET1K_V1 if use_imagenet_weights else None
+        model = models.vgg16(weights=weights)
         model.classifier[-1] = nn.Linear(model.classifier[-1].in_features, num_classes)
     elif arch == "densenet169":
-        model = models.densenet169(weights=models.DenseNet169_Weights.IMAGENET1K_V1)
+        weights = (
+            models.DenseNet169_Weights.IMAGENET1K_V1
+            if use_imagenet_weights
+            else None
+        )
+        model = models.densenet169(weights=weights)
         model.classifier = nn.Linear(model.classifier.in_features, num_classes)
     elif arch == "densenet121":
-        model = models.densenet121(weights=models.DenseNet121_Weights.IMAGENET1K_V1)
+        weights = (
+            models.DenseNet121_Weights.IMAGENET1K_V1
+            if use_imagenet_weights
+            else None
+        )
+        model = models.densenet121(weights=weights)
         model.classifier = nn.Linear(model.classifier.in_features, num_classes)
     elif arch == "resnet101":
-        model = models.resnet101(weights=models.ResNet101_Weights.IMAGENET1K_V1)
+        weights = (
+            models.ResNet101_Weights.IMAGENET1K_V1 if use_imagenet_weights else None
+        )
+        model = models.resnet101(weights=weights)
         model.fc = nn.Linear(model.fc.in_features, num_classes)
     elif arch == "resnet50":
-        model = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V1)
+        weights = (
+            models.ResNet50_Weights.IMAGENET1K_V1 if use_imagenet_weights else None
+        )
+        model = models.resnet50(weights=weights)
         model.fc = nn.Linear(model.fc.in_features, num_classes)
     else:
         raise ValueError(f"Unknown architecture: {arch}")
     return model
+
+
+def _build_model_with_fallback(
+    arch: str, num_classes: int, use_imagenet_weights: bool = True
+) -> nn.Module:
+    """Build a model, falling back to random init if pretrained weights are unavailable."""
+    try:
+        return _build_model(arch, num_classes, use_imagenet_weights=use_imagenet_weights)
+    except Exception as exc:
+        if not use_imagenet_weights:
+            raise
+        print(
+            f"[CNNClassifier] Could not load ImageNet weights for '{arch}' "
+            f"({type(exc).__name__}: {exc}). Falling back to random initialization."
+        )
+        return _build_model(arch, num_classes, use_imagenet_weights=False)
 
 
 def _get_transform(cfg: PreprocessConfig) -> transforms.Compose:
@@ -95,15 +172,36 @@ class CNNClassifier:
 
         arch = BEST_CNN_PER_TASK[task]
         n_cls = NUM_CLASSES[task]
-        model = _build_model(arch, n_cls)
-
         checkpoint_path = self.model_cfg.cnn_checkpoints.get(task)
+        model = _build_model_with_fallback(
+            arch, n_cls, use_imagenet_weights=checkpoint_path is None
+        )
+
         if checkpoint_path is not None:
-            state = torch.load(checkpoint_path, map_location=self.device)
-            # Handle both raw state_dict and checkpoint dicts
-            state_dict = state.get("model_state_dict", state)
-            model.load_state_dict(state_dict)
-            print(f"[CNNClassifier] Loaded checkpoint: {checkpoint_path}")
+            checkpoint_path = Path(checkpoint_path)
+            if not checkpoint_path.exists():
+                model = _build_model_with_fallback(
+                    arch, n_cls, use_imagenet_weights=True
+                )
+                print(
+                    f"[CNNClassifier] Checkpoint not found: {checkpoint_path}. "
+                    f"Using ImageNet pretrained weights for '{arch}'."
+                )
+            else:
+                state = torch.load(checkpoint_path, map_location=self.device)
+                state_dict = _unwrap_state_dict(state)
+                inferred_arch = _infer_arch_from_state_dict(state_dict)
+                if inferred_arch and inferred_arch != arch:
+                    print(
+                        f"[CNNClassifier] Checkpoint architecture '{inferred_arch}' "
+                        f"overrides configured '{arch}' for task '{task}'."
+                    )
+                    arch = inferred_arch
+                    model = _build_model_with_fallback(
+                        arch, n_cls, use_imagenet_weights=False
+                    )
+                model.load_state_dict(state_dict)
+                print(f"[CNNClassifier] Loaded checkpoint: {checkpoint_path}")
         else:
             print(
                 f"[CNNClassifier] No checkpoint for '{task}', using ImageNet pretrained weights."

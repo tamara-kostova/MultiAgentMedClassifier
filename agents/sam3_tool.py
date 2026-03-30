@@ -12,7 +12,9 @@ image for use by the MedGemma report agent (CNN always receives the original ima
 """
 
 import uuid
+import sys
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 import torch
@@ -23,13 +25,26 @@ from PIL import Image, ImageDraw
 from config import DEFAULT_CONFIG, ModelConfig
 
 # ── Try to import SAM3 ────────────────────────────────────────────────────────
-_SAM_AVAILABLE = False
-try:
-    from sam3.sam3 import build_sam3_image_model
+_SAM_IMPORT_ERROR = None
+_SAM3_REPO = Path(__file__).resolve().parents[1] / "sam3"
+if _SAM3_REPO.exists():
+    # Support a vendored checkout at ./sam3 without requiring editable install.
+    sys.path.insert(0, str(_SAM3_REPO))
 
-    _SAM_AVAILABLE = True
-except ImportError:
-    pass
+
+def _resolve_sam3_builder() -> Callable | None:
+    try:
+        from sam3.model_builder import build_sam3_image_model
+
+        return build_sam3_image_model
+    except Exception as exc:
+        global _SAM_IMPORT_ERROR
+        _SAM_IMPORT_ERROR = f"{type(exc).__name__}: {exc}"
+        return None
+
+
+build_sam3_image_model = _resolve_sam3_builder()
+_SAM_AVAILABLE = build_sam3_image_model is not None
 
 # SAM3 backbone input resolution
 _SAM3_INPUT_SIZE = 1008
@@ -100,8 +115,9 @@ class SAM3Tool:
     def _load_models(self):
         if not _SAM_AVAILABLE:
             print(
-                "[SAM3Tool] sam3 package not found. "
-                "Install with: pip install -e path/to/sam3"
+                "[SAM3Tool] Unable to import SAM3. "
+                f"Reason: {_SAM_IMPORT_ERROR}. "
+                "Install SAM3 deps and/or run: pip install -e ./sam3"
             )
             return
 

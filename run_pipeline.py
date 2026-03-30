@@ -3,7 +3,7 @@ Entry point for the multi-agent neuroimaging pipeline.
 
 Usage examples:
   # Single image:
-  python run_pipeline.py --image path/to/scan.png --task binary_tumor
+  python run_pipeline.py --image image.jpg --task binary_tumor
 
   # Full evaluation across all datasets:
   python run_pipeline.py --eval \
@@ -13,8 +13,8 @@ Usage examples:
     --stroke_dir        data/test/stroke
 
   # With custom CNN checkpoints:
-  python run_pipeline.py --image scan.png --task stroke \
-    --cnn_stroke checkpoints/densenet169_stroke.pth
+  python run_pipeline.py --image image.jpg --task binary_tumor \
+    --cnn_binary_tumor checkpoints/densenet169_binary_tumor.pt
 
 Checkpoints:
   CNN checkpoints should be PyTorch state dicts saved as:
@@ -30,6 +30,9 @@ from config import DEFAULT_CONFIG, ModelConfig, PipelineConfig, RoutingConfig
 from eval.evaluate import compare_configurations, load_test_split, run_single
 from pipeline.graph import build_pipeline
 from pipeline.state import initial_state
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
 def parse_args():
