@@ -263,7 +263,7 @@ class MedGemmaAgent:
                     raw = self._generate(image, prompt + "\n" + fix)
                 else:
                     print(
-                        f"[MedGemmaAgent] JSON parse failed after {self.routing_cfg.max_parse_retries} attempts. Using fallback."
+                        f"[MedGemmaAgent] JSON parse failed after {self.routing_cfg.max_parse_retries} attempts. \n Raw output: {raw}\n Error: {e}\n Returning default diagnosis with low confidence."
                     )
                     return MedicalDiagnosis(
                         modality=None,
@@ -278,7 +278,7 @@ class MedGemmaAgent:
                     )
 
     def _generate(
-        self, image: Image.Image, text_prompt: str, max_new_tokens: int = 256
+        self, image: Image.Image, text_prompt: str, max_new_tokens: int = 2064
     ) -> str:
         messages = [
             {

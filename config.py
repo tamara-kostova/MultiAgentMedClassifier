@@ -8,6 +8,9 @@ from pathlib import Path
 
 import torch
 
+_DEFAULT_SAM3_PROBE = "checkpoints/sam3_probe.pth"
+_DEFAULT_SAM3_BPE_PATH = "sam3/sam3/assets/bpe_simple_vocab_16e6.txt.gz"
+
 # ── Task identifiers ──────────────────────────────────────────────────────────
 TASKS = ["binary_tumor", "multiclass_tumor", "ms", "stroke"]
 
@@ -68,10 +71,10 @@ class ModelConfig:
 
     # ── SAM3 ──────────────────────────────────────────────────────────────────
     # Linear probe trained on BraTS 2021; Dice = 0.836 pixel-level.
-    sam3_linear_probe_checkpoint: str | None = None  # e.g. "checkpoints/sam3_probe.pth"
+    sam3_linear_probe_checkpoint: str | None = _DEFAULT_SAM3_PROBE
     # BPE vocabulary file required by SAM3's text encoder.
     # Path: sam3/sam3/assets/bpe_simple_vocab_16e6.txt.gz (inside the sam3 repo)
-    sam3_bpe_path: str | None = None
+    sam3_bpe_path: str | None = _DEFAULT_SAM3_BPE_PATH
 
     # ── MedGemma model ID ─────────────────────────────────────────────────────
     # Requires HuggingFace login and accepted terms of use for this gated model.

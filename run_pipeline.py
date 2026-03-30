@@ -93,15 +93,24 @@ def parse_args():
 
 
 def build_config(args) -> PipelineConfig:
+    default_model_cfg = DEFAULT_CONFIG.model
+    cnn_checkpoints = default_model_cfg.cnn_checkpoints.copy()
+    overrides = {
+        "binary_tumor": args.cnn_binary_tumor,
+        "multiclass_tumor": args.cnn_multiclass,
+        "ms": args.cnn_ms,
+        "stroke": args.cnn_stroke,
+    }
+    cnn_checkpoints.update(
+        {task: path for task, path in overrides.items() if path is not None}
+    )
+
     model_cfg = ModelConfig(
-        cnn_checkpoints={
-            "binary_tumor": args.cnn_binary_tumor,
-            "multiclass_tumor": args.cnn_multiclass,
-            "ms": args.cnn_ms,
-            "stroke": args.cnn_stroke,
-        },
-        sam3_linear_probe_checkpoint=args.sam3_probe,
-        sam3_bpe_path=args.sam3_bpe_path,
+        cnn_checkpoints=cnn_checkpoints,
+        sam3_linear_probe_checkpoint=(
+            args.sam3_probe or default_model_cfg.sam3_linear_probe_checkpoint
+        ),
+        sam3_bpe_path=args.sam3_bpe_path or default_model_cfg.sam3_bpe_path,
     )
     routing_cfg = RoutingConfig(
         sam3_threshold=args.sam3_threshold,
