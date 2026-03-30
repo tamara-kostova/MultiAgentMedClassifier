@@ -78,6 +78,11 @@ def parse_args():
     # Routing thresholds
     p.add_argument("--sam3_threshold", type=float, default=0.70)
     p.add_argument("--human_threshold", type=float, default=0.45)
+    p.add_argument(
+        "--always_run_sam3",
+        action="store_true",
+        help="Force SAM3 routing on every non-normal case, regardless of confidence",
+    )
 
     # Explainability
     p.add_argument(
@@ -113,6 +118,7 @@ def build_config(args) -> PipelineConfig:
         sam3_bpe_path=args.sam3_bpe_path or default_model_cfg.sam3_bpe_path,
     )
     routing_cfg = RoutingConfig(
+        always_run_sam3=args.always_run_sam3,
         sam3_threshold=args.sam3_threshold,
         human_review_threshold=args.human_threshold,
     )
@@ -136,7 +142,14 @@ def main():
         if not args.task:
             print("Error: --task is required with --image")
             return
-        run_single(app, args.image, args.task, verbose=True)
+        run_single(
+            app,
+            args.image,
+            args.task,
+            verbose=True,
+            output_dir=cfg.output_dir,
+            save_output=True,
+        )
 
     elif args.eval:
         # ── Full evaluation mode ──────────────────────────────────────────────

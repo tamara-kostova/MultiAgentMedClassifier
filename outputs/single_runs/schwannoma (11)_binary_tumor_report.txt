@@ -1,0 +1,14 @@
+============================================================
+Image: data/schwannoma (11).jpg
+Task:  binary_tumor
+Route: triage → sam3_segment → cnn_with_mask → explainability → report
+Prediction: tumor (conf=1.000)
+
+Report:
+FINDINGS:
+
+*   **Primary Finding:** A large, enhancing mass is present in the right cerebellum, consistent with a tumor.
+*   **Confidence Assessment:** High confidence in the presence of a tumor based on the MRI findings and the CNN classification.
+*   **Recommended Next Step:** Further evaluation, including contrast-enhanced MRI and potentially contrast-enhanced CT, is recommended for detailed characterization and staging.
+*   **Flags/Caveats:** This is a preliminary assessment based on a single image. A definitive diagnosis requires comprehensive clinical evaluation and potentially additional imaging.
+============================================================

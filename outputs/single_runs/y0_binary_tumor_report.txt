@@ -1,0 +1,14 @@
+============================================================
+Image: data/y0.jpg
+Task:  binary_tumor
+Route: triage → sam3_segment → cnn_with_mask → explainability → report
+Prediction: tumor (conf=1.000)
+
+Report:
+FINDINGS:
+
+1.  **Primary Finding:** The MRI shows a large, well-defined lesion in the right frontal lobe, consistent with a tumor.
+2.  **Confidence Assessment:** The MedGemma model suggests a high probability (95%) of a tumor, with a detailed diagnosis of glioma. The CNN classification confirms a tumor with 100% confidence. The SAM3 segmentation provides a high Dice score (83.6%), indicating good segmentation accuracy.
+3.  **Recommended Next Step:** Further evaluation is needed, including contrast-enhanced MRI and potentially a biopsy, to confirm the diagnosis and determine the specific type of tumor.
+4.  **Flags/Caveats:** This is a preliminary assessment based on a single image. A definitive diagnosis requires clinical correlation and further imaging.
+============================================================

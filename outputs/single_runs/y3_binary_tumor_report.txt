@@ -1,0 +1,16 @@
+============================================================
+Image: data/y3.jpg
+Task:  binary_tumor
+Route: triage → cnn_classify → explainability → report
+Prediction: tumor (conf=1.000)
+
+Report:
+FINDINGS:
+
+*   **Primary Finding:** The image shows a large, well-defined, hyperintense lesion in the right frontal lobe, consistent with a tumor.
+*   **Confidence Assessment:** The MedGemma initial diagnosis and CNN classification both indicate a high probability (95% and 100% respectively) of a tumor.
+*   **Recommended Next Step:** Further evaluation with contrast-enhanced MRI and/or contrast-enhanced CT is recommended to characterize the lesion.
+*   **Flags/Caveats:** This is a preliminary assessment based on a single image. A definitive diagnosis requires comprehensive clinical evaluation and additional imaging.
+
+Word count: 86
+============================================================

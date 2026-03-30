@@ -154,6 +154,12 @@ python run_pipeline.py --image scan.png --task binary_tumor \
   --sam3_bpe_path sam3/sam3/assets/bpe_simple_vocab_16e6.txt.gz
 ```
 
+**Force SAM3 on every non-normal case:**
+
+```bash
+python run_pipeline.py --image scan.png --task binary_tumor --always_run_sam3
+```
+
 **Custom checkpoints / thresholds:**
 
 ```bash

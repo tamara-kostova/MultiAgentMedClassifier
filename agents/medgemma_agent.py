@@ -102,6 +102,11 @@ def diagnosis_to_routing(
     if conf < routing_cfg.human_review_threshold:
         decision = "human_review"
         reasoning = f"Diagnosis confidence {conf:.2f} is below threshold {routing_cfg.human_review_threshold}."
+    elif routing_cfg.always_run_sam3 and name not in ("normal", ""):
+        decision = "sam3_then_cnn"
+        reasoning = (
+            "SAM3 forced on for all non-normal cases; bypassing confidence-based routing."
+        )
     elif conf < routing_cfg.sam3_threshold and name not in ("normal", ""):
         decision = "sam3_then_cnn"
         reasoning = f"Confidence {conf:.2f} is ambiguous; SAM3 spatial cues may help."

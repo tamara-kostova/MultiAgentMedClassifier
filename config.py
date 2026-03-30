@@ -100,6 +100,9 @@ class ModelConfig:
 
 @dataclass
 class RoutingConfig:
+    # Force SAM3 segmentation on every non-normal case, regardless of confidence.
+    # Useful when MedGemma is overconfident and never falls below sam3_threshold.
+    always_run_sam3: bool = False
     # Confidence below this → route to SAM3 segmentation-guided path
     sam3_threshold: float = 0.70
     # Confidence below this → flag for human review

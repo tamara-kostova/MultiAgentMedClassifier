@@ -384,24 +384,37 @@ def compare_configurations(
 
 
 def run_single(
-    app, image_path: str, task: str, verbose: bool = True
+    app,
+    image_path: str,
+    task: str,
+    verbose: bool = True,
+    output_dir: str | None = None,
+    save_output: bool = False,
 ) -> NeuroimagingState:
     """Run the pipeline on a single image and optionally print the report."""
     state = initial_state(image_path, task)
     result = app.invoke(state)
+    route = " → ".join(result.get("routing_path", []))
+    summary = (
+        f"{'='*60}\n"
+        f"Image: {image_path}\n"
+        f"Task:  {task}\n"
+        f"Route: {route}\n"
+        f"Prediction: {result.get('final_predicted_class')} "
+        f"(conf={result.get('final_confidence', 0):.3f})\n"
+        f"{'⚠  FLAGGED FOR HUMAN REVIEW\\n' if result.get('requires_human_review') else ''}"
+        f"\nReport:\n{result.get('final_report', 'N/A')}\n"
+        f"{'='*60}"
+    )
 
     if verbose:
-        print(f"\n{'='*60}")
-        print(f"Image: {image_path}")
-        print(f"Task:  {task}")
-        print(f"Route: {' → '.join(result.get('routing_path', []))}")
-        print(
-            f"Prediction: {result.get('final_predicted_class')} "
-            f"(conf={result.get('final_confidence', 0):.3f})"
-        )
-        if result.get("requires_human_review"):
-            print("⚠  FLAGGED FOR HUMAN REVIEW")
-        print(f"\nReport:\n{result.get('final_report', 'N/A')}")
-        print("=" * 60)
+        print(f"\n{summary}")
+
+    if save_output and output_dir:
+        report_dir = Path(output_dir) / "single_runs"
+        report_dir.mkdir(parents=True, exist_ok=True)
+        report_path = report_dir / f"{Path(image_path).stem}_{task}_report.txt"
+        report_path.write_text(summary + "\n", encoding="utf-8")
+        print(f"[run_single] Saved report to {report_path}")
 
     return result
