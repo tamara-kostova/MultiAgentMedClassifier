@@ -3,29 +3,7 @@
 a LangGraph-based multi-agent pipeline for automated classification of neuroimaging findings (brain tumour, multiple sclerosis, stroke).
 
 ## Architecture
-
-```
-                     ┌─────────────────────────────┐
-                     │           triage             │
-                     │  MedGemma 1.5 4B routes on   │
-                     │  visual assessment + JSON dx  │
-                     └──────┬──────┬───────┬────────┘
-                            │      │       │         │
-                      cnn_direct  sam3  biomedclip  human_review
-                            │      │       │
-                     ┌──────┘  sam3_seg    └──────────┐
-                     │            │                   │
-                  cnn_classify  cnn_with_mask      biomedclip
-                     │   (CNN ← original image)       │
-                     │   (MedGemma ← bbox overlay)    │
-                     └──────────────┬─────────────────┘
-                                    │
-                             [explainability]   ← optional
-                                    │
-                                 report
-                                    │
-                                   END
-```
+![System architecture diagram](system_diagram.png)
 
 **Agents / tools**
 
