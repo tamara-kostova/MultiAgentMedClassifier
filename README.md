@@ -16,12 +16,25 @@ a LangGraph-based multi-agent pipeline for automated classification of neuroimag
 
 **Routing logic** (derived from MedGemma `diagnosis_confidence`):
 
+Tumor tasks (`binary_tumor`, `multiclass_tumor`):
+
 | Confidence | Route |
 |---|---|
-| ≥ 0.70 | `cnn_direct` |
-| 0.65 – 0.70 (multiclass) | `biomedclip` |
-| 0.45 – 0.70 | `sam3_then_cnn` |
 | < 0.45 | `human_review` |
+| 0.45 – 0.65 | `biomedclip` (subtype re-ranking) |
+| 0.65 – 0.70 | `sam3_then_cnn` (spatial guidance) |
+| ≥ 0.70 | `cnn_direct` |
+
+MS / Stroke tasks:
+
+| Confidence | Route |
+|---|---|
+| < 0.45 | `human_review` |
+| ≥ 0.45 | `cnn_direct` |
+
+SAM3 and BiomedCLIP are not used for MS/stroke. The SAM3 linear probe was trained on BraTS 2021 (tumor only) and performed poorly on MS/stroke data. MS and stroke are binary tasks so BiomedCLIP subtype re-ranking does not apply either.
+
+Flags `--always_run_sam3` and `--always_run_biomedclip` override confidence-based routing (tumor tasks only).
 
 ## Tasks
 
@@ -44,7 +57,8 @@ MultiAgentMedClassifier/
 ├── pipeline/
 │   ├── graph.py            # LangGraph StateGraph assembly
 │   ├── nodes.py            # Node factory functions
-│   └── state.py            # NeuroimagingState TypedDict
+│   ├── state.py            # NeuroimagingState TypedDict
+│   └── fhir_output.py      # FHIR R4 DiagnosticReport serialiser
 ├── explainability/
 │   ├── saliency.py         # GradCAM, GradCAM++, Integrated Gradients (used by pipeline)
 │   ├── cnns.py             # Standalone CNN explainability experiment script (not imported by pipeline)
@@ -165,9 +179,11 @@ The report is returned in `state["final_report"]` (plain text, ≤150 words). Th
 | Field | Description |
 |---|---|
 | `final_predicted_class` | CNN label (or BiomedCLIP top label if no CNN ran) |
-| `final_confidence` | Confidence of the final prediction |
-| `requires_human_review` | `True` if confidence < `human_review_threshold` |
+| `final_confidence` | Confidence of the final prediction (may be capped by verification) |
+| `requires_human_review` | `True` if confidence < `human_review_threshold` or MedGemma disagrees with CNN |
 | `explainability_result` | Paths to `gradcam_pp_*.png` and `ig_*.png` (if enabled) |
+| `verification_result` | MedGemma post-hoc agreement check against Grad-CAM++ saliency map (if explainability enabled) |
+| `fhir_report` | FHIR R4 DiagnosticReport dict; saved to `outputs/fhir/fhir_<id>.json` |
 
 ## Explainability Methods
 

@@ -21,6 +21,7 @@ from explainability.saliency import (
 )
 from pipeline.state import NeuroimagingState
 
+VERIFICATION_DISAGREEMENT_CONFIDENCE_CAP = 0.55
 # ── Tool instances are passed in at graph-build time via closure ──────────────
 # (avoids re-loading multi-GB models on every invocation)
 
@@ -35,10 +36,21 @@ def make_triage_node(agent, routing_cfg: RoutingConfig = None):
     def triage_node(state: NeuroimagingState) -> dict:
         dx, routing = agent.diagnose(state["image_path"])
 
+        decision = routing.routing_decision
+        reasoning = routing.reasoning
+
+        # SAM3 probe was trained on tumor only — redirect other tasks to cnn_direct
+        if decision == "sam3_then_cnn" and state["task"] not in cfg.sam3_eligible_tasks:
+            decision = "cnn_direct"
+            reasoning = (
+                f"SAM3 not eligible for task '{state['task']}' "
+                f"(probe trained on tumor only); routing directly to CNN."
+            )
+
         return {
-            "routing_decision": routing.routing_decision,
+            "routing_decision": decision,
             "routing_confidence": routing.confidence,
-            "routing_reasoning": routing.reasoning,
+            "routing_reasoning": reasoning,
             "suspected_pathology": routing.suspected_pathology,
             "medgemma_diagnosis": dx.model_dump(),
             "routing_path": state["routing_path"] + ["triage"],
@@ -113,7 +125,6 @@ def make_biomedclip_node(biomedclip_tool, routing_cfg: RoutingConfig = None):
     BiomedCLIP node using layer-18 features (from clip.tex).
     Also used as a re-ranking step if CNN confidence is below threshold.
     """
-    cfg = routing_cfg or DEFAULT_CONFIG.routing
 
     def biomedclip_node(state: NeuroimagingState) -> dict:
         result = biomedclip_tool.classify(state["image_path"], state["task"])
@@ -125,14 +136,18 @@ def make_biomedclip_node(biomedclip_tool, routing_cfg: RoutingConfig = None):
     return biomedclip_node
 
 
-def make_report_node(agent):
+def make_report_node(agent, routing_cfg: RoutingConfig = None):
     """
     MedGemma report generation node.
     Synthesizes all tool outputs into a structured triage report.
     Determines final predicted class and whether human review is needed.
+    Applies a proportional confidence penalty when GradCAM++/SAM3 IoU is low.
     """
+    cfg = routing_cfg or DEFAULT_CONFIG.routing
 
     def report_node(state: NeuroimagingState) -> dict:
+        saliency_iou = state.get("saliency_sam3_iou")
+
         report = agent.generate_report(
             image_path=state["image_path"],
             task=state["task"],
@@ -142,6 +157,8 @@ def make_report_node(agent):
             cnn_result=state.get("classification_result"),
             sam3_result=state.get("segmentation_result"),
             biomedclip_result=state.get("biomedclip_result"),
+            verification_result=state.get("verification_result"),
+            saliency_iou=saliency_iou,
         )
 
         # Determine final prediction: prefer CNN result, fall back to BiomedCLIP
@@ -157,12 +174,23 @@ def make_report_node(agent):
             final_class = state.get("suspected_pathology", "unknown")
             final_conf = state.get("routing_confidence", 0.0)
 
+        # Apply confidence penalty for poor spatial alignment
+        requires_review = final_conf < cfg.human_review_threshold
+        if saliency_iou is not None and saliency_iou < cfg.low_iou_penalty_threshold:
+            penalty = saliency_iou / cfg.low_iou_penalty_threshold
+            penalised = final_conf * penalty
+            print(
+                f"[report] Low GradCAM++/SAM3 IoU={saliency_iou:.3f} → "
+                f"confidence penalised {final_conf:.3f}→{penalised:.3f}"
+            )
+            final_conf = penalised
+            requires_review = True
+
         return {
             "final_report": report,
             "final_predicted_class": final_class,
             "final_confidence": final_conf,
-            "requires_human_review": final_conf
-            < DEFAULT_CONFIG.routing.human_review_threshold,
+            "requires_human_review": requires_review,
             "routing_path": state["routing_path"] + ["report"],
         }
 
@@ -221,14 +249,15 @@ def make_explainability_node(cnn_tool, output_dir: str = "outputs/explainability
         # ── Grad-CAM++ ────────────────────────────────────────────────────────
         model_name = BEST_CNN_PER_TASK.get(task, "")
         target_layer_fn = GRADCAM_TARGET_LAYERS.get(model_name)
+        _cam_r = None  # retained for IoU computation below
         if target_layer_fn is not None:
             target_layer = target_layer_fn(model)
             gc_pp = GradCAMPlusPlus(model, target_layer)
             cam = gc_pp.generate_cam(img_tensor, target_idx)
             gc_pp.cleanup()
 
-            cam_r = cv2.resize(cam, (224, 224))
-            hm = cv2.applyColorMap(np.uint8(cam_r * 255), cv2.COLORMAP_JET)
+            _cam_r = cv2.resize(cam, (224, 224))
+            hm = cv2.applyColorMap(np.uint8(_cam_r * 255), cv2.COLORMAP_JET)
             hm = cv2.cvtColor(hm, cv2.COLOR_BGR2RGB)
             overlay = (0.5 * orig_np + 0.5 * hm).astype(np.uint8)
             gc_path = str(out_path / f"gradcam_pp_{uid}.png")
@@ -248,8 +277,26 @@ def make_explainability_node(cnn_tool, output_dir: str = "outputs/explainability
         Image.fromarray(overlay_ig).save(ig_path)
         paths["integrated_gradients"] = ig_path
 
+        # ── GradCAM++ / SAM3 mask IoU ─────────────────────────────────────────
+        saliency_sam3_iou = None
+        seg_result = state.get("segmentation_result")
+        if _cam_r is not None and seg_result and seg_result.get("mask_path"):
+            try:
+                sam_mask = np.array(
+                    Image.open(seg_result["mask_path"]).convert("L").resize((224, 224))
+                )
+                sam_binary = (sam_mask > 127).astype(np.uint8)
+                cam_binary = (_cam_r >= 0.5).astype(np.uint8)
+                intersection = int((cam_binary & sam_binary).sum())
+                union = int((cam_binary | sam_binary).sum())
+                saliency_sam3_iou = intersection / union if union > 0 else 0.0
+                print(f"[explainability] GradCAM++/SAM3 IoU = {saliency_sam3_iou:.3f}")
+            except Exception as e:
+                print(f"[explainability] IoU computation failed: {e}")
+
         return {
             "explainability_result": paths,
+            "saliency_sam3_iou": saliency_sam3_iou,
             "routing_path": state["routing_path"] + ["explainability"],
         }
 
@@ -273,6 +320,63 @@ def human_review_node(state: NeuroimagingState) -> dict:
         ),
         "routing_path": state["routing_path"] + ["human_review"],
     }
+
+def make_verification_node(agent):
+    """
+    Factory: returns a verification node that runs MedGemma post-hoc against the
+    Grad-CAM++ saliency map. No-ops gracefully when explainability was not run.
+    """
+
+    def verification_node(state: NeuroimagingState) -> dict:
+        saliency_paths = state.get("explainability_result") or {}
+        gradcam_path = saliency_paths.get("gradcam_pp")
+
+        if not gradcam_path:
+            return {"verification_result": None}
+
+        cnn_result = state.get("classification_result") or {}
+        verification = agent.verify_cnn_prediction(
+            original_image_path=state["image_path"],
+            saliency_image_path=gradcam_path,
+            cnn_result=cnn_result,
+        )
+
+        current_conf = state.get("final_confidence", cnn_result.get("confidence", 0.5))
+        if not verification.agreement:
+            adjusted_conf = min(current_conf, VERIFICATION_DISAGREEMENT_CONFIDENCE_CAP)
+            human_review = True
+            print(
+                f"[verification] MedGemma disagrees with CNN — "
+                f"confidence capped {current_conf:.3f}→{adjusted_conf:.3f}, "
+                f"flagging for human review. "
+                f"Alternative: {verification.alternative_diagnosis}"
+            )
+        else:
+            adjusted_conf = current_conf
+            human_review = state.get("requires_human_review", False)
+
+        return {
+            "final_confidence": adjusted_conf,
+            "requires_human_review": human_review,
+            "verification_result": verification.model_dump(),
+        }
+
+    return verification_node
+
+
+def make_fhir_node(output_dir: str):
+    """Factory: returns a FHIR serialisation node that writes to output_dir/fhir/."""
+
+    def fhir_node(state: NeuroimagingState) -> dict:
+        from pipeline.fhir_output import build_diagnostic_report
+
+        report = build_diagnostic_report(
+            dict(state),
+            output_dir=f"{output_dir}/fhir",
+        )
+        return {"fhir_report": report}
+
+    return fhir_node
 
 
 # ── Edge condition ─────────────────────────────────────────────────────────────

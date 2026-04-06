@@ -50,12 +50,15 @@ class NeuroimagingState(TypedDict):
     classification_result: Optional[ClassificationResult]
     biomedclip_result: Optional[BiomedCLIPResult]
     explainability_result: Optional[dict]  # saliency map paths keyed by method name
+    saliency_sam3_iou: Optional[float]    # IoU between GradCAM++ heatmap and SAM3 mask
 
     # ── Final output ──────────────────────────────────────────────────────────
     final_report: Optional[str]
     final_predicted_class: Optional[str]
     final_confidence: float
     requires_human_review: bool
+    verification_result: Optional[dict]  # MedGemma vs CNN agreement check
+    fhir_report: Optional[dict]          # FHIR R4 DiagnosticReport resource
 
     # ── Diagnostics ───────────────────────────────────────────────────────────
     routing_path: list  # Ordered list of nodes visited, for evaluation
@@ -79,9 +82,12 @@ def initial_state(
         classification_result=None,
         biomedclip_result=None,
         explainability_result=None,
+        saliency_sam3_iou=None,
         final_report=None,
         final_predicted_class=None,
         final_confidence=0.0,
         requires_human_review=False,
+        verification_result=None,
+        fhir_report=None,
         routing_path=[],
     )

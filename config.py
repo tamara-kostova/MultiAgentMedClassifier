@@ -92,6 +92,19 @@ class ModelConfig:
     # backbone is loaded by build_sam3_image_model, not a raw checkpoint file)
     sam3_checkpoint: str | None = None
 
+    # ── Post-hoc temperature scaling (Guo et al., 2017) ─────────────────────
+    # Fitted via TemperatureScaler.fit() on a held-out validation set.
+    # T > 1.0 → model was over-confident; T < 1.0 → under-confident.
+    # Default 1.0 = no calibration (raw softmax).
+    cnn_temperatures: dict = field(
+        default_factory=lambda: {
+            "binary_tumor": 1.0,
+            "multiclass_tumor": 1.0,
+            "ms": 1.0,
+            "stroke": 1.0,
+        }
+    )
+
     # ── Device ────────────────────────────────────────────────────────────────
     device: str = field(
         default_factory=lambda: "cuda" if torch.cuda.is_available() else "cpu"
@@ -100,9 +113,17 @@ class ModelConfig:
 
 @dataclass
 class RoutingConfig:
+    # Tasks for which SAM3 segmentation is valid.
+    # The linear probe was trained on BraTS 2021 (tumor only) — MS and stroke probes
+    # performed poorly and should not be used.
+    sam3_eligible_tasks: tuple = ("binary_tumor", "multiclass_tumor")
+
     # Force SAM3 segmentation on every non-normal case, regardless of confidence.
     # Useful when MedGemma is overconfident and never falls below sam3_threshold.
     always_run_sam3: bool = False
+    # Force BiomedCLIP on every case, regardless of confidence or diagnosis_name.
+    # Useful when MedGemma is overconfident and never falls below biomedclip_rerank_threshold.
+    always_run_biomedclip: bool = False
     # Confidence below this → route to SAM3 segmentation-guided path
     sam3_threshold: float = 0.70
     # Confidence below this → flag for human review
@@ -111,6 +132,8 @@ class RoutingConfig:
     biomedclip_rerank_threshold: float = 0.65
     # Max JSON parse retries for MedGemma output
     max_parse_retries: int = 3
+    # IoU between GradCAM++ heatmap and SAM3 mask below this → confidence penalty
+    low_iou_penalty_threshold: float = 0.3
 
 
 @dataclass

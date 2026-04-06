@@ -234,7 +234,9 @@ class CNNClassifier:
         tensor = self._transform(image).unsqueeze(0).to(self.device)
 
         logits = model(tensor)
-        probs = torch.softmax(logits, dim=1)[0].cpu().numpy()
+        temperature = float(self.model_cfg.cnn_temperatures.get(task, 1.0))
+        calibrated_logits = logits / temperature
+        probs = torch.softmax(calibrated_logits, dim=1)[0].cpu().numpy()
 
         predicted_idx = int(np.argmax(probs))
         class_names = CLASS_NAMES[task]
@@ -243,6 +245,8 @@ class CNNClassifier:
             "predicted_class": class_names[predicted_idx],
             "confidence": float(probs[predicted_idx]),
             "all_probs": {name: float(p) for name, p in zip(class_names, probs)},
+            "temperature": temperature,
+            "task": task,
         }
 
     def get_model_and_classes(self, task: str):

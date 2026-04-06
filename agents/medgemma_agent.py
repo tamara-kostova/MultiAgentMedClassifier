@@ -81,6 +81,18 @@ class RoutingDecision(BaseModel):
             raise ValueError(f"routing_decision must be one of {valid}")
         return v
 
+class VerificationResult(BaseModel):
+    agreement: bool
+    saliency_plausible: bool
+    alternative_diagnosis: Optional[str]
+    verification_confidence: float
+    reasoning: str
+
+    @field_validator("verification_confidence", mode="before")
+    @classmethod
+    def clamp(cls, v):
+        return max(0.0, min(1.0, float(v)))
+
 
 def diagnosis_to_routing(
     dx: MedicalDiagnosis, routing_cfg: RoutingConfig
@@ -102,19 +114,22 @@ def diagnosis_to_routing(
     if conf < routing_cfg.human_review_threshold:
         decision = "human_review"
         reasoning = f"Diagnosis confidence {conf:.2f} is below threshold {routing_cfg.human_review_threshold}."
+    elif routing_cfg.always_run_biomedclip:
+        decision = "biomedclip"
+        reasoning = "BiomedCLIP forced on; bypassing confidence-based routing."
     elif routing_cfg.always_run_sam3 and name not in ("normal", ""):
         decision = "sam3_then_cnn"
         reasoning = (
             "SAM3 forced on for all non-normal cases; bypassing confidence-based routing."
         )
-    elif conf < routing_cfg.sam3_threshold and name not in ("normal", ""):
-        decision = "sam3_then_cnn"
-        reasoning = f"Confidence {conf:.2f} is ambiguous; SAM3 spatial cues may help."
     elif name == "tumor" and conf < routing_cfg.biomedclip_rerank_threshold:
         decision = "biomedclip"
         reasoning = (
             f"Tumor subtype ({pathology}) may benefit from vision-language re-ranking."
         )
+    elif conf < routing_cfg.sam3_threshold and name not in ("normal", ""):
+        decision = "sam3_then_cnn"
+        reasoning = f"Confidence {conf:.2f} is ambiguous; SAM3 spatial cues may help."
     else:
         decision = "cnn_direct"
         reasoning = f"Confidence {conf:.2f} sufficient for direct CNN classification."
@@ -130,29 +145,79 @@ def diagnosis_to_routing(
 
 # ── Report prompt ─────────────────────────────────────────────────────────────
 
-REPORT_PROMPT_TEMPLATE = """You are a neuroimaging AI assistant generating a structured triage report. Summarize the following findings concisely for clinical review.
+REPORT_PROMPT_TEMPLATE = """You are a radiologist synthesizing multi-tool AI pipeline findings into a final report.
 
+Pipeline outputs (use these to inform your diagnosis):
 Task: {task}
-Routing path used: {routing_path}
-MedGemma initial diagnosis:
+Route: {routing_path}
+
+MedGemma triage diagnosis:
 {medgemma_dx}
 
-CNN classification result:
+CNN classification:
 {cnn_result}
 
-SAM3 segmentation result:
+SAM3 segmentation:
 {sam3_result}
 
-BiomedCLIP similarity result:
+BiomedCLIP re-ranking:
 {biomedclip_result}
 
-Generate a brief structured report with:
-1. Primary finding
-2. Confidence assessment
-3. Recommended next step
-4. Any flags or caveats
+Verification result (MedGemma vs CNN agreement):
+{verification_result}
 
-Keep it under 150 words. Do not make definitive diagnoses — this is a triage aid only."""
+Spatial alignment — GradCAM++ ∩ SAM3 mask IoU: {saliency_iou}
+(IoU < 0.3 suggests the CNN attended to background rather than the lesion)
+
+Your response MUST contain exactly two sections in this order:
+
+FINDINGS:
+1. Primary finding: <one sentence>
+2. Confidence assessment: <one sentence>
+3. Recommended next step: <one sentence>
+4. Flags/caveats: <one sentence>
+
+STRUCTURED DIAGNOSIS:
+{{
+  "modality": "<MRI|CT|null>",
+  "specialized_sequence": "<FLAIR|T1|T2|T1C+|null>",
+  "plane": "<axial|sagittal|coronal|null>",
+  "diagnosis_name": "<tumor|stroke|multiple sclerosis|normal|other abnormalities|null>",
+  "diagnosis_detailed": "<glioma|meningioma|pituitary_tumor|carcinoma|germinoma|granuloma|medulloblastoma|neurocytoma|papilloma|schwannoma|tuberculoma|ischemic|hemorrhagic|null>",
+  "icd10_code": "<ICD-10 or null>",
+  "severity_score": <float 0.0-1.0 or null>,
+  "diagnosis_confidence": <float 0.0-1.0>,
+  "severity_confidence": <float 0.0-1.0>
+}}
+
+Rules:
+- Keep FINDINGS under 100 words. Do not make definitive diagnoses — this is a triage aid only.
+- For STRUCTURED DIAGNOSIS: derive diagnosis_name and diagnosis_detailed primarily from CNN/BiomedCLIP predicted_class; set diagnosis_confidence to the highest-confidence tool result; derive modality/sequence/plane from the image and MedGemma triage.
+- Output no text outside these two sections."""
+
+VERIFICATION_PROMPT_TEMPLATE = """You are a senior neuroradiologist reviewing an AI classification.
+
+Original image has been classified by a CNN with the following result:
+  Task:             {task}
+  Predicted class:  {predicted_class}
+  CNN confidence:   {confidence:.1%}
+  Calibration T:    {temperature:.3f}  (>1.0 means model was over-confident at training time)
+
+The saliency map (Grad-CAM++) is shown overlaid on the scan in the second image.
+
+Assess:
+1. Does the saliency map highlight a plausible lesion region for this diagnosis?
+2. Is the predicted class consistent with the imaging features visible?
+3. If you disagree, what is the most likely alternative diagnosis?
+
+Respond in JSON only:
+{{
+  "agreement": true | false,
+  "saliency_plausible": true | false,
+  "alternative_diagnosis": "<string or null>",
+  "verification_confidence": <0.0–1.0>,
+  "reasoning": "<one sentence>"
+}}"""
 
 
 # ── Agent class ───────────────────────────────────────────────────────────────
@@ -230,6 +295,8 @@ class MedGemmaAgent:
         cnn_result: Optional[dict],
         sam3_result: Optional[dict],
         biomedclip_result: Optional[dict],
+        verification_result: Optional[dict] = None,
+        saliency_iou: Optional[float] = None,
     ) -> str:
         def fmt(d) -> str:
             if d is None:
@@ -238,6 +305,8 @@ class MedGemmaAgent:
                 return json.dumps(d.model_dump(), indent=2)
             return json.dumps(d, indent=2)
 
+        iou_str = f"{saliency_iou:.3f}" if saliency_iou is not None else "Not computed."
+
         prompt = REPORT_PROMPT_TEMPLATE.format(
             task=task,
             routing_path=" → ".join(routing_path),
@@ -245,9 +314,21 @@ class MedGemmaAgent:
             cnn_result=fmt(cnn_result),
             sam3_result=fmt(sam3_result),
             biomedclip_result=fmt(biomedclip_result),
+            verification_result=fmt(verification_result),
+            saliency_iou=iou_str,
         )
         image = Image.open(image_path).convert("RGB")
-        return self._generate(image, prompt, max_new_tokens=300)
+        raw = self._generate(image, prompt, max_new_tokens=600)
+        # Soft-validate the JSON block and pretty-print it in place
+        try:
+            dx = self._parse_diagnosis(raw)
+            match = re.search(r"\{.*\}", raw, re.DOTALL)
+            if match:
+                before = raw[: match.start()].rstrip()
+                return f"{before}\n\n{json.dumps(dx.model_dump(), indent=2)}"
+        except (json.JSONDecodeError, ValueError):
+            pass
+        return raw
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
@@ -321,3 +402,57 @@ class MedGemmaAgent:
         if not match:
             raise json.JSONDecodeError("No JSON object found", text, 0)
         return MedicalDiagnosis(**json.loads(match.group()))
+
+    def verify_cnn_prediction(
+        self,
+        original_image_path: str,
+        saliency_image_path: str,
+        cnn_result: dict,
+    ) -> VerificationResult:
+        """
+        Post-hoc verification: MedGemma reviews the CNN label against the saliency map.
+        Returns a VerificationResult — disagreement should elevate requires_human_review.
+        """
+        prompt = VERIFICATION_PROMPT_TEMPLATE.format(
+            task=cnn_result.get("task", "unknown"),
+            predicted_class=cnn_result["predicted_class"],
+            confidence=cnn_result["confidence"],
+            temperature=cnn_result.get("temperature", 1.0),
+        )
+
+        original  = Image.open(original_image_path).convert("RGB")
+        saliency  = Image.open(saliency_image_path).convert("RGB")
+
+        # Two-image turn: original scan + saliency overlay
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image",  "image": original},
+                    {"type": "image",  "image": saliency},
+                    {"type": "text",   "text": prompt},
+                ],
+            }
+        ]
+        inputs = self.processor.apply_chat_template(
+            messages, add_generation_prompt=True,
+            tokenize=True, return_dict=True, return_tensors="pt",
+        ).to(self.device)
+
+        with torch.no_grad():
+            output_ids = self.model.generate(
+                **inputs, max_new_tokens=300, do_sample=False, temperature=1.0
+            )
+
+        n_input   = inputs["input_ids"].shape[-1]
+        raw       = self.processor.decode(output_ids[0][n_input:], skip_special_tokens=True).strip()
+        raw       = re.sub(r"```(?:json)?\s*", "", raw).strip().rstrip("`")
+        match     = re.search(r"\{.*\}", raw, re.DOTALL)
+        if not match:
+            # Verification failed to parse — treat as non-committal agreement
+            return VerificationResult(
+                agreement=True, saliency_plausible=True,
+                alternative_diagnosis=None, verification_confidence=0.5,
+                reasoning="Verification parse failed — defaulting to CNN prediction.",
+            )
+        return VerificationResult(**json.loads(match.group()))

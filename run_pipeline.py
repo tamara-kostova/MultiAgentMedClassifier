@@ -24,6 +24,7 @@ Checkpoints:
 """
 
 import argparse
+import json
 from pathlib import Path
 
 from config import DEFAULT_CONFIG, ModelConfig, PipelineConfig, RoutingConfig
@@ -83,6 +84,22 @@ def parse_args():
         action="store_true",
         help="Force SAM3 routing on every non-normal case, regardless of confidence",
     )
+    p.add_argument(
+        "--always_run_biomedclip",
+        action="store_true",
+        help="Force BiomedCLIP routing on every case, regardless of confidence",
+    )
+
+    # Calibration
+    p.add_argument(
+        "--calibration_file",
+        type=str,
+        default=None,
+        help=(
+            'JSON file with per-task temperatures, e.g. {"binary_tumor": 1.3, "ms": 0.9}. '
+            "Fitted via TemperatureScaler.fit() on a held-out validation set."
+        ),
+    )
 
     # Explainability
     p.add_argument(
@@ -110,15 +127,26 @@ def build_config(args) -> PipelineConfig:
         {task: path for task, path in overrides.items() if path is not None}
     )
 
+    temperatures = default_model_cfg.cnn_temperatures.copy()
+    if args.calibration_file:
+        cal_path = Path(args.calibration_file)
+        if cal_path.exists():
+            temperatures.update(json.loads(cal_path.read_text()))
+            print(f"[calibration] Loaded temperatures from {cal_path}: {temperatures}")
+        else:
+            print(f"[calibration] File not found: {cal_path} — using T=1.0 defaults")
+
     model_cfg = ModelConfig(
         cnn_checkpoints=cnn_checkpoints,
         sam3_linear_probe_checkpoint=(
             args.sam3_probe or default_model_cfg.sam3_linear_probe_checkpoint
         ),
         sam3_bpe_path=args.sam3_bpe_path or default_model_cfg.sam3_bpe_path,
+        cnn_temperatures=temperatures,
     )
     routing_cfg = RoutingConfig(
         always_run_sam3=args.always_run_sam3,
+        always_run_biomedclip=args.always_run_biomedclip,
         sam3_threshold=args.sam3_threshold,
         human_review_threshold=args.human_threshold,
     )
