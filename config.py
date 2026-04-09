@@ -5,6 +5,7 @@ Adjust model checkpoint paths and thresholds before running.
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional
 
 import torch
 
@@ -145,6 +146,34 @@ class PreprocessConfig:
 
 
 @dataclass
+class MonitoringConfig:
+    """MLOps monitoring configuration. All monitoring is opt-in via enabled=True."""
+    enabled: bool = False
+    db_path: str = "monitoring/predictions.db"
+    log_dir: str = "monitoring/logs"
+    reports_dir: str = "monitoring/reports"
+
+    # Input validation
+    validate_inputs: bool = True
+    # "warn" → log and continue; "abort" → raise ValueError and skip inference
+    validation_fail_action: str = "warn"
+
+    # Alerting
+    enable_alerts: bool = True
+    alert_window_size: int = 50          # evaluate alerts over last N inferences
+    alert_human_review_threshold: float = 0.30
+    alert_confidence_threshold: float = 0.60
+    alert_ece_threshold: float = 0.15
+
+    # Optional notifications (leave None to disable)
+    webhook_url: Optional[str] = None
+
+    # Drift detection
+    reference_csv: Optional[str] = None  # path to baseline CSV (e.g. outputs/eval/all_predictions.csv)
+    drift_window_size: int = 100         # run drift check every N inferences
+
+
+@dataclass
 class PipelineConfig:
     model: ModelConfig = field(default_factory=ModelConfig)
     routing: RoutingConfig = field(default_factory=RoutingConfig)
@@ -153,6 +182,7 @@ class PipelineConfig:
     # Set True to generate Grad-CAM++ and Integrated Gradients after CNN classification.
     # Adds ~1-2s per image but produces saliency PNGs in outputs/explainability/.
     generate_explainability: bool = False
+    monitoring: MonitoringConfig = field(default_factory=MonitoringConfig)
 
 
 # Module-level default (import and mutate as needed)

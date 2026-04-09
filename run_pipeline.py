@@ -25,9 +25,10 @@ Checkpoints:
 
 import argparse
 import json
+import time
 from pathlib import Path
 
-from config import DEFAULT_CONFIG, ModelConfig, PipelineConfig, RoutingConfig
+from config import DEFAULT_CONFIG, ModelConfig, MonitoringConfig, PipelineConfig, RoutingConfig
 from eval.evaluate import compare_configurations, load_test_split, run_single
 from pipeline.graph import build_pipeline
 from pipeline.state import initial_state
@@ -111,6 +112,30 @@ def parse_args():
     # Output
     p.add_argument("--output_dir", type=str, default="outputs")
 
+    # Monitoring
+    p.add_argument(
+        "--monitor",
+        action="store_true",
+        help="Enable MLOps monitoring layer (structured logging, SQLite, alerts)",
+    )
+    p.add_argument(
+        "--monitor_db",
+        type=str,
+        default="monitoring/predictions.db",
+        help="Path to SQLite database for monitoring",
+    )
+    p.add_argument(
+        "--reference_csv",
+        type=str,
+        default=None,
+        help="Path to reference CSV for Evidently drift detection (e.g. outputs/eval/all_predictions.csv)",
+    )
+    p.add_argument(
+        "--drift",
+        action="store_true",
+        help="Run drift detection report against reference CSV and exit",
+    )
+
     return p.parse_args()
 
 
@@ -150,18 +175,65 @@ def build_config(args) -> PipelineConfig:
         sam3_threshold=args.sam3_threshold,
         human_review_threshold=args.human_threshold,
     )
+    monitoring_cfg = MonitoringConfig(
+        enabled=args.monitor,
+        db_path=args.monitor_db,
+        reference_csv=args.reference_csv,
+    )
     return PipelineConfig(
         model=model_cfg,
         routing=routing_cfg,
         output_dir=args.output_dir,
         generate_explainability=args.generate_explainability,
+        monitoring=monitoring_cfg,
     )
+
+
+def run_single_monitored(app, image_path: str, task: str, cfg: PipelineConfig,
+                         verbose: bool = True, save_output: bool = True):
+    """
+    Wraps run_single() with the monitoring context when cfg.monitoring.enabled is True.
+    Falls back to plain run_single() when monitoring is disabled.
+    """
+    if not cfg.monitoring.enabled:
+        return run_single(
+            app, image_path, task,
+            verbose=verbose, output_dir=cfg.output_dir, save_output=save_output,
+        )
+
+    from monitoring import MonitoringContext
+
+    ctx = MonitoringContext(cfg.monitoring)
+    state_before = {"image_path": image_path, "task": task}
+
+    with ctx.run(image_path, task):
+        t0 = time.perf_counter()
+        result = run_single(
+            app, image_path, task,
+            verbose=verbose, output_dir=cfg.output_dir, save_output=save_output,
+        )
+        latency_s = time.perf_counter() - t0
+
+    ctx.finalize(state_before, result)
+    return result
 
 
 def main():
     args = parse_args()
     cfg = build_config(args)
     Path(cfg.output_dir).mkdir(parents=True, exist_ok=True)
+
+    # ── Drift-only mode ───────────────────────────────────────────────────────
+    if args.drift:
+        from monitoring.drift import _cli as drift_cli
+        import sys
+        # Patch sys.argv for the drift CLI
+        drift_args = ["drift", "--db", args.monitor_db]
+        if args.reference_csv:
+            drift_args += ["--reference", args.reference_csv]
+        sys.argv = drift_args
+        drift_cli()
+        return
 
     app = build_pipeline(cfg)
 
@@ -170,12 +242,12 @@ def main():
         if not args.task:
             print("Error: --task is required with --image")
             return
-        run_single(
+        run_single_monitored(
             app,
             args.image,
             args.task,
+            cfg=cfg,
             verbose=True,
-            output_dir=cfg.output_dir,
             save_output=True,
         )
 
