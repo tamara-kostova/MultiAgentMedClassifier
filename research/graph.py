@@ -30,6 +30,7 @@ from research.analysis import (
     ablation_summary,
     calibration_by_routing_path,
     load_sweep_predictions,
+    per_class_failure_breakdown,
     routing_distribution,
     sensitivity_specificity_table,
 )
@@ -114,6 +115,7 @@ def analyze_results(state: ResearchState) -> dict:
     if not preds_df.empty:
         analysis["routing_distribution"] = routing_distribution(preds_df)
         analysis["calibration_by_path"] = calibration_by_routing_path(preds_df)
+        analysis["per_class_failures"] = per_class_failure_breakdown(preds_df)
 
     return {"analysis": analysis}
 
@@ -141,6 +143,7 @@ def write_report(state: ResearchState) -> dict:
         ("ablation",                "## Ablation Study"),
         ("routing_distribution",    "## Routing Distribution"),
         ("calibration_by_path",     "## Calibration by Routing Path"),
+        ("per_class_failures",      "## Per-Class Failure Breakdown"),
     ]
 
     for key, heading in _TABLE_ORDER:

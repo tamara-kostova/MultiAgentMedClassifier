@@ -5,17 +5,18 @@ Each function takes DataFrames produced by runner.py and returns a
 thesis-ready DataFrame (suitable for to_markdown() or to_latex()).
 
 Functions:
-  routing_distribution       — routing decision counts/pct per task & experiment
+  routing_distribution         — routing decision counts/pct per task & experiment
   sensitivity_specificity_table — threshold → specificity + sam3_rate + accuracy
   calibration_by_routing_path  — ECE per routing path per task & experiment
   ablation_summary             — component contribution pivot table
+  per_class_failure_breakdown  — per-class precision/recall/F1 and error rates
   load_sweep_predictions       — merge all_predictions.csv from all sweep subdirs
 """
 
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
+from sklearn.metrics import precision_recall_fscore_support
 
 from eval.evaluate import compute_ece
 
@@ -120,6 +121,65 @@ def calibration_by_routing_path(preds_df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows).sort_values(
         ["experiment_id", "task", "routing_path"]
     ).reset_index(drop=True)
+
+
+def per_class_failure_breakdown(preds_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Per-class precision, recall, F1, and confusion details per (experiment_id, task).
+
+    For each true class, shows:
+      - n            : total samples of that class
+      - correct      : correctly predicted
+      - precision    : TP / (TP + FP)
+      - recall       : TP / (TP + FN)
+      - f1           : harmonic mean
+      - top_confusion: the most common wrong prediction (and its count)
+
+    Useful for answering: which tumor subtypes benefit most from SAM3/BiomedCLIP,
+    and where does the pipeline still systematically fail?
+    """
+    rows = []
+    for (exp_id, task), grp in preds_df.groupby(["experiment_id", "task"]):
+        y_true = grp["true_label"].tolist()
+        y_pred = grp["predicted_class"].tolist()
+        classes = sorted(set(y_true))
+
+        prec, rec, f1, _ = precision_recall_fscore_support(
+            y_true, y_pred, labels=classes, average=None, zero_division=0
+        )
+
+        for i, cls in enumerate(classes):
+            cls_mask = grp["true_label"] == cls
+            cls_grp = grp[cls_mask]
+            n = len(cls_grp)
+            correct = (cls_grp["predicted_class"] == cls).sum()
+
+            # Most common misclassification
+            wrong = cls_grp.loc[cls_grp["predicted_class"] != cls, "predicted_class"]
+            if len(wrong) > 0:
+                top_conf_cls = wrong.value_counts().index[0]
+                top_conf_n = wrong.value_counts().iloc[0]
+                top_confusion = f"{top_conf_cls} ({top_conf_n})"
+            else:
+                top_confusion = "—"
+
+            rows.append({
+                "experiment_id": exp_id,
+                "task": task,
+                "true_class": cls,
+                "n": n,
+                "correct": int(correct),
+                "precision": round(float(prec[i]), 3),
+                "recall": round(float(rec[i]), 3),
+                "f1": round(float(f1[i]), 3),
+                "top_confusion": top_confusion,
+            })
+
+    return (
+        pd.DataFrame(rows)
+        .sort_values(["experiment_id", "task", "true_class"])
+        .reset_index(drop=True)
+    )
 
 
 def ablation_summary(summary_df: pd.DataFrame) -> pd.DataFrame:
