@@ -48,25 +48,34 @@ from pipeline.nodes import (
 from pipeline.state import NeuroimagingState
 
 
-def build_pipeline(cfg: PipelineConfig = None):
+def load_agents(cfg: PipelineConfig) -> tuple:
     """
-    Instantiate all agents/tools and assemble the LangGraph pipeline.
+    Load all model agents from cfg. Returns (medgemma, cnn, sam3, clip).
 
-    Returns a compiled LangGraph app ready for .invoke() or .stream().
-
-    Example:
-        app = build_pipeline()
-        result = app.invoke(initial_state("scan.png", "binary_tumor"))
+    Separating loading from assembly lets the research sweep reuse agents
+    across many RoutingConfig variants without reloading model weights.
     """
-    cfg = cfg or DEFAULT_CONFIG
-
-    # ── Load models (once, at graph-build time) ───────────────────────────────
-    print("=== Building multi-agent neuroimaging pipeline ===")
+    print("=== Loading pipeline agents ===")
     medgemma = MedGemmaAgent(cfg.model, cfg.routing)
     cnn = CNNClassifier(cfg.model, cfg.preprocess)
     sam3 = SAM3Tool(cfg.model, output_dir=f"{cfg.output_dir}/segmentation")
     clip = BiomedCLIPTool(cfg.model, cfg.preprocess)
+    return medgemma, cnn, sam3, clip
 
+
+def assemble_pipeline(
+    medgemma: MedGemmaAgent,
+    cnn: CNNClassifier,
+    sam3: SAM3Tool,
+    clip: BiomedCLIPTool,
+    cfg: PipelineConfig,
+):
+    """
+    Assemble and compile the LangGraph pipeline from pre-loaded agents.
+
+    Called by build_pipeline() and by the research sweep runner to rebuild
+    the graph with a different RoutingConfig without reloading model weights.
+    """
     # ── Create node functions via factories ───────────────────────────────────
     triage_fn = make_triage_node(medgemma, cfg.routing)
     cnn_fn = make_cnn_node(cnn)
@@ -90,10 +99,8 @@ def build_pipeline(cfg: PipelineConfig = None):
     workflow.add_node("fhir_output", fhir_fn)
     workflow.add_node("human_review", human_review_node)
 
-    # Entry point
     workflow.set_entry_point("triage")
 
-    # Conditional routing from triage
     workflow.add_conditional_edges(
         "triage",
         route_from_triage,
@@ -105,10 +112,8 @@ def build_pipeline(cfg: PipelineConfig = None):
         },
     )
 
-    # SAM3 always feeds into CNN-with-mask (MedGemma gets overlay; CNN gets original)
     workflow.add_edge("sam3_segment", "cnn_with_mask")
 
-    # Optional explainability node between CNN classification and verification
     if cfg.generate_explainability:
         explainability_fn = make_explainability_node(
             cnn, output_dir=f"{cfg.output_dir}/explainability"
@@ -123,12 +128,26 @@ def build_pipeline(cfg: PipelineConfig = None):
 
     workflow.add_edge("biomedclip", "verification")
     workflow.add_edge("verification", "report")
-
-    # Terminal edges
     workflow.add_edge("report", "fhir_output")
     workflow.add_edge("human_review", "fhir_output")
     workflow.add_edge("fhir_output", END)
 
-    app = workflow.compile()
+    return workflow.compile()
+
+
+def build_pipeline(cfg: PipelineConfig = None):
+    """
+    Instantiate all agents/tools and assemble the LangGraph pipeline.
+
+    Returns a compiled LangGraph app ready for .invoke() or .stream().
+
+    Example:
+        app = build_pipeline()
+        result = app.invoke(initial_state("scan.png", "binary_tumor"))
+    """
+    cfg = cfg or DEFAULT_CONFIG
+    print("=== Building multi-agent neuroimaging pipeline ===")
+    agents = load_agents(cfg)
+    app = assemble_pipeline(*agents, cfg)
     print("=== Pipeline ready ===")
     return app
