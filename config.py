@@ -59,7 +59,7 @@ class ModelConfig:
     )
 
     # ── BiomedCLIP linear probe checkpoints (None → zero-shot mode) ──────────
-    # Probe heads trained on layer-18 features
+    # Probe heads from 18_layer_fusion_benchmark.py (layer-6 or concat fusion of layers 2,6,11)
     biomedclip_probe_checkpoints: dict = field(
         default_factory=lambda: {
             "binary_tumor": None,
