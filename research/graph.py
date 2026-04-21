@@ -29,7 +29,9 @@ from eval.evaluate import load_test_split
 from research.analysis import (
     ablation_summary,
     calibration_by_routing_path,
+    calibration_per_task,
     load_sweep_predictions,
+    medgemma_agreement_analysis,
     per_class_failure_breakdown,
     routing_distribution,
     sensitivity_specificity_table,
@@ -115,6 +117,8 @@ def analyze_results(state: ResearchState) -> dict:
     if not preds_df.empty:
         analysis["routing_distribution"] = routing_distribution(preds_df)
         analysis["calibration_by_path"] = calibration_by_routing_path(preds_df)
+        analysis["medgemma_agreement"] = medgemma_agreement_analysis(preds_df)
+        analysis["calibration_per_task"] = calibration_per_task(preds_df)
         analysis["per_class_failures"] = per_class_failure_breakdown(preds_df)
 
     return {"analysis": analysis}
@@ -143,6 +147,8 @@ def write_report(state: ResearchState) -> dict:
         ("ablation",                "## Ablation Study"),
         ("routing_distribution",    "## Routing Distribution"),
         ("calibration_by_path",     "## Calibration by Routing Path"),
+        ("medgemma_agreement",      "## MedGemma–CNN Agreement Analysis"),
+        ("calibration_per_task",    "## Calibration per Task"),
         ("per_class_failures",      "## Per-Class Failure Breakdown"),
     ]
 

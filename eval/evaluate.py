@@ -217,6 +217,10 @@ class PipelineEvaluator:
                     ),
                     "latency_s": latency,
                     "config": self.config_name,
+                    "medgemma_class": (
+                        final_state["medgemma_diagnosis"].get("diagnosis_name")
+                        if final_state.get("medgemma_diagnosis") else None
+                    ),
                 }
             )
 

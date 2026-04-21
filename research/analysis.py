@@ -182,6 +182,102 @@ def per_class_failure_breakdown(preds_df: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+def medgemma_agreement_analysis(preds_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Agreement between MedGemma's triage diagnosis and the CNN/final prediction.
+
+    Requires 'medgemma_class' column (added to all_predictions.csv after eval/evaluate.py
+    was updated). Returns an empty DataFrame gracefully if the column is absent.
+
+    For each (experiment_id, task):
+      - n_agree / n_disagree : sample counts
+      - agree_pct            : % where MedGemma class == predicted_class
+      - accuracy_when_agree  : fraction correct when they agree
+      - accuracy_when_disagree: fraction correct when they disagree (min 5 samples)
+      - disagree_delta       : accuracy_when_disagree - accuracy_when_agree
+                               (negative = disagreement predicts errors → supports human review)
+    """
+    if "medgemma_class" not in preds_df.columns:
+        return pd.DataFrame()
+
+    df = preds_df.dropna(subset=["medgemma_class"]).copy()
+    df["_mg"] = df["medgemma_class"].str.strip().str.lower()
+    df["_pred"] = df["predicted_class"].str.strip().str.lower()
+    df["_agree"] = df["_mg"] == df["_pred"]
+    df["_correct"] = df["true_label"].str.strip().str.lower() == df["_pred"]
+
+    rows = []
+    for (exp_id, task), grp in df.groupby(["experiment_id", "task"]):
+        agree = grp[grp["_agree"]]
+        disagree = grp[~grp["_agree"]]
+
+        n_agree = len(agree)
+        n_disagree = len(disagree)
+        total = len(grp)
+
+        acc_agree = float(agree["_correct"].mean()) if n_agree > 0 else float("nan")
+        acc_disagree = (
+            float(disagree["_correct"].mean()) if n_disagree >= 5 else float("nan")
+        )
+        delta = (
+            round(acc_disagree - acc_agree, 4)
+            if not (acc_agree != acc_agree or acc_disagree != acc_disagree)
+            else float("nan")
+        )
+
+        rows.append({
+            "experiment_id": exp_id,
+            "task": task,
+            "n_agree": n_agree,
+            "n_disagree": n_disagree,
+            "agree_pct": round(n_agree / total * 100, 1) if total > 0 else float("nan"),
+            "accuracy_when_agree": round(acc_agree, 4),
+            "accuracy_when_disagree": round(acc_disagree, 4),
+            "disagree_delta": round(delta, 4) if delta == delta else float("nan"),
+        })
+
+    return (
+        pd.DataFrame(rows)
+        .sort_values(["experiment_id", "task"])
+        .reset_index(drop=True)
+    )
+
+
+def calibration_per_task(preds_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    ECE and overconfidence per (experiment_id, task), collapsed across routing paths.
+
+    Requires at least 10 samples per cell.
+
+    Columns: n, mean_confidence, accuracy, ece, overconfidence
+    overconfidence = mean_confidence - accuracy (positive = model too confident)
+
+    Use this to show the MS calibration problem: high confidence despite low accuracy.
+    """
+    rows = []
+    for (exp_id, task), grp in preds_df.groupby(["experiment_id", "task"]):
+        if len(grp) < 10:
+            continue
+        confs = grp["final_confidence"].values
+        correct = (grp["true_label"] == grp["predicted_class"]).values.astype(float)
+        mean_conf = float(confs.mean())
+        acc = float(correct.mean())
+        rows.append({
+            "experiment_id": exp_id,
+            "task": task,
+            "n": len(grp),
+            "mean_confidence": round(mean_conf, 4),
+            "accuracy": round(acc, 4),
+            "ece": round(compute_ece(confs, correct), 4),
+            "overconfidence": round(mean_conf - acc, 4),
+        })
+    return (
+        pd.DataFrame(rows)
+        .sort_values(["experiment_id", "task"])
+        .reset_index(drop=True)
+    )
+
+
 def ablation_summary(summary_df: pd.DataFrame) -> pd.DataFrame:
     """
     Component contribution table: all metrics per (experiment_id, task).
