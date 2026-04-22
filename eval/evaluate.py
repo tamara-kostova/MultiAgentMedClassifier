@@ -395,6 +395,19 @@ def run_single(
     state = initial_state(image_path, task)
     result = app.invoke(state)
     route = " → ".join(result.get("routing_path", []))
+    files_lines = []
+    seg = result.get("segmentation_result") or {}
+    if seg.get("mask_path"):
+        files_lines.append(f"  segmentation mask:   {seg['mask_path']}")
+    if seg.get("guided_image_path"):
+        files_lines.append(f"  segmentation guided: {seg['guided_image_path']}")
+    expl = result.get("explainability_result") or {}
+    if expl.get("gradcam_pp"):
+        files_lines.append(f"  gradcam++:           {expl['gradcam_pp']}")
+    if expl.get("integrated_gradients"):
+        files_lines.append(f"  integrated grads:    {expl['integrated_gradients']}")
+    files_section = ("\nGenerated files:\n" + "\n".join(files_lines)) if files_lines else ""
+
     summary = (
         f"{'='*60}\n"
         f"Image: {image_path}\n"
@@ -404,6 +417,7 @@ def run_single(
         f"(conf={result.get('final_confidence', 0):.3f})\n"
         f"{'⚠  FLAGGED FOR HUMAN REVIEW\\n' if result.get('requires_human_review') else ''}"
         f"\nReport:\n{result.get('final_report', 'N/A')}\n"
+        f"{files_section}\n"
         f"{'='*60}"
     )
 
