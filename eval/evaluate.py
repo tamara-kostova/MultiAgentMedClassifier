@@ -391,22 +391,58 @@ def run_single(
     output_dir: str | None = None,
     save_output: bool = False,
 ) -> NeuroimagingState:
-    """Run the pipeline on a single image and optionally print the report."""
     state = initial_state(image_path, task)
     result = app.invoke(state)
     route = " → ".join(result.get("routing_path", []))
+    # ── Generated files section ───────────────────────────────────────
     files_lines = []
+
     seg = result.get("segmentation_result") or {}
     if seg.get("mask_path"):
         files_lines.append(f"  segmentation mask:   {seg['mask_path']}")
     if seg.get("guided_image_path"):
         files_lines.append(f"  segmentation guided: {seg['guided_image_path']}")
+
     expl = result.get("explainability_result") or {}
     if expl.get("gradcam_pp"):
         files_lines.append(f"  gradcam++:           {expl['gradcam_pp']}")
     if expl.get("integrated_gradients"):
         files_lines.append(f"  integrated grads:    {expl['integrated_gradients']}")
+
+    fhir = result.get("fhir_report") or {}
+    files_lines = []
+
+    fhir_bundle_id = fhir.get("id")
+    if fhir_bundle_id:
+        files_lines.append(f"  FHIR Bundle:           {fhir_bundle_id}")
+
+    fhir_report_id = None
+    for entry in fhir.get("entry", []):
+        resource = entry.get("resource", {})
+        if resource.get("resourceType") == "DiagnosticReport":
+            fhir_report_id = resource.get("id")
+            break
+
+    if fhir_report_id:
+        files_lines.append(f"  FHIR DiagnosticReport: {fhir_report_id}")
+
+    if output_dir and fhir_report_id:
+        fhir_dir = Path(output_dir) / "fhir"
+
+        fhir_path = next(
+            (str(p) for p in fhir_dir.glob(f"fhir_report-{fhir_report_id[:5]}*.json")),
+            None,
+        )
+        if fhir_path:
+            files_lines.append(f"  FHIR JSON:             {fhir_path}")
+
     files_section = ("\nGenerated files:\n" + "\n".join(files_lines)) if files_lines else ""
+
+    # ── IoU line ──────────────────────────────────────────────────────
+    iou = result.get("saliency_sam3_iou")
+    iou_line = f"GradCAM++/SAM3 IoU: {iou:.3f}\n" if iou is not None else ""
+
+    review_flag = '⚠  FLAGGED FOR HUMAN REVIEW\n' if result.get('requires_human_review') else ''
 
     summary = (
         f"{'='*60}\n"
@@ -415,7 +451,8 @@ def run_single(
         f"Route: {route}\n"
         f"Prediction: {result.get('final_predicted_class')} "
         f"(conf={result.get('final_confidence', 0):.3f})\n"
-        f"{'⚠  FLAGGED FOR HUMAN REVIEW\\n' if result.get('requires_human_review') else ''}"
+        f"{iou_line}"
+        f"{review_flag}"
         f"\nReport:\n{result.get('final_report', 'N/A')}\n"
         f"{files_section}\n"
         f"{'='*60}"

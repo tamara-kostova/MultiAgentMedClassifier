@@ -186,6 +186,13 @@ class BiomedCLIPTool:
         features = self._extract_layer_features(image_tensor)
         image_feat = features[MIDDLE_LAYER]  # (1, 768), already L2-normalised
 
+        visual = self.model.visual
+        if hasattr(visual, "head") and hasattr(visual.head, "proj"):
+            proj = visual.head.proj  # nn.Linear(768, 512)
+            image_feat = F.normalize(proj(image_feat).float(), dim=-1)
+        elif hasattr(visual, "proj") and visual.proj is not None:
+            image_feat = F.normalize((image_feat @ visual.proj).float(), dim=-1)
+
         tokens = self.tokenizer(labels).to(self.clip_device)
         text_feats = F.normalize(self.model.encode_text(tokens).float(), dim=-1)
 

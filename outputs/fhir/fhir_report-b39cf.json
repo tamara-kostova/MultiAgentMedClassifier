@@ -1,0 +1,185 @@
+{
+  "resourceType": "Bundle",
+  "id": "bundle-73961d6c",
+  "type": "collection",
+  "timestamp": "2026-04-22T19:37:49.219807+00:00",
+  "entry": [
+    {
+      "resource": {
+        "resourceType": "Patient",
+        "id": "patient-844adcc0",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/StructureDefinition/Patient"
+          ]
+        }
+      }
+    },
+    {
+      "resource": {
+        "resourceType": "ImagingStudy",
+        "id": "study-59cd8112",
+        "status": "available",
+        "subject": {
+          "reference": "Patient/patient-844adcc0"
+        },
+        "modality": [
+          {
+            "system": "http://dicom.nema.org/resources/ontology/DCM",
+            "code": "MR"
+          }
+        ],
+        "description": "data/processed/2/209.jpg"
+      }
+    },
+    {
+      "resource": {
+        "resourceType": "Observation",
+        "id": "obs-c3642db2",
+        "status": "preliminary",
+        "code": {
+          "coding": [
+            {
+              "system": "http://loinc.org",
+              "code": "84892-9",
+              "display": "AI Interpretation"
+            }
+          ],
+          "text": "AI Neuroimaging Classification"
+        },
+        "subject": {
+          "reference": "Patient/patient-844adcc0"
+        },
+        "derivedFrom": [
+          {
+            "reference": "ImagingStudy/study-59cd8112"
+          }
+        ],
+        "valueCodeableConcept": {
+          "coding": [
+            {
+              "system": "http://snomed.info/sct",
+              "code": "17621005",
+              "display": "normal"
+            }
+          ]
+        },
+        "component": [
+          {
+            "code": {
+              "text": "AI confidence"
+            },
+            "valueDecimal": 0.0
+          },
+          {
+            "code": {
+              "text": "Calibration temperature (T)"
+            },
+            "valueDecimal": 1.0
+          },
+          {
+            "code": {
+              "text": "GradCAM++ / SAM3 mask IoU"
+            },
+            "valueDecimal": 0.0
+          }
+        ]
+      }
+    },
+    {
+      "resource": {
+        "resourceType": "DiagnosticReport",
+        "id": "report-b39cffd2",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/StructureDefinition/DiagnosticReport"
+          ]
+        },
+        "status": "preliminary",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/v2-0074",
+                "code": "RAD",
+                "display": "Radiology"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://loinc.org",
+              "code": "24590-2",
+              "display": "MRI Brain"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/patient-844adcc0"
+        },
+        "imagingStudy": [
+          {
+            "reference": "ImagingStudy/study-59cd8112"
+          }
+        ],
+        "result": [
+          {
+            "reference": "Observation/obs-c3642db2"
+          }
+        ],
+        "effectiveDateTime": "2026-04-22T19:37:49.219797+00:00",
+        "conclusion": "FINDINGS:\n1. A large, irregular mass is present in the right frontal lobe, consistent with a tumor.\n2. The CNN classification is highly confident in the presence of a tumor.\n3. Further evaluation with contrast-enhanced MRI is recommended.\n4. The SAM3 segmentation suggests a possible lesion, but the CNN classification is more reliable.\n\nSTRUCTURED DIAGNOSIS:\n\n{\n  \"modality\": \"MRI\",\n  \"specialized_sequence\": \"T1\",\n  \"plane\": \"axial\",\n  \"diagnosis_name\": \"tumor\",\n  \"diagnosis_detailed\": \"glioma\",\n  \"icd10_code\": \"C71\",\n  \"severity_score\": 0.75,\n  \"diagnosis_confidence\": 0.95,\n  \"severity_confidence\": 0.9\n}",
+        "conclusionCode": [
+          {
+            "coding": [
+              {
+                "system": "http://snomed.info/sct",
+                "code": "17621005",
+                "display": "normal"
+              }
+            ]
+          }
+        ],
+        "extension": [
+          {
+            "url": "https://example.org/fhir/StructureDefinition/ai-routing-path",
+            "valueString": "triage \u2192 sam3_segment \u2192 cnn_with_mask \u2192 explainability \u2192 report"
+          },
+          {
+            "url": "https://example.org/fhir/StructureDefinition/ai-requires-human-review",
+            "valueBoolean": true
+          },
+          {
+            "url": "https://example.org/fhir/StructureDefinition/ai-verification",
+            "extension": [
+              {
+                "url": "agreement",
+                "valueBoolean": true
+              },
+              {
+                "url": "reasoning",
+                "valueString": "The saliency map highlights a region of increased signal intensity in the right frontal lobe, consistent with a potential lesion."
+              },
+              {
+                "url": "alternative",
+                "valueString": ""
+              }
+            ]
+          }
+        ],
+        "presentedForm": [
+          {
+            "url": "file://outputs/explainability/gradcam_pp_08dca6f7.png",
+            "title": "gradcam_pp"
+          },
+          {
+            "url": "file://outputs/explainability/ig_08dca6f7.png",
+            "title": "integrated_gradients"
+          }
+        ]
+      }
+    }
+  ]
+}
