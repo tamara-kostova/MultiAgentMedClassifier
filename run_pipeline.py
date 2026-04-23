@@ -16,6 +16,10 @@ Usage examples:
   python run_pipeline.py --image image.jpg --task binary_tumor \
     --cnn_binary_tumor checkpoints/densenet169_binary_tumor.pt
 
+  # With few-shot examples (one image per class prepended to MedGemma triage):
+  python run_pipeline.py --image image.jpg --task binary_tumor \
+    --few_shot --few_shot_data_dir /path/to/data
+
 Checkpoints:
   CNN checkpoints should be PyTorch state dicts saved as:
       torch.save({"model_state_dict": model.state_dict(), ...}, path)
@@ -101,6 +105,19 @@ def parse_args():
         ),
     )
 
+    # Few-shot examples for MedGemma triage
+    p.add_argument(
+        "--few_shot",
+        action="store_true",
+        help="Prepend one example image per class to MedGemma's triage prompt",
+    )
+    p.add_argument(
+        "--few_shot_data_dir",
+        type=str,
+        default=None,
+        help="Root directory for resolving few_shot_examples.csv image paths",
+    )
+
     # Explainability
     p.add_argument(
         "--generate_explainability",
@@ -143,6 +160,8 @@ def build_config(args) -> PipelineConfig:
         ),
         sam3_bpe_path=args.sam3_bpe_path or default_model_cfg.sam3_bpe_path,
         cnn_temperatures=temperatures,
+        use_few_shot=args.few_shot,
+        few_shot_data_dir=args.few_shot_data_dir,
     )
     routing_cfg = RoutingConfig(
         always_run_sam3=args.always_run_sam3,

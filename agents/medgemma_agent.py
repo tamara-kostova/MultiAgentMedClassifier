@@ -262,6 +262,15 @@ class MedGemmaAgent:
         self.model.eval()
         print("[MedGemmaAgent] Model loaded.")
 
+        if self.model_cfg.use_few_shot:
+            from agents.few_shot_loader import load_few_shot_examples
+            self._few_shot_examples = load_few_shot_examples(
+                data_dir=self.model_cfg.few_shot_data_dir,
+            )
+            print(f"[MedGemmaAgent] Loaded {len(self._few_shot_examples)} few-shot examples.")
+        else:
+            self._few_shot_examples = None
+
     # ── Primary triage (raw image) ────────────────────────────────────────────
 
     def diagnose(self, image_path: str) -> tuple[MedicalDiagnosis, RoutingDecision]:
@@ -336,7 +345,7 @@ class MedGemmaAgent:
         self, image: Image.Image, prompt: str
     ) -> MedicalDiagnosis:
         """Run a diagnostic prompt and parse the JSON output with retries."""
-        raw = self._generate(image, prompt)
+        raw = self._generate(image, prompt, few_shot=self._few_shot_examples)
         for attempt in range(self.routing_cfg.max_parse_retries):
             try:
                 return self._parse_diagnosis(raw)
@@ -346,7 +355,7 @@ class MedGemmaAgent:
                         f"Your previous output was not valid JSON: {raw[:200]}\n"
                         f"Error: {e}\nOutput ONLY valid JSON matching the schema."
                     )
-                    raw = self._generate(image, prompt + "\n" + fix)
+                    raw = self._generate(image, prompt + "\n" + fix, few_shot=self._few_shot_examples)
                 else:
                     print(
                         f"[MedGemmaAgent] JSON parse failed after {self.routing_cfg.max_parse_retries} attempts. \n Raw output: {raw}\n Error: {e}\n Returning default diagnosis with low confidence."
@@ -364,9 +373,24 @@ class MedGemmaAgent:
                     )
 
     def _generate(
-        self, image: Image.Image, text_prompt: str, max_new_tokens: int = 2064
+        self,
+        image: Image.Image,
+        text_prompt: str,
+        max_new_tokens: int = 2064,
+        few_shot: list[tuple[Image.Image, str]] | None = None,
     ) -> str:
-        messages = [
+        messages = []
+        if few_shot:
+            for ex_img, ex_json in few_shot:
+                messages.append({
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "image": ex_img},
+                        {"type": "text",  "text": text_prompt},
+                    ],
+                })
+                messages.append({"role": "assistant", "content": ex_json})
+        messages.append(
             {
                 "role": "user",
                 "content": [
@@ -374,7 +398,7 @@ class MedGemmaAgent:
                     {"type": "text", "text": text_prompt},
                 ],
             }
-        ]
+        )
         inputs = self.processor.apply_chat_template(
             messages,
             add_generation_prompt=True,

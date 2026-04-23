@@ -5,6 +5,7 @@ Adjust model checkpoint paths and thresholds before running.
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional
 
 import torch
 
@@ -82,6 +83,13 @@ class ModelConfig:
     # Set to True on GPUs with <12 GB VRAM (4-bit NF4 via bitsandbytes).
     # Set to False on GPUs with >=12 GB VRAM (bfloat16, faster inference).
     use_4bit_quantization: bool = False
+
+    # ── Few-shot examples ─────────────────────────────────────────────────────
+    # When True, MedGemmaAgent prepends one real image + expected JSON per class
+    # as prior conversation turns before the triage query image.
+    use_few_shot: bool = False
+    # Root directory for resolving relative paths in few_shot_examples.csv.
+    few_shot_data_dir: Optional[str] = None
 
     # ── BiomedCLIP model ID ───────────────────────────────────────────────────
     biomedclip_model_id: str = (

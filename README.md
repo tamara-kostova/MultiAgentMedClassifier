@@ -156,6 +156,14 @@ python run_pipeline.py --image scan.png --task binary_tumor \
 python run_pipeline.py --image scan.png --task binary_tumor --always_run_sam3
 ```
 
+**With few-shot examples for MedGemma triage:**
+
+```bash
+python run_pipeline.py --image scan.png --task binary_tumor \
+  --few_shot --few_shot_data_dir /path/to/data
+```
+Prepends one real example image + expected JSON per class (tumor, stroke, multiple sclerosis, normal, other abnormalities) as prior conversation turns before the triage query. Examples are drawn from `few_shot_examples.csv`; missing images are skipped gracefully. `--few_shot_data_dir` is the root directory against which the CSV's relative image paths are resolved.
+
 **Custom checkpoints / thresholds:**
 
 ```bash
