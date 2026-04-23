@@ -136,7 +136,7 @@ def make_biomedclip_node(biomedclip_tool, routing_cfg: RoutingConfig = None):
     return biomedclip_node
 
 
-def make_report_node(agent, routing_cfg: RoutingConfig = None):
+def make_report_node(agent, routing_cfg: RoutingConfig = None, skip_report: bool = False):
     """
     MedGemma report generation node.
     Synthesizes all tool outputs into a structured triage report.
@@ -148,18 +148,21 @@ def make_report_node(agent, routing_cfg: RoutingConfig = None):
     def report_node(state: NeuroimagingState) -> dict:
         saliency_iou = state.get("saliency_sam3_iou")
 
-        report = agent.generate_report(
-            image_path=state["image_path"],
-            task=state["task"],
-            routing_path=state["routing_path"],
-            medgemma_dx=state.get("medgemma_bbox_diagnosis")
-            or state.get("medgemma_diagnosis"),
-            cnn_result=state.get("classification_result"),
-            sam3_result=state.get("segmentation_result"),
-            biomedclip_result=state.get("biomedclip_result"),
-            verification_result=state.get("verification_result"),
-            saliency_iou=saliency_iou,
-        )
+        if skip_report:
+            report = "[report skipped in eval mode]"
+        else:
+            report = agent.generate_report(
+                image_path=state["image_path"],
+                task=state["task"],
+                routing_path=state["routing_path"],
+                medgemma_dx=state.get("medgemma_bbox_diagnosis")
+                or state.get("medgemma_diagnosis"),
+                cnn_result=state.get("classification_result"),
+                sam3_result=state.get("segmentation_result"),
+                biomedclip_result=state.get("biomedclip_result"),
+                verification_result=state.get("verification_result"),
+                saliency_iou=saliency_iou,
+            )
 
         # Determine final prediction: prefer CNN result, fall back to BiomedCLIP
         cnn = state.get("classification_result")

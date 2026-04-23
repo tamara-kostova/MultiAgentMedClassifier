@@ -73,7 +73,7 @@ def build_pipeline(cfg: PipelineConfig = None):
     sam3_fn = make_sam3_node(sam3)
     cnn_with_mask_fn = make_cnn_with_mask_node(cnn, agent=medgemma)
     biomedclip_fn = make_biomedclip_node(clip, cfg.routing)
-    report_fn = make_report_node(medgemma, cfg.routing)
+    report_fn = make_report_node(medgemma, cfg.routing, skip_report=cfg.skip_report)
     verification_fn = make_verification_node(medgemma)
     fhir_fn = make_fhir_node(cfg.output_dir)
 

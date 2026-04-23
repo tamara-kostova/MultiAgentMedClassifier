@@ -118,6 +118,13 @@ def parse_args():
         help="Root directory for resolving few_shot_examples.csv image paths",
     )
 
+    # Eval optimisation
+    p.add_argument(
+        "--skip_report",
+        action="store_true",
+        help="Skip MedGemma report generation (eval mode — saves ~5–9 s/image)",
+    )
+
     # Explainability
     p.add_argument(
         "--generate_explainability",
@@ -163,6 +170,7 @@ def build_config(args) -> PipelineConfig:
         use_few_shot=args.few_shot,
         few_shot_data_dir=args.few_shot_data_dir,
     )
+
     routing_cfg = RoutingConfig(
         always_run_sam3=args.always_run_sam3,
         always_run_biomedclip=args.always_run_biomedclip,
@@ -174,6 +182,7 @@ def build_config(args) -> PipelineConfig:
         routing=routing_cfg,
         output_dir=args.output_dir,
         generate_explainability=args.generate_explainability,
+        skip_report=args.skip_report,
     )
 
 

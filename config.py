@@ -161,6 +161,9 @@ class PipelineConfig:
     # Set True to generate Grad-CAM++ and Integrated Gradients after CNN classification.
     # Adds ~1-2s per image but produces saliency PNGs in outputs/explainability/.
     generate_explainability: bool = False
+    # Set True to skip MedGemma report generation during evaluation.
+    # Saves ~5–9 s/image with no effect on accuracy/F1/ECE metrics.
+    skip_report: bool = False
 
 
 # Module-level default (import and mutate as needed)
