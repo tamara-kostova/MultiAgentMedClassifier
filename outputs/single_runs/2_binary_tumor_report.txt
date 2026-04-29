@@ -1,0 +1,38 @@
+============================================================
+Image: data/processed/1/2.jpg
+Task:  binary_tumor
+Route: triage → sam3_segment → cnn_with_mask → explainability → report
+Prediction: tumor (conf=0.011)
+GradCAM++/SAM3 IoU: 0.003
+⚠  FLAGGED FOR HUMAN REVIEW
+
+Report:
+FINDINGS:
+1. A large, irregular mass is present in the left temporal lobe, consistent with a tumor.
+2. The CNN classification and MedGemma triage provide high confidence in the presence of a tumor.
+3. Further evaluation with contrast-enhanced MRI is recommended.
+4. The SAM3 segmentation shows a low IoU, suggesting the CNN may have attended to background rather than the lesion.
+
+STRUCTURED DIAGNOSIS:
+
+{
+  "modality": "MRI",
+  "specialized_sequence": "T2",
+  "plane": "axial",
+  "diagnosis_name": "tumor",
+  "diagnosis_detailed": "glioma",
+  "icd10_code": "C71",
+  "severity_score": 0.8,
+  "diagnosis_confidence": 0.95,
+  "severity_confidence": 0.9
+}
+
+Generated files:
+  segmentation mask:   outputs/segmentation/mask_21398723.png
+  segmentation guided: outputs/segmentation/guided_21398723.png
+  gradcam++:           outputs/explainability/gradcam_pp_21126c11.png
+  integrated grads:    outputs/explainability/ig_21126c11.png
+  FHIR DiagnosticReport: report-a027e928
+  FHIR Bundle:           bundle-48373b41
+  FHIR JSON:             outputs/fhir/fhir_report-0ace6.json
+============================================================

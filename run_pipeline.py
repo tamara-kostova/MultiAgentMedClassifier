@@ -3,7 +3,7 @@ Entry point for the multi-agent neuroimaging pipeline.
 
 Usage examples:
   # Single image:
-  python run_pipeline.py --image image.jpg --task binary_tumor
+  python run_pipeline.py --image data/processed/1/2.jpg --task binary_tumor
 
   # Full evaluation across all datasets:
   python run_pipeline.py --eval \
@@ -15,6 +15,10 @@ Usage examples:
   # With custom CNN checkpoints:
   python run_pipeline.py --image image.jpg --task binary_tumor \
     --cnn_binary_tumor checkpoints/densenet169_binary_tumor.pt
+
+  # With few-shot examples (one image per class prepended to MedGemma triage):
+  python run_pipeline.py --image image.jpg --task binary_tumor \
+    --few_shot --few_shot_data_dir /path/to/data
 
 Checkpoints:
   CNN checkpoints should be PyTorch state dicts saved as:
@@ -101,6 +105,26 @@ def parse_args():
         ),
     )
 
+    # Few-shot examples for MedGemma triage
+    p.add_argument(
+        "--few_shot",
+        action="store_true",
+        help="Prepend one example image per class to MedGemma's triage prompt",
+    )
+    p.add_argument(
+        "--few_shot_data_dir",
+        type=str,
+        default=None,
+        help="Root directory for resolving few_shot_examples.csv image paths",
+    )
+
+    # Eval optimisation
+    p.add_argument(
+        "--skip_report",
+        action="store_true",
+        help="Skip MedGemma report generation (eval mode — saves ~5–9 s/image)",
+    )
+
     # Explainability
     p.add_argument(
         "--generate_explainability",
@@ -143,7 +167,10 @@ def build_config(args) -> PipelineConfig:
         ),
         sam3_bpe_path=args.sam3_bpe_path or default_model_cfg.sam3_bpe_path,
         cnn_temperatures=temperatures,
+        use_few_shot=args.few_shot,
+        few_shot_data_dir=args.few_shot_data_dir,
     )
+
     routing_cfg = RoutingConfig(
         always_run_sam3=args.always_run_sam3,
         always_run_biomedclip=args.always_run_biomedclip,
@@ -155,6 +182,7 @@ def build_config(args) -> PipelineConfig:
         routing=routing_cfg,
         output_dir=args.output_dir,
         generate_explainability=args.generate_explainability,
+        skip_report=args.skip_report,
     )
 
 

@@ -1,0 +1,38 @@
+============================================================
+Image: data/processed/2/209.jpg
+Task:  binary_tumor
+Route: triage → sam3_segment → cnn_with_mask → explainability → report
+Prediction: normal (conf=0.000)
+GradCAM++/SAM3 IoU: 0.000
+⚠  FLAGGED FOR HUMAN REVIEW
+
+Report:
+FINDINGS:
+1. A large, irregular mass is present in the right frontal lobe, consistent with a tumor.
+2. The CNN classification is highly confident in the presence of a tumor.
+3. Further evaluation with contrast-enhanced MRI is recommended.
+4. The SAM3 segmentation suggests a possible lesion, but the CNN classification is more reliable.
+
+STRUCTURED DIAGNOSIS:
+
+{
+  "modality": "MRI",
+  "specialized_sequence": "T1",
+  "plane": "axial",
+  "diagnosis_name": "tumor",
+  "diagnosis_detailed": "glioma",
+  "icd10_code": "C71",
+  "severity_score": 0.75,
+  "diagnosis_confidence": 0.95,
+  "severity_confidence": 0.9
+}
+
+Generated files:
+  segmentation mask:   outputs/segmentation/mask_38a96dfc.png
+  segmentation guided: outputs/segmentation/guided_38a96dfc.png
+  gradcam++:           outputs/explainability/gradcam_pp_08dca6f7.png
+  integrated grads:    outputs/explainability/ig_08dca6f7.png
+  FHIR DiagnosticReport: report-b39cffd2
+  FHIR Bundle:           bundle-73961d6c
+  FHIR JSON:             outputs/fhir/fhir_report-0ace6.json
+============================================================

@@ -219,4 +219,5 @@ checkpoints/
 memory/
 *.jpg
 *.jpeg
+data/
 papers/

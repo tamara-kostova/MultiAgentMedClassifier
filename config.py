@@ -5,6 +5,7 @@ Adjust model checkpoint paths and thresholds before running.
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional
 
 import torch
 
@@ -83,6 +84,13 @@ class ModelConfig:
     # Set to False on GPUs with >=12 GB VRAM (bfloat16, faster inference).
     use_4bit_quantization: bool = False
 
+    # ── Few-shot examples ─────────────────────────────────────────────────────
+    # When True, MedGemmaAgent prepends one real image + expected JSON per class
+    # as prior conversation turns before the triage query image.
+    use_few_shot: bool = False
+    # Root directory for resolving relative paths in few_shot_examples.csv.
+    few_shot_data_dir: Optional[str] = None
+
     # ── BiomedCLIP model ID ───────────────────────────────────────────────────
     biomedclip_model_id: str = (
         "hf-hub:microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224"
@@ -153,6 +161,9 @@ class PipelineConfig:
     # Set True to generate Grad-CAM++ and Integrated Gradients after CNN classification.
     # Adds ~1-2s per image but produces saliency PNGs in outputs/explainability/.
     generate_explainability: bool = False
+    # Set True to skip MedGemma report generation during evaluation.
+    # Saves ~5–9 s/image with no effect on accuracy/F1/ECE metrics.
+    skip_report: bool = False
 
 
 # Module-level default (import and mutate as needed)
