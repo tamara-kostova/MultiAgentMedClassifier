@@ -60,8 +60,16 @@ def _build_patient(patient_id: str) -> dict:
 
 def _build_imaging_study(study_id: str, patient_id: str, state: dict) -> dict:
     """ImagingStudy representing the MRI/CT scan."""
-    modality_code = DICOM_MODALITY.get(
-        (state.get("medgemma_diagnosis") or {}).get("modality", "MRI"), "MR"
+    metadata = state.get("metadata") or {}
+    modality_value = metadata.get("modality") or (state.get("medgemma_diagnosis") or {}).get(
+        "modality", "MRI"
+    )
+    modality_code = DICOM_MODALITY.get(modality_value, modality_value if modality_value in {"MR", "CT"} else "MR")
+    description = (
+        metadata.get("study_description")
+        or metadata.get("series_description")
+        or metadata.get("source_image_path")
+        or state.get("image_path", "unknown")
     )
     return {
         "resourceType": "ImagingStudy",
@@ -72,7 +80,7 @@ def _build_imaging_study(study_id: str, patient_id: str, state: dict) -> dict:
             "system": "http://dicom.nema.org/resources/ontology/DCM",
             "code": modality_code,
         }],
-        "description": state.get("image_path", "unknown"),
+        "description": description,
     }
 
 

@@ -2,8 +2,11 @@
 Entry point for the multi-agent neuroimaging pipeline.
 
 Usage examples:
-  # Single image:
+  # Single image (PNG/JPEG or a single DICOM slice):
   python run_pipeline.py --image image.jpg --task binary_tumor
+
+  # DICOM series directory (selects the middle slice automatically):
+  python run_pipeline.py --image path/to/dicom_series --task binary_tumor
 
   # Full evaluation across all datasets:
   python run_pipeline.py --eval \
@@ -34,7 +37,6 @@ from pathlib import Path
 from config import DEFAULT_CONFIG, ModelConfig, PipelineConfig, RoutingConfig
 from eval.evaluate import compare_configurations, load_test_split, run_single
 from pipeline.graph import build_pipeline
-from pipeline.state import initial_state
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -45,7 +47,11 @@ def parse_args():
 
     # Mode
     mode = p.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--image", type=str, help="Path to a single input image")
+    mode.add_argument(
+        "--image",
+        type=str,
+        help="Path to PNG/JPEG, a single DICOM file, or a directory of DICOM slices",
+    )
     mode.add_argument("--eval", action="store_true", help="Run full evaluation")
 
     # Single image

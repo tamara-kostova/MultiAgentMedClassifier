@@ -151,6 +151,9 @@ Pipeline outputs (use these to inform your diagnosis):
 Task: {task}
 Route: {routing_path}
 
+Known scan metadata (DICOM/header context, if available):
+{metadata_context}
+
 MedGemma triage diagnosis:
 {medgemma_dx}
 
@@ -277,25 +280,35 @@ class MedGemmaAgent:
 
     # ── Primary triage (raw image) ────────────────────────────────────────────
 
-    def diagnose(self, image_path: str) -> tuple[MedicalDiagnosis, RoutingDecision]:
+    def diagnose(
+        self, image_path: str, metadata: Optional[dict] = None
+    ) -> tuple[MedicalDiagnosis, RoutingDecision]:
         """
         Run system_prompt.txt on the raw image.
         Returns (structured diagnosis, derived routing decision).
         """
         image = Image.open(image_path).convert("RGB")
-        dx = self._run_diagnostic_prompt(image, SYSTEM_PROMPT)
+        dx = self._run_diagnostic_prompt(
+            image,
+            self._prepend_metadata_context(SYSTEM_PROMPT, metadata),
+        )
         routing = diagnosis_to_routing(dx, self.routing_cfg)
         return dx, routing
 
     # ── SAM3-guided diagnosis (bbox overlay image) ────────────────────────────
 
-    def diagnose_with_bbox(self, guided_image_path: str) -> MedicalDiagnosis:
+    def diagnose_with_bbox(
+        self, guided_image_path: str, metadata: Optional[dict] = None
+    ) -> MedicalDiagnosis:
         """
         Run system_prompt_bbox.txt on the SAM3 bbox-overlay image.
         Used on the sam3_then_cnn path after segmentation.
         """
         image = Image.open(guided_image_path).convert("RGB")
-        return self._run_diagnostic_prompt(image, SYSTEM_PROMPT_BBOX)
+        return self._run_diagnostic_prompt(
+            image,
+            self._prepend_metadata_context(SYSTEM_PROMPT_BBOX, metadata),
+        )
 
     # ── Report generator ──────────────────────────────────────────────────────
 
@@ -311,6 +324,7 @@ class MedGemmaAgent:
         verification_result: Optional[dict] = None,
         saliency_iou: Optional[float] = None,
         atlas_enrichment: Optional[dict] = None,
+        metadata: Optional[dict] = None,
     ) -> str:
         def fmt(d) -> str:
             if d is None:
@@ -334,6 +348,7 @@ class MedGemmaAgent:
         prompt = REPORT_PROMPT_TEMPLATE.format(
             task=task,
             routing_path=" → ".join(routing_path),
+            metadata_context=self._format_metadata_context(metadata),
             medgemma_dx=fmt(medgemma_dx),
             cnn_result=fmt(cnn_result),
             sam3_result=fmt(sam3_result),
@@ -387,6 +402,46 @@ class MedGemmaAgent:
                         diagnosis_confidence=0.5,
                         severity_confidence=None,
                     )
+
+    def _prepend_metadata_context(self, prompt: str, metadata: Optional[dict]) -> str:
+        context = self._format_metadata_context(metadata)
+        if context == "Not available.":
+            return prompt
+        return (
+            "Known scan metadata (DICOM/header context; may be incomplete):\n"
+            f"{context}\n\n"
+            f"{prompt}"
+        )
+
+    @staticmethod
+    def _format_metadata_context(metadata: Optional[dict]) -> str:
+        if not metadata:
+            return "Not available."
+
+        fields = [
+            ("Modality", "modality"),
+            ("Series description", "series_description"),
+            ("Scanning sequence", "scanning_sequence"),
+            ("Sequence variant", "sequence_name"),
+            ("Field strength", "field_strength"),
+            ("Patient age", "patient_age"),
+            ("Patient sex", "patient_sex"),
+            ("Slice thickness (mm)", "slice_thickness_mm"),
+            ("Pixel spacing", "pixel_spacing"),
+            ("Body part", "body_part"),
+        ]
+        lines = []
+        for label, key in fields:
+            value = metadata.get(key)
+            if value in (None, "", [], {}):
+                continue
+            if key == "modality" and value == "MR":
+                value = "MRI"
+            if isinstance(value, (list, dict)):
+                value = json.dumps(value)
+            lines.append(f"- {label}: {value}")
+
+        return "\n".join(lines) if lines else "Not available."
 
     def _generate(
         self,

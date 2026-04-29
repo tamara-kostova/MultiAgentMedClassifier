@@ -35,7 +35,9 @@ def make_triage_node(agent, routing_cfg: RoutingConfig = None):
     cfg = routing_cfg or DEFAULT_CONFIG.routing
 
     def triage_node(state: NeuroimagingState) -> dict:
-        dx, routing = agent.diagnose(state["image_path"])
+        dx, routing = agent.diagnose(
+            state["image_path"], metadata=state.get("metadata")
+        )
 
         decision = routing.routing_decision
         reasoning = routing.reasoning
@@ -113,7 +115,9 @@ def make_cnn_with_mask_node(cnn_tool, agent=None):
                 if seg_valid and seg.get("guided_image_path")
                 else state["image_path"]
             )
-            bbox_dx = agent.diagnose_with_bbox(overlay_path)
+            bbox_dx = agent.diagnose_with_bbox(
+                overlay_path, metadata=state.get("metadata")
+            )
             updates["medgemma_bbox_diagnosis"] = bbox_dx.model_dump()
 
         return updates
@@ -164,6 +168,7 @@ def make_report_node(agent, routing_cfg: RoutingConfig = None, skip_report: bool
                 verification_result=state.get("verification_result"),
                 saliency_iou=saliency_iou,
                 atlas_enrichment=state.get("atlas_enrichment"),
+                metadata=state.get("metadata"),
             )
 
         # Determine final prediction: prefer CNN result, fall back to BiomedCLIP

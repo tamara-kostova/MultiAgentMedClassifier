@@ -124,11 +124,24 @@ The pipeline selects the checkpoint automatically based on `--task`.
 
 ## Usage
 
-**Single image:**
+**Single image (PNG/JPEG):**
 
 ```bash
 python run_pipeline.py --image scan.png --task binary_tumor
 ```
+
+**Single DICOM slice:**
+
+```bash
+python run_pipeline.py --image scan.dcm --task binary_tumor
+```
+
+**DICOM series directory:**
+
+```bash
+python run_pipeline.py --image /path/to/dicom_series --task binary_tumor
+```
+Raw DICOM inputs are converted to `outputs/preprocessed/*.png` before routing. For series inputs, the middle slice is selected as the representative 2D image and the chosen slice path is preserved in `metadata["dicom_path"]` for atlas enrichment.
 
 **With explainability (Grad-CAM++ + Integrated Gradients):**
 
@@ -218,6 +231,8 @@ Pass coordinate metadata at inference time:
 ```python
 initial_state("scan.png", "binary_tumor", metadata={"nifti_path": "scan.nii.gz"})
 ```
+
+If the main input itself is DICOM, `initial_state()` now injects `metadata["dicom_path"]` automatically after preprocessing the slice or series into a PNG.
 
 **Test the node standalone (without running the full pipeline):**
 ```bash
