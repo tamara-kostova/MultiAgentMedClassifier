@@ -205,6 +205,19 @@ def _build_diagnostic_report(
             ],
         })
 
+    atlas = state.get("atlas_enrichment")
+    if atlas:
+        report["extension"].append({
+            "url": "https://example.org/fhir/StructureDefinition/ebrains-atlas-assignment",
+            "extension": [
+                {"url": "parcellation",     "valueString":  "Julich-Brain 3.0"},
+                {"url": "assigned-region",  "valueString":  atlas.get("assigned_region", "")},
+                {"url": "hemisphere",       "valueString":  atlas.get("hemisphere", "")},
+                {"url": "mni-coordinates",  "valueString":  str(atlas.get("mni_coords", []))},
+                {"url": "top-candidates",   "valueString":  str(atlas.get("assignment_scores", [])[:3])},
+            ],
+        })
+
     saliency = state.get("explainability_result") or {}
     if saliency:
         report["presentedForm"] = [

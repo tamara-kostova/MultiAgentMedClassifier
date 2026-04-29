@@ -8,6 +8,7 @@ and returns a (partial) state dict with the fields it modifies.
 import uuid
 from pathlib import Path
 
+from agents.sibra_tool import SiibraAtlasTool
 import cv2
 import numpy as np
 import torchvision.transforms as T
@@ -162,6 +163,7 @@ def make_report_node(agent, routing_cfg: RoutingConfig = None, skip_report: bool
                 biomedclip_result=state.get("biomedclip_result"),
                 verification_result=state.get("verification_result"),
                 saliency_iou=saliency_iou,
+                atlas_enrichment=state.get("atlas_enrichment"),
             )
 
         # Determine final prediction: prefer CNN result, fall back to BiomedCLIP
@@ -392,3 +394,52 @@ def route_from_triage(state: NeuroimagingState) -> str:
     fall through to BiomedCLIP re-ranking.
     """
     return state["routing_decision"]
+
+def make_atlas_enrichment_node(siibra_tool: SiibraAtlasTool):
+    """
+    Runs after SAM3 segmentation (sam3_then_cnn path only).
+    Loads the SAM3 binary mask from disk, maps the lesion centroid to a
+    Julich-Brain region via siibra, and stores the result in atlas_enrichment.
+
+    Coordinate accuracy (best → worst):
+      NIfTI affine   — pass state["metadata"]["nifti_path"]
+      DICOM affine   — pass state["metadata"]["dicom_path"]
+      pixel fallback — approximate, axial centre slice only
+    """
+    def atlas_enrichment_node(state: NeuroimagingState) -> dict:
+        seg_result = state.get("segmentation_result")
+
+        if not seg_result or not seg_result.get("mask_path"):
+            return {
+                "atlas_enrichment": None,
+                "routing_path": state["routing_path"] + ["atlas_enrichment"],
+            }
+
+        mask = np.array(
+            Image.open(seg_result["mask_path"]).convert("L")
+        ) > 127  # binary uint8-like bool array
+
+        meta       = state.get("metadata") or {}
+        nifti_path = meta.get("nifti_path")
+        dicom_path = meta.get("dicom_path")
+
+        try:
+            atlas_result = siibra_tool.assign_lesion(
+                mask=mask.astype(np.uint8),
+                nifti_path=nifti_path,
+                dicom_path=dicom_path,
+            )
+            print(
+                f"[atlas_enrichment] lesion → {atlas_result['assigned_region']} "
+                f"({atlas_result['hemisphere']}) MNI {atlas_result['mni_coords']}"
+            )
+        except Exception as e:
+            print(f"[atlas_enrichment] siibra query failed: {e}")
+            atlas_result = None
+
+        return {
+            "atlas_enrichment": atlas_result,
+            "routing_path": state["routing_path"] + ["atlas_enrichment"],
+        }
+
+    return atlas_enrichment_node

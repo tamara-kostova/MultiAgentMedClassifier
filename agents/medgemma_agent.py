@@ -169,6 +169,10 @@ Verification result (MedGemma vs CNN agreement):
 Spatial alignment — GradCAM++ ∩ SAM3 mask IoU: {saliency_iou}
 (IoU < 0.3 suggests the CNN attended to background rather than the lesion)
 
+EBRAINS atlas assignment (Julich-Brain parcellation):
+{atlas_enrichment}
+(If available, use the assigned_region and hemisphere to contextualise the finding anatomically)
+
 Your response MUST contain exactly two sections in this order:
 
 FINDINGS:
@@ -306,6 +310,7 @@ class MedGemmaAgent:
         biomedclip_result: Optional[dict],
         verification_result: Optional[dict] = None,
         saliency_iou: Optional[float] = None,
+        atlas_enrichment: Optional[dict] = None,
     ) -> str:
         def fmt(d) -> str:
             if d is None:
@@ -316,6 +321,16 @@ class MedGemmaAgent:
 
         iou_str = f"{saliency_iou:.3f}" if saliency_iou is not None else "Not computed."
 
+        if atlas_enrichment:
+            atlas_str = (
+                f"Region: {atlas_enrichment.get('assigned_region', 'unassigned')} | "
+                f"Hemisphere: {atlas_enrichment.get('hemisphere', 'unknown')} | "
+                f"MNI: {atlas_enrichment.get('mni_coords', [])} | "
+                f"Top candidates: {atlas_enrichment.get('assignment_scores', [])[:3]}"
+            )
+        else:
+            atlas_str = "Not available (SAM3 path not taken or siibra query failed)."
+
         prompt = REPORT_PROMPT_TEMPLATE.format(
             task=task,
             routing_path=" → ".join(routing_path),
@@ -325,6 +340,7 @@ class MedGemmaAgent:
             biomedclip_result=fmt(biomedclip_result),
             verification_result=fmt(verification_result),
             saliency_iou=iou_str,
+            atlas_enrichment=atlas_str,
         )
         image = Image.open(image_path).convert("RGB")
         raw = self._generate(image, prompt, max_new_tokens=600)

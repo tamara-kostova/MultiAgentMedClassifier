@@ -45,6 +45,11 @@ seaborn>=0.12.0
 # FHIR output
 fhir.resources>=7.0.0
 
+# EBRAINS atlas (siibra)
+siibra>=1.0a4
+nibabel>=5.0.0
+pydicom>=2.4.0
+
 # Code quality
 black>=24.0.0
 isort>=5.13.0

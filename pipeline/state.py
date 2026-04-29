@@ -52,6 +52,9 @@ class NeuroimagingState(TypedDict):
     explainability_result: Optional[dict]  # saliency map paths keyed by method name
     saliency_sam3_iou: Optional[float]    # IoU between GradCAM++ heatmap and SAM3 mask
 
+    # ── Atlas enrichment (siibra) ─────────────────────────────────────────────
+    atlas_enrichment: Optional[dict]  # assigned_region, mni_coords, hemisphere, scores
+
     # ── Final output ──────────────────────────────────────────────────────────
     final_report: Optional[str]
     final_predicted_class: Optional[str]
@@ -88,6 +91,7 @@ def initial_state(
         final_confidence=0.0,
         requires_human_review=False,
         verification_result=None,
+        atlas_enrichment=None,
         fhir_report=None,
         routing_path=[],
     )

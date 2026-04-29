@@ -13,6 +13,7 @@ a LangGraph-based multi-agent pipeline for automated classification of neuroimag
 | `CNNClassifier` | VGG16 / DenseNet169 / ResNet101 | Task-specific classification |
 | `SAM3Tool` | SAM3 frozen backbone + linear probe | Lesion segmentation (Dice = 0.836) |
 | `BiomedCLIPTool` | microsoft/BiomedCLIP (layer 18) | Zero-shot re-ranking for ambiguous multiclass cases |
+| `SiibraAtlasTool` | EBRAINS Julich-Brain v2.9 | Anatomical region assignment via MNI152 coordinates |
 
 **Routing logic** (derived from MedGemma `diagnosis_confidence`):
 
@@ -53,7 +54,8 @@ MultiAgentMedClassifier/
 │   ├── medgemma_agent.py   # MedGemma: triage, bbox diagnosis, report
 │   ├── cnn_tool.py         # CNN classifier (VGG16 / DenseNet / ResNet)
 │   ├── sam3_tool.py        # SAM3 segmentation + linear probe head
-│   └── biomedclip_tool.py  # BiomedCLIP zero-shot / linear probe
+│   ├── biomedclip_tool.py  # BiomedCLIP zero-shot / linear probe
+│   └── sibra_tool.py       # EBRAINS siibra: lesion centroid → Julich-Brain region
 ├── pipeline/
 │   ├── graph.py            # LangGraph StateGraph assembly
 │   ├── nodes.py            # Node factory functions
@@ -69,9 +71,13 @@ MultiAgentMedClassifier/
 ├── prompts/
 │   ├── system_prompt.txt       # MedGemma radiologist persona + JSON schema
 │   └── system_prompt_bbox.txt  # Same schema, bbox-overlay context
+├── tests/
+│   └── test_atlas_enrichment.py  # Standalone test for atlas node on a single image
 ├── checkpoints/            # PyTorch state dicts: {arch}_{dataset}_final.pt
 ├── outputs/
 │   ├── explainability/     # Saliency maps: gradcam_pp_*.png, ig_*.png
+│   ├── segmentation/       # SAM3 binary masks (mask_*.png) and bbox overlays (guided_*.png)
+│   ├── fhir/               # FHIR R4 bundles: fhir_*.json
 │   └── eval/               # comparison_summary.csv
 ├── config.py               # Central config dataclasses
 ├── run_pipeline.py         # CLI entry point
@@ -192,6 +198,35 @@ The report is returned in `state["final_report"]` (plain text, ≤150 words). Th
 | `explainability_result` | Paths to `gradcam_pp_*.png` and `ig_*.png` (if enabled) |
 | `verification_result` | MedGemma post-hoc agreement check against Grad-CAM++ saliency map (if explainability enabled) |
 | `fhir_report` | FHIR R4 DiagnosticReport dict; saved to `outputs/fhir/fhir_<id>.json` |
+| `atlas_enrichment` | EBRAINS atlas assignment: `assigned_region`, `hemisphere`, `mni_coords`, `assignment_scores` (only on `sam3_then_cnn` path) |
+
+## Atlas Enrichment (EBRAINS / siibra)
+
+On the `sam3_then_cnn` path, after SAM3 produces a binary mask, the pipeline runs an optional anatomical assignment step using [siibra-python](https://siibra-python.readthedocs.io) and the [EBRAINS Julich-Brain Cytoarchitectonic Atlas v2.9](https://search.kg.ebrains.eu).
+
+The SAM3 mask centroid is mapped to MNI152 coordinates, which are then assigned to the nearest cytoarchitectonic region via a statistical probability map.
+
+**Coordinate accuracy (best → worst):**
+
+| Input | How it's used |
+|---|---|
+| `metadata["nifti_path"]` | NIfTI affine → exact MNI coords |
+| `metadata["dicom_path"]` | `ImagePositionPatient` + `PixelSpacing` → scanner-space coords (≈ MNI for pre-registered datasets) |
+| PNG only (default) | Pixel centroid normalised to MNI152 range; z locked to axial midplane (0 mm) |
+
+Pass coordinate metadata at inference time:
+```python
+initial_state("scan.png", "binary_tumor", metadata={"nifti_path": "scan.nii.gz"})
+```
+
+**Test the node standalone (without running the full pipeline):**
+```bash
+python tests/test_atlas_enrichment.py --image data/scan.png --mask outputs/segmentation/mask_abc123.png
+```
+
+The `atlas_enrichment` result flows into the MedGemma report prompt and is serialised as an `ebrains-atlas-assignment` extension in the FHIR bundle.
+
+**Note:** z=0.0 (axial midplane) is assumed when no NIfTI or DICOM is available. Region assignments are anatomically meaningful but spatially approximate. Scores are Julich-Brain probability map values; scores < 0.1 occur near region boundaries or at the midplane.
 
 ## Explainability Methods
 
