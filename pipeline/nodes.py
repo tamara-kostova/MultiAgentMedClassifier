@@ -29,31 +29,21 @@ VERIFICATION_DISAGREEMENT_CONFIDENCE_CAP = 0.55
 
 def make_triage_node(agent, routing_cfg: RoutingConfig = None):
     """
-    Factory: returns a triage node function that calls MedGemmaAgent.diagnose().
-    Runs system_prompt.txt → structured MedicalDiagnosis → derives routing decision.
+    Factory: returns an initial MedGemma triage node.
+    Runs system_prompt.txt for a first-pass impression that is later fused with
+    downstream specialist outputs.
     """
-    cfg = routing_cfg or DEFAULT_CONFIG.routing
-
     def triage_node(state: NeuroimagingState) -> dict:
         dx, routing = agent.diagnose(
             state["image_path"], metadata=state.get("metadata")
         )
 
-        decision = routing.routing_decision
-        reasoning = routing.reasoning
-
-        # SAM3 probe was trained on tumor only — redirect other tasks to cnn_direct
-        if decision == "sam3_then_cnn" and state["task"] not in cfg.sam3_eligible_tasks:
-            decision = "cnn_direct"
-            reasoning = (
-                f"SAM3 not eligible for task '{state['task']}' "
-                f"(probe trained on tumor only); routing directly to CNN."
-            )
-
         return {
-            "routing_decision": decision,
+            "routing_decision": "full_workup",
             "routing_confidence": routing.confidence,
-            "routing_reasoning": reasoning,
+            "routing_reasoning": (
+                "Initial MedGemma triage completed; proceeding to full specialist workup."
+            ),
             "suspected_pathology": routing.suspected_pathology,
             "medgemma_diagnosis": dx.model_dump(),
             "routing_path": state["routing_path"] + ["triage"],
@@ -100,13 +90,14 @@ def make_cnn_with_mask_node(cnn_tool, agent=None):
         seg = state.get("segmentation_result")
         seg_valid = seg and not seg.get("skipped")
 
-        # CNN classifies the original image
-        result = cnn_tool.classify(state["image_path"], state["task"])
-
         updates = {
-            "classification_result": result,
             "routing_path": state["routing_path"] + ["cnn_with_mask"],
         }
+
+        if state.get("classification_result") is None:
+            updates["classification_result"] = cnn_tool.classify(
+                state["image_path"], state["task"]
+            )
 
         # MedGemma gets the red overlay for spatially-guided diagnosis
         if agent is not None:
@@ -152,29 +143,35 @@ def make_report_node(agent, routing_cfg: RoutingConfig = None, skip_report: bool
 
     def report_node(state: NeuroimagingState) -> dict:
         saliency_iou = state.get("saliency_sam3_iou")
-
         if skip_report:
             report = "[report skipped in eval mode]"
         else:
-            report = agent.generate_report(
+            report, final_dx = agent.generate_report(
                 image_path=state["image_path"],
                 task=state["task"],
                 routing_path=state["routing_path"],
-                medgemma_dx=state.get("medgemma_bbox_diagnosis")
-                or state.get("medgemma_diagnosis"),
+                initial_medgemma_dx=state.get("medgemma_diagnosis"),
+                sam3_medgemma_dx=state.get("medgemma_bbox_diagnosis"),
                 cnn_result=state.get("classification_result"),
                 sam3_result=state.get("segmentation_result"),
                 biomedclip_result=state.get("biomedclip_result"),
+                explainability_result=state.get("explainability_result"),
                 verification_result=state.get("verification_result"),
                 saliency_iou=saliency_iou,
                 atlas_enrichment=state.get("atlas_enrichment"),
                 metadata=state.get("metadata"),
             )
 
-        # Determine final prediction: prefer CNN result, fall back to BiomedCLIP
+        # Determine final prediction from MedGemma's fused diagnosis when available.
         cnn = state.get("classification_result")
         clip = state.get("biomedclip_result")
-        if cnn:
+        if final_dx and final_dx.diagnosis_detailed:
+            final_class = final_dx.diagnosis_detailed
+            final_conf = final_dx.diagnosis_confidence
+        elif final_dx and final_dx.diagnosis_name:
+            final_class = final_dx.diagnosis_name
+            final_conf = final_dx.diagnosis_confidence
+        elif cnn:
             final_class = cnn["predicted_class"]
             final_conf = cnn["confidence"]
         elif clip:
@@ -200,6 +197,9 @@ def make_report_node(agent, routing_cfg: RoutingConfig = None, skip_report: bool
             "final_report": report,
             "final_predicted_class": final_class,
             "final_confidence": final_conf,
+            "final_medgemma_diagnosis": (
+                final_dx.model_dump() if final_dx is not None else None
+            ),
             "requires_human_review": requires_review,
             "routing_path": state["routing_path"] + ["report"],
         }
@@ -351,7 +351,7 @@ def make_verification_node(agent):
             cnn_result=cnn_result,
         )
 
-        current_conf = state.get("final_confidence", cnn_result.get("confidence", 0.5))
+        current_conf = state.get("final_confidence") or cnn_result.get("confidence", 0.5)
         if not verification.agreement:
             adjusted_conf = min(current_conf, VERIFICATION_DISAGREEMENT_CONFIDENCE_CAP)
             human_review = True
@@ -393,11 +393,7 @@ def make_fhir_node(output_dir: str):
 
 
 def route_from_triage(state: NeuroimagingState) -> str:
-    """
-    Conditional edge: maps triage routing_decision to the next node name.
-    Also handles post-CNN routing: if CNN confidence is low on multiclass,
-    fall through to BiomedCLIP re-ranking.
-    """
+    """Legacy helper retained for compatibility with older experiments."""
     return state["routing_decision"]
 
 def make_atlas_enrichment_node(siibra_tool: SiibraAtlasTool):

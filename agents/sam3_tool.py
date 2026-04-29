@@ -54,6 +54,30 @@ _SAM3_INPUT_SIZE = 1008
 _FEATURE_KEYS = ["vision_features", "image_features", "features"]
 
 
+def _patch_sam3_position_encoding_precompute() -> None:
+    """
+    Avoid SAM3's eager CUDA-only position-encoding precompute without editing
+    the vendored `sam3/` sources.
+    """
+    try:
+        import sam3.model_builder as sam3_model_builder
+    except Exception:
+        return
+
+    if getattr(sam3_model_builder, "_codex_precompute_patch", False):
+        return
+
+    original_create_position_encoding = sam3_model_builder._create_position_encoding
+
+    def patched_create_position_encoding(*args, **kwargs):
+        kwargs = dict(kwargs)
+        kwargs["precompute_resolution"] = None
+        return original_create_position_encoding(*args, **kwargs)
+
+    sam3_model_builder._create_position_encoding = patched_create_position_encoding
+    sam3_model_builder._codex_precompute_patch = True
+
+
 def _extract_features(backbone_output) -> torch.Tensor:
     """Pull the spatial feature tensor out of the SAM3 backbone output dict."""
     if isinstance(backbone_output, torch.Tensor):
@@ -148,6 +172,7 @@ class SAM3Tool:
             return
 
         print(f"[SAM3Tool] Loading SAM3 backbone (bpe={bpe_path})")
+        _patch_sam3_position_encoding_precompute()
         self.sam3 = build_sam3_image_model(bpe_path=bpe_path, device=str(self.device))
         self.sam3 = self.sam3.to(dtype=self.sam3_dtype)
         self.sam3.eval()

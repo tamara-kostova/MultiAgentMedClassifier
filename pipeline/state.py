@@ -50,6 +50,7 @@ class NeuroimagingState(TypedDict):
     medgemma_bbox_diagnosis: Optional[
         dict
     ]  # from system_prompt_bbox.txt (SAM3 overlay)
+    final_medgemma_diagnosis: Optional[dict]  # final evidence-fusion diagnosis
 
     # ── Tool outputs ──────────────────────────────────────────────────────────
     segmentation_result: Optional[SegmentationResult]
@@ -106,6 +107,7 @@ def initial_state(
         suspected_pathology="",
         medgemma_diagnosis=None,
         medgemma_bbox_diagnosis=None,
+        final_medgemma_diagnosis=None,
         segmentation_result=None,
         classification_result=None,
         biomedclip_result=None,
