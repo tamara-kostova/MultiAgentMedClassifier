@@ -32,6 +32,7 @@ from config import DEFAULT_CONFIG, ModelConfig, RoutingConfig
 _PROMPTS_DIR = Path(__file__).parent.parent / "prompts"
 
 SYSTEM_PROMPT = (_PROMPTS_DIR / "system_prompt.txt").read_text()
+SYSTEM_PROMPT_FEW_SHOT = (_PROMPTS_DIR / "system_prompt_few_shot.txt").read_text()
 SYSTEM_PROMPT_BBOX = (_PROMPTS_DIR / "system_prompt_bbox.txt").read_text()
 
 
@@ -147,12 +148,21 @@ def diagnosis_to_routing(
 
 REPORT_PROMPT_TEMPLATE = """You are a radiologist synthesizing multi-tool AI pipeline findings into a final report.
 
-Pipeline outputs (use these to inform your diagnosis):
+You are given multiple images from the same case:
+- Image 1: original scan
+- Image 2: SAM3 segmentation / bbox-guided overlay, if available
+- Image 3: Grad-CAM++ explainability overlay, if available
+- Image 4: Integrated Gradients explainability overlay, if available
+
+Pipeline outputs (use these together with the images to inform your diagnosis):
 Task: {task}
 Route: {routing_path}
 
-MedGemma triage diagnosis:
-{medgemma_dx}
+Initial MedGemma triage diagnosis:
+{initial_medgemma_dx}
+
+SAM3-guided MedGemma diagnosis:
+{sam3_medgemma_dx}
 
 CNN classification:
 {cnn_result}
@@ -165,6 +175,9 @@ BiomedCLIP re-ranking:
 
 Verification result (MedGemma vs CNN agreement):
 {verification_result}
+
+Explainability outputs:
+{explainability_result}
 
 Spatial alignment — GradCAM++ ∩ SAM3 mask IoU: {saliency_iou}
 (IoU < 0.3 suggests the CNN attended to background rather than the lesion)
@@ -192,7 +205,8 @@ STRUCTURED DIAGNOSIS:
 
 Rules:
 - Keep FINDINGS under 100 words. Do not make definitive diagnoses — this is a triage aid only.
-- For STRUCTURED DIAGNOSIS: derive diagnosis_name and diagnosis_detailed primarily from CNN/BiomedCLIP predicted_class; set diagnosis_confidence to the highest-confidence tool result; derive modality/sequence/plane from the image and MedGemma triage.
+- Weigh task-specific model outputs (CNN, SAM3 localization, BiomedCLIP) more heavily than the initial MedGemma triage when they conflict, but use the full evidence bundle to resolve disagreements.
+- For STRUCTURED DIAGNOSIS: integrate all evidence from the images and tool outputs; derive modality/sequence/plane from the image and MedGemma observations.
 - Output no text outside these two sections."""
 
 VERIFICATION_PROMPT_TEMPLATE = """You are a senior neuroradiologist reviewing an AI classification.
@@ -300,13 +314,15 @@ class MedGemmaAgent:
         image_path: str,
         task: str,
         routing_path: list,
-        medgemma_dx: Optional[MedicalDiagnosis],
+        initial_medgemma_dx: Optional[MedicalDiagnosis],
+        sam3_medgemma_dx: Optional[MedicalDiagnosis],
         cnn_result: Optional[dict],
         sam3_result: Optional[dict],
         biomedclip_result: Optional[dict],
+        explainability_result: Optional[dict] = None,
         verification_result: Optional[dict] = None,
         saliency_iou: Optional[float] = None,
-    ) -> str:
+    ) -> tuple[str, Optional[MedicalDiagnosis]]:
         def fmt(d) -> str:
             if d is None:
                 return "Not invoked."
@@ -319,25 +335,36 @@ class MedGemmaAgent:
         prompt = REPORT_PROMPT_TEMPLATE.format(
             task=task,
             routing_path=" → ".join(routing_path),
-            medgemma_dx=fmt(medgemma_dx),
+            initial_medgemma_dx=fmt(initial_medgemma_dx),
+            sam3_medgemma_dx=fmt(sam3_medgemma_dx),
             cnn_result=fmt(cnn_result),
             sam3_result=fmt(sam3_result),
             biomedclip_result=fmt(biomedclip_result),
+            explainability_result=fmt(explainability_result),
             verification_result=fmt(verification_result),
             saliency_iou=iou_str,
         )
-        image = Image.open(image_path).convert("RGB")
-        raw = self._generate(image, prompt, max_new_tokens=600)
+        image_paths = [image_path]
+        if sam3_result and sam3_result.get("guided_image_path"):
+            image_paths.append(sam3_result["guided_image_path"])
+        if explainability_result and explainability_result.get("gradcam_pp"):
+            image_paths.append(explainability_result["gradcam_pp"])
+        if explainability_result and explainability_result.get("integrated_gradients"):
+            image_paths.append(explainability_result["integrated_gradients"])
+
+        images = [Image.open(path).convert("RGB") for path in image_paths]
+        raw = self._generate(images, prompt, max_new_tokens=600)
         # Soft-validate the JSON block and pretty-print it in place
         try:
             dx = self._parse_diagnosis(raw)
             match = re.search(r"\{.*\}", raw, re.DOTALL)
             if match:
                 before = raw[: match.start()].rstrip()
-                return f"{before}\n\n{json.dumps(dx.model_dump(), indent=2)}"
+                report = f"{before}\n\n{json.dumps(dx.model_dump(), indent=2)}"
+                return report, dx
         except (json.JSONDecodeError, ValueError):
             pass
-        return raw
+        return raw, None
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
@@ -379,6 +406,7 @@ class MedGemmaAgent:
         max_new_tokens: int = 2064,
         few_shot: list[tuple[Image.Image, str]] | None = None,
     ) -> str:
+        images = image if isinstance(image, list) else [image]
         messages = []
         if few_shot:
             for ex_img, ex_json in few_shot:
@@ -393,10 +421,10 @@ class MedGemmaAgent:
         messages.append(
             {
                 "role": "user",
-                "content": [
-                    {"type": "image", "image": image},
-                    {"type": "text", "text": text_prompt},
-                ],
+                "content": (
+                    [{"type": "image", "image": img} for img in images]
+                    + [{"type": "text", "text": text_prompt}]
+                ),
             }
         )
         inputs = self.processor.apply_chat_template(

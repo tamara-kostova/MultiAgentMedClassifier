@@ -2,27 +2,25 @@
 LangGraph state machine assembly for the neuroimaging multi-agent pipeline.
 
 Graph structure:
-                         ┌─────────────────────────────────────────────┐
-                         │                  triage                      │
-                         │  (MedGemma routes based on visual assessment)│
-                         └──────┬──────────┬──────────┬────────────────┘
-                                │          │          │           │
-                         cnn_direct  sam3_then_cnn  biomedclip  human_review
-                                │          │          │           │
-                         cnn_classify  sam3_segment  biomedclip  │
-                                │          │          │           │
-                                │    cnn_with_mask   │           │
-                                │          │          │           │
-                         [explainability?] ┘──────────┘           │
-                                │                                  │
-                           verification                            │
-                                │                                  │
-                             report                                │
-                                └──────────────────────────────────┘
-                                              │
-                                          fhir_output
-                                              │
-                                             END
+                         triage
+                           │
+                     cnn_classify
+                           │
+                      sam3_segment
+                           │
+                     cnn_with_mask
+                           │
+                       biomedclip
+                           │
+                    explainability
+                           │
+                      verification
+                           │
+                         report
+                           │
+                      fhir_output
+                           │
+                          END
 """
 
 from langgraph.graph import END, StateGraph
@@ -33,7 +31,6 @@ from agents.medgemma_agent import MedGemmaAgent
 from agents.sam3_tool import SAM3Tool
 from config import DEFAULT_CONFIG, PipelineConfig
 from pipeline.nodes import (
-    human_review_node,
     make_biomedclip_node,
     make_cnn_node,
     make_cnn_with_mask_node,
@@ -43,7 +40,6 @@ from pipeline.nodes import (
     make_sam3_node,
     make_triage_node,
     make_verification_node,
-    route_from_triage,
 )
 from pipeline.state import NeuroimagingState
 
@@ -88,45 +84,21 @@ def build_pipeline(cfg: PipelineConfig = None):
     workflow.add_node("verification", verification_fn)
     workflow.add_node("report", report_fn)
     workflow.add_node("fhir_output", fhir_fn)
-    workflow.add_node("human_review", human_review_node)
-
-    # Entry point
     workflow.set_entry_point("triage")
 
-    # Conditional routing from triage
-    workflow.add_conditional_edges(
-        "triage",
-        route_from_triage,
-        {
-            "cnn_direct": "cnn_classify",
-            "sam3_then_cnn": "sam3_segment",
-            "biomedclip": "biomedclip",
-            "human_review": "human_review",
-        },
+    explainability_fn = make_explainability_node(
+        cnn, output_dir=f"{cfg.output_dir}/explainability"
     )
+    workflow.add_node("explainability", explainability_fn)
 
-    # SAM3 always feeds into CNN-with-mask (MedGemma gets overlay; CNN gets original)
+    workflow.add_edge("triage", "cnn_classify")
+    workflow.add_edge("cnn_classify", "sam3_segment")
     workflow.add_edge("sam3_segment", "cnn_with_mask")
-
-    # Optional explainability node between CNN classification and verification
-    if cfg.generate_explainability:
-        explainability_fn = make_explainability_node(
-            cnn, output_dir=f"{cfg.output_dir}/explainability"
-        )
-        workflow.add_node("explainability", explainability_fn)
-        workflow.add_edge("cnn_classify", "explainability")
-        workflow.add_edge("cnn_with_mask", "explainability")
-        workflow.add_edge("explainability", "verification")
-    else:
-        workflow.add_edge("cnn_classify", "verification")
-        workflow.add_edge("cnn_with_mask", "verification")
-
-    workflow.add_edge("biomedclip", "verification")
+    workflow.add_edge("cnn_with_mask", "biomedclip")
+    workflow.add_edge("biomedclip", "explainability")
+    workflow.add_edge("explainability", "verification")
     workflow.add_edge("verification", "report")
-
-    # Terminal edges
     workflow.add_edge("report", "fhir_output")
-    workflow.add_edge("human_review", "fhir_output")
     workflow.add_edge("fhir_output", END)
 
     app = workflow.compile()

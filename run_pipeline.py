@@ -3,7 +3,7 @@ Entry point for the multi-agent neuroimaging pipeline.
 
 Usage examples:
   # Single image:
-  python run_pipeline.py --image image.jpg --task binary_tumor
+  python run_pipeline.py --image data/processed/1/2.jpg --task binary_tumor
 
   # Full evaluation across all datasets:
   python run_pipeline.py --eval \

@@ -183,25 +183,27 @@ class PipelineEvaluator:
     def __init__(self, app, config_name: ConfigName):
         self.app = app
         self.config_name = config_name
-        self.results: list[dict] = []
 
-    def run(self, samples: list[dict]) -> pd.DataFrame:
+    def run(self, samples: list[dict], output_path: str | Path) -> pd.DataFrame:
         """
-        Run the pipeline on all samples and collect per-sample results.
+        Run the pipeline on all samples and stream per-sample results to JSONL.
         """
-        self.results = []
-        for i, sample in enumerate(samples):
-            print(
-                f"  [{i+1}/{len(samples)}] {Path(sample['image_path']).name}", end="\r"
-            )
-            state = initial_state(sample["image_path"], sample["task"])
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
 
-            t0 = time.perf_counter()
-            final_state: NeuroimagingState = self.app.invoke(state)
-            latency = time.perf_counter() - t0
+        with output_path.open("w", encoding="utf-8") as f:
+            for i, sample in enumerate(samples):
+                print(
+                    f"  [{i+1}/{len(samples)}] {Path(sample['image_path']).name}",
+                    end="\r",
+                )
+                state = initial_state(sample["image_path"], sample["task"])
 
-            self.results.append(
-                {
+                t0 = time.perf_counter()
+                final_state: NeuroimagingState = self.app.invoke(state)
+                latency = time.perf_counter() - t0
+
+                row = {
                     "image_path": sample["image_path"],
                     "true_label": sample["label"],
                     "task": sample["task"],
@@ -218,10 +220,10 @@ class PipelineEvaluator:
                     "latency_s": latency,
                     "config": self.config_name,
                 }
-            )
+                f.write(json.dumps(row) + "\n")
 
         print()
-        return pd.DataFrame(self.results)
+        return pd.read_json(output_path, lines=True)
 
 
 # ── Metric computation ────────────────────────────────────────────────────────
@@ -337,7 +339,8 @@ def compare_configurations(
 
         for task, samples in test_datasets.items():
             print(f"\n  Task: {task} ({len(samples)} samples)")
-            results_df = evaluator.run(samples)
+            task_output_path = Path(output_dir) / f"{config_name}_{task}_predictions.jsonl"
+            results_df = evaluator.run(samples, task_output_path)
             all_results_df.append(results_df)
 
             metrics = compute_metrics(results_df)
