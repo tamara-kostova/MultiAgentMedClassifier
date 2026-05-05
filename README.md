@@ -9,32 +9,26 @@ a LangGraph-based multi-agent pipeline for automated classification of neuroimag
 
 | Component | Model | Role |
 |---|---|---|
-| `MedGemmaAgent` | google/medgemma-1.5-4b-it | Triage routing, bbox-guided diagnosis, final report |
+| `MedGemmaAgent` | google/medgemma-1.5-4b-it | Triage, bbox-guided diagnosis, verification, final report |
 | `CNNClassifier` | VGG16 / DenseNet169 / ResNet101 | Task-specific classification |
 | `SAM3Tool` | SAM3 frozen backbone + linear probe | Lesion segmentation (Dice = 0.836) |
-| `BiomedCLIPTool` | microsoft/BiomedCLIP (layer 18) | Zero-shot re-ranking for ambiguous multiclass cases |
+| `BiomedCLIPTool` | microsoft/BiomedCLIP (ViT-B/16, layer 6) | Zero-shot re-ranking for ambiguous multiclass cases |
 
-**Routing logic** (derived from MedGemma `diagnosis_confidence`):
+**Pipeline flow** (linear — every node runs for every image):
 
-Tumor tasks (`binary_tumor`, `multiclass_tumor`):
+```
+triage (MedGemma)
+    → cnn_classify
+    → sam3_segment
+    → cnn_with_mask  (CNN on original + MedGemma on SAM3 overlay)
+    → biomedclip
+    → explainability  (Grad-CAM++ + Integrated Gradients)
+    → verification    (MedGemma checks CNN vs saliency map)
+    → report          (MedGemma fuses all outputs)
+    → fhir_output
+```
 
-| Confidence | Route |
-|---|---|
-| < 0.45 | `human_review` |
-| 0.45 – 0.65 | `biomedclip` (subtype re-ranking) |
-| 0.65 – 0.70 | `sam3_then_cnn` (spatial guidance) |
-| ≥ 0.70 | `cnn_direct` |
-
-MS / Stroke tasks:
-
-| Confidence | Route |
-|---|---|
-| < 0.45 | `human_review` |
-| ≥ 0.45 | `cnn_direct` |
-
-SAM3 and BiomedCLIP are not used for MS/stroke. The SAM3 linear probe was trained on BraTS 2021 (tumor only) and performed poorly on MS/stroke data. MS and stroke are binary tasks so BiomedCLIP subtype re-ranking does not apply either.
-
-Flags `--always_run_sam3` and `--always_run_biomedclip` override confidence-based routing (tumor tasks only).
+SAM3 and BiomedCLIP always run but contribute only when relevant: SAM3 segmentation is eligible only for `binary_tumor` and `multiclass_tumor` (the linear probe was trained on BraTS 2021; MS/stroke probes performed poorly). BiomedCLIP re-ranking is most meaningful for multiclass subtype disambiguation.
 
 ## Tasks
 
@@ -65,14 +59,16 @@ MultiAgentMedClassifier/
 │   ├── multimodal.py       # Standalone CLIP/BiomedCLIP experiment script (not imported by pipeline)
 │   └── uncertainty.py      # Standalone calibration experiment script (not imported by pipeline)
 ├── eval/
-│   └── evaluate.py         # Metrics: accuracy, F1, ECE, specificity, SAM3-rate, latency
+│   ├── evaluate.py         # Metrics: accuracy, F1, ECE, specificity, SAM3-rate, latency
+│   └── tumor_eval.py       # Resumable JSONL eval for single tumor datasets (Figshare / Br35H)
 ├── prompts/
 │   ├── system_prompt.txt       # MedGemma radiologist persona + JSON schema
 │   └── system_prompt_bbox.txt  # Same schema, bbox-overlay context
 ├── checkpoints/            # PyTorch state dicts: {arch}_{dataset}_final.pt
 ├── outputs/
 │   ├── explainability/     # Saliency maps: gradcam_pp_*.png, ig_*.png
-│   └── eval/               # comparison_summary.csv
+│   ├── fhir/               # FHIR R4 bundles: fhir_<id>.json
+│   └── eval/               # comparison_summary.csv, <task>_tumor_eval.jsonl
 ├── config.py               # Central config dataclasses
 ├── run_pipeline.py         # CLI entry point
 └── requirements.txt
@@ -141,6 +137,26 @@ python run_pipeline.py --eval \
   --stroke_dir        data/test/stroke
 ```
 Results (accuracy, F1, ECE, normal specificity, SAM3-rate, latency) are saved to `outputs/eval/comparison_summary.csv`.
+
+**Single-dataset tumor evaluation (resumable, all models, rich JSONL output):**
+
+```bash
+# Figshare 3-class (meningioma / glioma / pituitary)
+python run_pipeline.py --tumor_eval \
+  --tumor_eval_dir data/processed \
+  --task multiclass_tumor \
+  --label_map figshare3
+
+# Br35H binary (tumor / normal)
+python run_pipeline.py --tumor_eval \
+  --tumor_eval_dir data/Br35H \
+  --task binary_tumor \
+  --label_map br35h
+
+# Optional: cap total images (useful for quick tests or incremental runs)
+  --max_samples 100
+```
+Writes one JSONL record per image to `outputs/eval/<task>_tumor_eval.jsonl` immediately after inference — crash-safe. Re-running the same command resumes from where it left off. Each record captures outputs from every model: MedGemma triage + final diagnosis, CNN class probabilities, SAM3 mask/bbox/dice, BiomedCLIP ranked scores, Grad-CAM++ and IG paths, SAM3/saliency IoU, verification result, and the full MedGemma report.
 
 **With SAM3 segmentation enabled:**
 
@@ -219,5 +235,5 @@ ece = compute_ece(confidences, correct)     # binning-based ECE
 This pipeline builds on three prior thesis components:
 
 - CNN benchmarking (VGG16 / DenseNet / ResNet on 4 datasets)
-- BiomedCLIP layer-wise feature analysis (layer 18 optimal)
+- BiomedCLIP layer-wise feature analysis (layer 6 of ViT-B/16 optimal across all four tasks)
 - SAM3 linear probe segmentation (Dice = 0.836); SAM3→MedGemma pipeline improves tumour detection 85.1% → 96.3% but reduces specificity 67.1% → 41.3%; the agent routing in this work is designed to recover that specificity
