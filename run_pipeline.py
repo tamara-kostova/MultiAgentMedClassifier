@@ -33,6 +33,7 @@ from pathlib import Path
 
 from config import DEFAULT_CONFIG, ModelConfig, PipelineConfig, RoutingConfig
 from eval.evaluate import compare_configurations, load_test_split, run_single
+from eval.tumor_eval import LABEL_MAPS, run_tumor_eval
 from pipeline.graph import build_pipeline
 from pipeline.state import initial_state
 from dotenv import load_dotenv
@@ -47,6 +48,14 @@ def parse_args():
     mode = p.add_mutually_exclusive_group(required=True)
     mode.add_argument("--image", type=str, help="Path to a single input image")
     mode.add_argument("--eval", action="store_true", help="Run full evaluation")
+    mode.add_argument(
+        "--tumor_eval",
+        action="store_true",
+        help=(
+            "Run full pipeline on a single tumor dataset; writes rich JSONL with "
+            "outputs from every model. Resumes from partial runs automatically."
+        ),
+    )
 
     # Single image
     p.add_argument(
@@ -61,6 +70,38 @@ def parse_args():
     p.add_argument("--multiclass_dir", type=str, default=None)
     p.add_argument("--ms_dir", type=str, default=None)
     p.add_argument("--stroke_dir", type=str, default=None)
+
+    # Tumor-eval mode
+    p.add_argument(
+        "--tumor_eval_dir",
+        type=str,
+        default=None,
+        help="Dataset root for --tumor_eval: <dir>/<class>/<image.*> (e.g. data/processed)",
+    )
+    p.add_argument(
+        "--tumor_eval_output",
+        type=str,
+        default=None,
+        help="Output JSONL path for --tumor_eval (default: outputs/eval/<task>_tumor_eval.jsonl)",
+    )
+    p.add_argument(
+        "--max_samples",
+        type=int,
+        default=None,
+        help="For --tumor_eval: stop after this many images total across all runs.",
+    )
+    p.add_argument(
+        "--label_map",
+        type=str,
+        default="figshare3",
+        choices=["figshare3", "br35h", "none"],
+        help=(
+            "For --tumor_eval: label mapping preset. "
+            "'figshare3' maps 1/2/3 → meningioma/glioma/pituitary (default). "
+            "'br35h' maps yes/no → brain tumor MRI/normal brain MRI. "
+            "'none' uses raw folder names as labels."
+        ),
+    )
 
     # CNN checkpoint overrides
     p.add_argument("--cnn_binary_tumor", type=str, default=None)
@@ -205,6 +246,25 @@ def main():
             verbose=True,
             output_dir=cfg.output_dir,
             save_output=True,
+        )
+
+    elif args.tumor_eval:
+        # ── Tumor dataset eval mode (JSONL, resumable, all models) ───────────
+        if not args.tumor_eval_dir:
+            print("Error: --tumor_eval requires --tumor_eval_dir")
+            return
+        output_file = Path(
+            args.tumor_eval_output
+            or f"{cfg.output_dir}/eval/{args.task or 'multiclass_tumor'}_tumor_eval.jsonl"
+        )
+        label_map = LABEL_MAPS.get(args.label_map) if args.label_map != "none" else None
+        run_tumor_eval(
+            app=app,
+            data_dir=args.tumor_eval_dir,
+            task=args.task or "multiclass_tumor",
+            output_file=output_file,
+            label_map=label_map,
+            max_samples=args.max_samples,
         )
 
     elif args.eval:
