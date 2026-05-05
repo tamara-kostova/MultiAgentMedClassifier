@@ -3,7 +3,7 @@ Entry point for the multi-agent neuroimaging pipeline.
 
 Usage examples:
   # Single image:
-  python run_pipeline.py --image image.jpg --task binary_tumor
+  python run_pipeline.py --image data/processed/1/2.jpg --task binary_tumor
 
   # Full evaluation across all datasets:
   python run_pipeline.py --eval \
@@ -15,6 +15,10 @@ Usage examples:
   # With custom CNN checkpoints:
   python run_pipeline.py --image image.jpg --task binary_tumor \
     --cnn_binary_tumor checkpoints/densenet169_binary_tumor.pt
+
+  # With few-shot examples (one image per class prepended to MedGemma triage):
+  python run_pipeline.py --image image.jpg --task binary_tumor \
+    --few_shot --few_shot_data_dir /path/to/data
 
 Checkpoints:
   CNN checkpoints should be PyTorch state dicts saved as:
@@ -30,6 +34,7 @@ from pathlib import Path
 
 from config import DEFAULT_CONFIG, ModelConfig, MonitoringConfig, PipelineConfig, RoutingConfig
 from eval.evaluate import compare_configurations, load_test_split, run_single
+from eval.tumor_eval import LABEL_MAPS, run_tumor_eval
 from pipeline.graph import build_pipeline
 from pipeline.state import initial_state
 from dotenv import load_dotenv
@@ -44,6 +49,14 @@ def parse_args():
     mode = p.add_mutually_exclusive_group(required=True)
     mode.add_argument("--image", type=str, help="Path to a single input image")
     mode.add_argument("--eval", action="store_true", help="Run full evaluation")
+    mode.add_argument(
+        "--tumor_eval",
+        action="store_true",
+        help=(
+            "Run full pipeline on a single tumor dataset; writes rich JSONL with "
+            "outputs from every model. Resumes from partial runs automatically."
+        ),
+    )
 
     # Single image
     p.add_argument(
@@ -58,6 +71,38 @@ def parse_args():
     p.add_argument("--multiclass_dir", type=str, default=None)
     p.add_argument("--ms_dir", type=str, default=None)
     p.add_argument("--stroke_dir", type=str, default=None)
+
+    # Tumor-eval mode
+    p.add_argument(
+        "--tumor_eval_dir",
+        type=str,
+        default=None,
+        help="Dataset root for --tumor_eval: <dir>/<class>/<image.*> (e.g. data/processed)",
+    )
+    p.add_argument(
+        "--tumor_eval_output",
+        type=str,
+        default=None,
+        help="Output JSONL path for --tumor_eval (default: outputs/eval/<task>_tumor_eval.jsonl)",
+    )
+    p.add_argument(
+        "--max_samples",
+        type=int,
+        default=None,
+        help="For --tumor_eval: stop after this many images total across all runs.",
+    )
+    p.add_argument(
+        "--label_map",
+        type=str,
+        default="figshare3",
+        choices=["figshare3", "br35h", "none"],
+        help=(
+            "For --tumor_eval: label mapping preset. "
+            "'figshare3' maps 1/2/3 → meningioma/glioma/pituitary (default). "
+            "'br35h' maps yes/no → brain tumor MRI/normal brain MRI. "
+            "'none' uses raw folder names as labels."
+        ),
+    )
 
     # CNN checkpoint overrides
     p.add_argument("--cnn_binary_tumor", type=str, default=None)
@@ -100,6 +145,26 @@ def parse_args():
             'JSON file with per-task temperatures, e.g. {"binary_tumor": 1.3, "ms": 0.9}. '
             "Fitted via TemperatureScaler.fit() on a held-out validation set."
         ),
+    )
+
+    # Few-shot examples for MedGemma triage
+    p.add_argument(
+        "--few_shot",
+        action="store_true",
+        help="Prepend one example image per class to MedGemma's triage prompt",
+    )
+    p.add_argument(
+        "--few_shot_data_dir",
+        type=str,
+        default=None,
+        help="Root directory for resolving few_shot_examples.csv image paths",
+    )
+
+    # Eval optimisation
+    p.add_argument(
+        "--skip_report",
+        action="store_true",
+        help="Skip MedGemma report generation (eval mode — saves ~5–9 s/image)",
     )
 
     # Explainability
@@ -168,7 +233,10 @@ def build_config(args) -> PipelineConfig:
         ),
         sam3_bpe_path=args.sam3_bpe_path or default_model_cfg.sam3_bpe_path,
         cnn_temperatures=temperatures,
+        use_few_shot=args.few_shot,
+        few_shot_data_dir=args.few_shot_data_dir,
     )
+
     routing_cfg = RoutingConfig(
         always_run_sam3=args.always_run_sam3,
         always_run_biomedclip=args.always_run_biomedclip,
@@ -186,6 +254,7 @@ def build_config(args) -> PipelineConfig:
         output_dir=args.output_dir,
         generate_explainability=args.generate_explainability,
         monitoring=monitoring_cfg,
+        skip_report=args.skip_report,
     )
 
 
@@ -249,6 +318,25 @@ def main():
             cfg=cfg,
             verbose=True,
             save_output=True,
+        )
+
+    elif args.tumor_eval:
+        # ── Tumor dataset eval mode (JSONL, resumable, all models) ───────────
+        if not args.tumor_eval_dir:
+            print("Error: --tumor_eval requires --tumor_eval_dir")
+            return
+        output_file = Path(
+            args.tumor_eval_output
+            or f"{cfg.output_dir}/eval/{args.task or 'multiclass_tumor'}_tumor_eval.jsonl"
+        )
+        label_map = LABEL_MAPS.get(args.label_map) if args.label_map != "none" else None
+        run_tumor_eval(
+            app=app,
+            data_dir=args.tumor_eval_dir,
+            task=args.task or "multiclass_tumor",
+            output_file=output_file,
+            label_map=label_map,
+            max_samples=args.max_samples,
         )
 
     elif args.eval:

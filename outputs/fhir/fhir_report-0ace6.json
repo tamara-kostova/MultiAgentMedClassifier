@@ -1,0 +1,152 @@
+{
+  "resourceType": "Bundle",
+  "id": "bundle-a1a9df0c",
+  "type": "collection",
+  "timestamp": "2026-04-22T18:47:00.587710+00:00",
+  "entry": [
+    {
+      "resource": {
+        "resourceType": "Patient",
+        "id": "patient-1869370b",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/StructureDefinition/Patient"
+          ]
+        }
+      }
+    },
+    {
+      "resource": {
+        "resourceType": "ImagingStudy",
+        "id": "study-61ef8119",
+        "status": "available",
+        "subject": {
+          "reference": "Patient/patient-1869370b"
+        },
+        "modality": [
+          {
+            "system": "http://dicom.nema.org/resources/ontology/DCM",
+            "code": "MR"
+          }
+        ],
+        "description": "data/processed/1/2.jpg"
+      }
+    },
+    {
+      "resource": {
+        "resourceType": "Observation",
+        "id": "obs-edb2e57a",
+        "status": "final",
+        "code": {
+          "coding": [
+            {
+              "system": "http://loinc.org",
+              "code": "84892-9",
+              "display": "AI Interpretation"
+            }
+          ],
+          "text": "AI Neuroimaging Classification"
+        },
+        "subject": {
+          "reference": "Patient/patient-1869370b"
+        },
+        "derivedFrom": [
+          {
+            "reference": "ImagingStudy/study-61ef8119"
+          }
+        ],
+        "valueCodeableConcept": {
+          "coding": [
+            {
+              "system": "http://snomed.info/sct",
+              "code": "126952004",
+              "display": "tumor"
+            }
+          ]
+        },
+        "component": [
+          {
+            "code": {
+              "text": "AI confidence"
+            },
+            "valueDecimal": 1.0
+          },
+          {
+            "code": {
+              "text": "Calibration temperature (T)"
+            },
+            "valueDecimal": 1.0
+          }
+        ]
+      }
+    },
+    {
+      "resource": {
+        "resourceType": "DiagnosticReport",
+        "id": "report-0ace6b79",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/StructureDefinition/DiagnosticReport"
+          ]
+        },
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/v2-0074",
+                "code": "RAD",
+                "display": "Radiology"
+              }
+            ]
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://loinc.org",
+              "code": "24590-2",
+              "display": "MRI Brain"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/patient-1869370b"
+        },
+        "imagingStudy": [
+          {
+            "reference": "ImagingStudy/study-61ef8119"
+          }
+        ],
+        "result": [
+          {
+            "reference": "Observation/obs-edb2e57a"
+          }
+        ],
+        "effectiveDateTime": "2026-04-22T18:47:00.587702+00:00",
+        "conclusion": "FINDINGS:\n1. A large, enhancing mass is present in the left temporal lobe, consistent with a tumor.\n2. The CNN classification provides a high confidence score for the presence of a tumor.\n3. Further evaluation with contrast-enhanced MRI is recommended.\n4. The MedGemma triage suggests a glioma.\n\nSTRUCTURED DIAGNOSIS:\n\n{\n  \"modality\": \"MRI\",\n  \"specialized_sequence\": \"T1C+\",\n  \"plane\": \"sagittal\",\n  \"diagnosis_name\": \"tumor\",\n  \"diagnosis_detailed\": \"glioma\",\n  \"icd10_code\": \"C71\",\n  \"severity_score\": 0.85,\n  \"diagnosis_confidence\": 0.95,\n  \"severity_confidence\": 0.9\n}",
+        "conclusionCode": [
+          {
+            "coding": [
+              {
+                "system": "http://snomed.info/sct",
+                "code": "126952004",
+                "display": "tumor"
+              }
+            ]
+          }
+        ],
+        "extension": [
+          {
+            "url": "https://example.org/fhir/StructureDefinition/ai-routing-path",
+            "valueString": "triage \u2192 cnn_classify \u2192 report"
+          },
+          {
+            "url": "https://example.org/fhir/StructureDefinition/ai-requires-human-review",
+            "valueBoolean": false
+          }
+        ]
+      }
+    }
+  ]
+}

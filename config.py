@@ -60,7 +60,7 @@ class ModelConfig:
     )
 
     # ── BiomedCLIP linear probe checkpoints (None → zero-shot mode) ──────────
-    # Probe heads trained on layer-18 features
+    # Probe heads from 18_layer_fusion_benchmark.py (layer-6 or concat fusion of layers 2,6,11)
     biomedclip_probe_checkpoints: dict = field(
         default_factory=lambda: {
             "binary_tumor": None,
@@ -83,6 +83,13 @@ class ModelConfig:
     # Set to True on GPUs with <12 GB VRAM (4-bit NF4 via bitsandbytes).
     # Set to False on GPUs with >=12 GB VRAM (bfloat16, faster inference).
     use_4bit_quantization: bool = False
+
+    # ── Few-shot examples ─────────────────────────────────────────────────────
+    # When True, MedGemmaAgent prepends one real image + expected JSON per class
+    # as prior conversation turns before the triage query image.
+    use_few_shot: bool = False
+    # Root directory for resolving relative paths in few_shot_examples.csv.
+    few_shot_data_dir: Optional[str] = None
 
     # ── BiomedCLIP model ID ───────────────────────────────────────────────────
     biomedclip_model_id: str = (
@@ -183,6 +190,9 @@ class PipelineConfig:
     # Adds ~1-2s per image but produces saliency PNGs in outputs/explainability/.
     generate_explainability: bool = False
     monitoring: MonitoringConfig = field(default_factory=MonitoringConfig)
+    # Set True to skip MedGemma report generation during evaluation.
+    # Saves ~5–9 s/image with no effect on accuracy/F1/ECE metrics.
+    skip_report: bool = False
 
 
 # Module-level default (import and mutate as needed)

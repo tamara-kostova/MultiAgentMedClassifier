@@ -13,6 +13,7 @@ image for use by the MedGemma report agent (CNN always receives the original ima
 
 import uuid
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Callable
 
@@ -51,6 +52,30 @@ _SAM3_INPUT_SIZE = 1008
 
 # Feature key candidates returned by SAM3 backbone
 _FEATURE_KEYS = ["vision_features", "image_features", "features"]
+
+
+def _patch_sam3_position_encoding_precompute() -> None:
+    """
+    Avoid SAM3's eager CUDA-only position-encoding precompute without editing
+    the vendored `sam3/` sources.
+    """
+    try:
+        import sam3.model_builder as sam3_model_builder
+    except Exception:
+        return
+
+    if getattr(sam3_model_builder, "_codex_precompute_patch", False):
+        return
+
+    original_create_position_encoding = sam3_model_builder._create_position_encoding
+
+    def patched_create_position_encoding(*args, **kwargs):
+        kwargs = dict(kwargs)
+        kwargs["precompute_resolution"] = None
+        return original_create_position_encoding(*args, **kwargs)
+
+    sam3_model_builder._create_position_encoding = patched_create_position_encoding
+    sam3_model_builder._codex_precompute_patch = True
 
 
 def _extract_features(backbone_output) -> torch.Tensor:
@@ -105,12 +130,23 @@ class SAM3Tool:
     ):
         self.model_cfg = model_cfg or DEFAULT_CONFIG.model
         self.device = torch.device(self.model_cfg.device)
+        self.sam3_dtype = (
+            torch.bfloat16 if self.device.type == "cuda" else torch.float32
+        )
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         self.sam3 = None
         self.probe_head = None
         self._load_models()
+
+    @staticmethod
+    def _module_dtype(module: nn.Module) -> torch.dtype:
+        """Return the dtype of the first floating-point parameter/buffer."""
+        for tensor in list(module.parameters()) + list(module.buffers()):
+            if tensor.is_floating_point():
+                return tensor.dtype
+        return torch.float32
 
     def _load_models(self):
         if not _SAM_AVAILABLE:
@@ -136,7 +172,9 @@ class SAM3Tool:
             return
 
         print(f"[SAM3Tool] Loading SAM3 backbone (bpe={bpe_path})")
+        _patch_sam3_position_encoding_precompute()
         self.sam3 = build_sam3_image_model(bpe_path=bpe_path, device=str(self.device))
+        self.sam3 = self.sam3.to(dtype=self.sam3_dtype)
         self.sam3.eval()
         for param in self.sam3.parameters():
             param.requires_grad = False
@@ -147,7 +185,7 @@ class SAM3Tool:
         self.probe_head = nn.Conv2d(feature_dim, 2, kernel_size=1)
         self.probe_head.load_state_dict(_normalize_probe_state_dict(ckpt))
         self.probe_head.to(self.device)
-        self.probe_head.eval()
+        self.probe_head = self.probe_head.float().eval()
         print("[SAM3Tool] Ready.")
 
     @torch.no_grad()
@@ -185,10 +223,18 @@ class SAM3Tool:
             mode="bilinear",
             align_corners=False,
         )
+        img_tensor = img_tensor.to(dtype=self.sam3_dtype)
 
         # ── Feature extraction (text-conditioned) ─────────────────────────────
-        backbone_output = self.sam3.backbone(img_tensor, [text_prompt])
+        autocast_ctx = (
+            torch.amp.autocast(device_type=self.device.type, enabled=False)
+            if self.device.type in {"cuda", "cpu"}
+            else nullcontext()
+        )
+        with autocast_ctx:
+            backbone_output = self.sam3.backbone(img_tensor, [text_prompt])
         features = _extract_features(backbone_output)  # (1, C, h, w)
+        features = features.to(dtype=self._module_dtype(self.probe_head))
 
         # ── Linear probe → logits → upsample → mask ───────────────────────────
         logits = self.probe_head(features)  # (1, 2, h, w)
