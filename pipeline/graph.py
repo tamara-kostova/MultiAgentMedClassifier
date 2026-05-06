@@ -38,6 +38,7 @@ from pipeline.nodes import (
     make_fhir_node,
     make_report_node,
     make_sam3_node,
+    make_skip_explainability_node,
     make_triage_node,
     make_verification_node,
 )
@@ -86,8 +87,10 @@ def build_pipeline(cfg: PipelineConfig = None):
     workflow.add_node("fhir_output", fhir_fn)
     workflow.set_entry_point("triage")
 
-    explainability_fn = make_explainability_node(
-        cnn, output_dir=f"{cfg.output_dir}/explainability"
+    explainability_fn = (
+        make_explainability_node(cnn, output_dir=f"{cfg.output_dir}/explainability")
+        if cfg.generate_explainability
+        else make_skip_explainability_node()
     )
     workflow.add_node("explainability", explainability_fn)
 

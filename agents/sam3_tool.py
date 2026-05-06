@@ -1,6 +1,15 @@
 """
 SAM3 segmentation tool.
 
+Runtime prerequisites from upstream SAM3:
+  - Python 3.12+
+  - PyTorch 2.7+
+  - CUDA GPU with CUDA 12.6+
+
+The main pipeline can run in a Python 3.9 / macOS MPS environment, but SAM3
+cannot be installed there cleanly. In that case this tool returns a skipped
+segmentation result and the rest of the pipeline continues without SAM3.
+
 Based on sam3_pipeline.tex findings:
   - Zero-shot SAM3: Dice=0.189, IoU=0.124, Sensitivity=0.397 (insufficient)
   - Linear probe on frozen SAM3 encoder: Dice=0.836 pixel-level, 0.801 per-case mean
@@ -23,7 +32,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image, ImageDraw
 
-from config import DEFAULT_CONFIG, ModelConfig
+from config import DEFAULT_CONFIG, ModelConfig, resolve_torch_device
 
 # ── Try to import SAM3 ────────────────────────────────────────────────────────
 _SAM_IMPORT_ERROR = None
@@ -129,7 +138,7 @@ class SAM3Tool:
         output_dir: str = "outputs/segmentation",
     ):
         self.model_cfg = model_cfg or DEFAULT_CONFIG.model
-        self.device = torch.device(self.model_cfg.device)
+        self.device = resolve_torch_device(self.model_cfg.device, caller="SAM3Tool")
         self.sam3_dtype = (
             torch.bfloat16 if self.device.type == "cuda" else torch.float32
         )

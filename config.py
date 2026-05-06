@@ -12,6 +12,35 @@ import torch
 _DEFAULT_SAM3_PROBE = "checkpoints/sam3_probe.pth"
 _DEFAULT_SAM3_BPE_PATH = "sam3/sam3/assets/bpe_simple_vocab_16e6.txt.gz"
 
+
+def _mps_is_usable() -> bool:
+    if not torch.backends.mps.is_available():
+        return False
+    try:
+        torch.empty(1, device="mps")
+    except RuntimeError:
+        return False
+    return True
+
+
+def resolve_torch_device(device_name: str, caller: str = "config") -> torch.device:
+    device = torch.device(device_name)
+    if device.type == "mps" and not _mps_is_usable():
+        print(f"[{caller}] MPS requested but unusable; falling back to CPU.")
+        return torch.device("cpu")
+    if device.type == "cuda" and not torch.cuda.is_available():
+        print(f"[{caller}] CUDA requested but unavailable; falling back to CPU.")
+        return torch.device("cpu")
+    return device
+
+
+def _default_torch_device() -> str:
+    if torch.cuda.is_available():
+        return "cuda"
+    if _mps_is_usable():
+        return "mps"
+    return "cpu"
+
 # ── Task identifiers ──────────────────────────────────────────────────────────
 TASKS = ["binary_tumor", "multiclass_tumor", "ms", "stroke"]
 
@@ -114,9 +143,9 @@ class ModelConfig:
     )
 
     # ── Device ────────────────────────────────────────────────────────────────
-    device: str = field(
-        default_factory=lambda: "cuda" if torch.cuda.is_available() else "cpu"
-    )
+    # Auto-selects "cuda" on NVIDIA/Linux, "mps" on Apple Silicon when available,
+    # otherwise "cpu". Override from the CLI with --device {cuda,mps,cpu}.
+    device: str = field(default_factory=_default_torch_device)
 
 
 @dataclass

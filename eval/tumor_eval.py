@@ -114,7 +114,7 @@ def load_processed_paths(jsonl_path: Path) -> set[str]:
                 continue
             try:
                 rec = json.loads(line)
-                if rec.get("image_path"):
+                if rec.get("image_path") and rec.get("error") is None:
                     done.add(rec["image_path"])
             except json.JSONDecodeError:
                 pass

@@ -10,6 +10,14 @@ Roles in the pipeline:
 
 Prompts are loaded from prompts/ at import time so they can be edited without touching code.
 
+Device notes:
+  - ModelConfig.device auto-selects CUDA, then Apple MPS, then CPU.
+  - Use run_pipeline.py --device mps on Apple Silicon when
+    torch.backends.mps.is_available() is True.
+  - 4-bit bitsandbytes quantization is CUDA-only; MPS uses native float16.
+  - Generation inputs are moved to the model's actual device before .generate()
+    to avoid CPU input_ids with an MPS/CUDA model.
+
 Requires HuggingFace authentication:
     huggingface-cli login   (or set HF_TOKEN env var)
 and accepted terms of use at:
@@ -26,7 +34,7 @@ from PIL import Image
 from pydantic import BaseModel, field_validator
 from transformers import AutoModelForImageTextToText, AutoProcessor, BitsAndBytesConfig
 
-from config import DEFAULT_CONFIG, ModelConfig, RoutingConfig
+from config import DEFAULT_CONFIG, ModelConfig, RoutingConfig, resolve_torch_device
 
 # ── Load prompts from files ───────────────────────────────────────────────────
 _PROMPTS_DIR = Path(__file__).parent.parent / "prompts"
@@ -245,11 +253,18 @@ class MedGemmaAgent:
     ):
         self.model_cfg = model_cfg or DEFAULT_CONFIG.model
         self.routing_cfg = routing_cfg or DEFAULT_CONFIG.routing
-        self.device = torch.device(self.model_cfg.device)
+        self.device = self._resolve_device(self.model_cfg.device)
 
         self.processor = AutoProcessor.from_pretrained(self.model_cfg.medgemma_model_id)
 
-        if self.model_cfg.use_4bit_quantization:
+        use_4bit = self.model_cfg.use_4bit_quantization and self.device.type == "cuda"
+        if self.model_cfg.use_4bit_quantization and not use_4bit:
+            print(
+                "[MedGemmaAgent] 4-bit bitsandbytes loading is CUDA-only; "
+                f"using {self.device.type} native dtype instead."
+            )
+
+        if use_4bit:
             print(
                 f"[MedGemmaAgent] Loading {self.model_cfg.medgemma_model_id} (4-bit NF4)..."
             )
@@ -265,14 +280,24 @@ class MedGemmaAgent:
                 device_map="auto",
             )
         else:
+            dtype = self._model_dtype_for_device(self.device)
             print(
-                f"[MedGemmaAgent] Loading {self.model_cfg.medgemma_model_id} (bfloat16)..."
+                f"[MedGemmaAgent] Loading {self.model_cfg.medgemma_model_id} "
+                f"({dtype}, device={self.device})..."
             )
             self.model = AutoModelForImageTextToText.from_pretrained(
                 self.model_cfg.medgemma_model_id,
-                torch_dtype=torch.bfloat16,
-                device_map="auto",
+                dtype=dtype,
             )
+            self.model.to(self.device)
+        eos_token_id = self._first_token_id(
+            self.model.generation_config.eos_token_id
+            or self.model.config.eos_token_id
+        )
+        if self.model.generation_config.pad_token_id is None:
+            self.model.generation_config.pad_token_id = eos_token_id
+        if getattr(self.model.config, "pad_token_id", None) is None:
+            self.model.config.pad_token_id = self.model.generation_config.pad_token_id
         self.model.eval()
         print("[MedGemmaAgent] Model loaded.")
 
@@ -284,6 +309,37 @@ class MedGemmaAgent:
             print(f"[MedGemmaAgent] Loaded {len(self._few_shot_examples)} few-shot examples.")
         else:
             self._few_shot_examples = None
+
+    @staticmethod
+    def _resolve_device(device_name: str) -> torch.device:
+        return resolve_torch_device(device_name, caller="MedGemmaAgent")
+
+    @staticmethod
+    def _model_dtype_for_device(device: torch.device) -> torch.dtype:
+        if device.type == "cuda":
+            return torch.bfloat16
+        if device.type == "mps":
+            return torch.float16
+        return torch.float32
+
+    @staticmethod
+    def _first_token_id(token_id: int | list[int] | tuple[int, ...] | None) -> int | None:
+        if isinstance(token_id, (list, tuple)):
+            return int(token_id[0]) if token_id else None
+        return int(token_id) if token_id is not None else None
+
+    def _model_input_device(self) -> torch.device:
+        try:
+            return next(self.model.parameters()).device
+        except StopIteration:
+            return self.device
+
+    def _move_inputs_to_model_device(self, inputs):
+        device = self._model_input_device()
+        return {
+            key: value.to(device) if torch.is_tensor(value) else value
+            for key, value in inputs.items()
+        }
 
     # ── Primary triage (raw image) ────────────────────────────────────────────
 
@@ -403,7 +459,7 @@ class MedGemmaAgent:
         self,
         image: Image.Image,
         text_prompt: str,
-        max_new_tokens: int = 2064,
+        max_new_tokens: int = 1024,
         few_shot: list[tuple[Image.Image, str]] | None = None,
     ) -> str:
         images = image if isinstance(image, list) else [image]
@@ -421,10 +477,10 @@ class MedGemmaAgent:
         messages.append(
             {
                 "role": "user",
-                "content": (
-                    [{"type": "image", "image": img} for img in images]
-                    + [{"type": "text", "text": text_prompt}]
-                ),
+                "content": [
+                    *[{"type": "image", "image": img} for img in images],
+                    {"type": "text", "text": text_prompt},
+                ],
             }
         )
         inputs = self.processor.apply_chat_template(
@@ -433,7 +489,8 @@ class MedGemmaAgent:
             tokenize=True,
             return_dict=True,
             return_tensors="pt",
-        ).to(self.device)
+        )
+        inputs = self._move_inputs_to_model_device(inputs)
 
         with torch.no_grad():
             output_ids = self.model.generate(
@@ -441,6 +498,7 @@ class MedGemmaAgent:
                 max_new_tokens=max_new_tokens,
                 do_sample=False,
                 temperature=1.0,
+                pad_token_id=self.model.generation_config.pad_token_id,
             )
 
         n_input = inputs["input_ids"].shape[-1]
@@ -489,11 +547,16 @@ class MedGemmaAgent:
         inputs = self.processor.apply_chat_template(
             messages, add_generation_prompt=True,
             tokenize=True, return_dict=True, return_tensors="pt",
-        ).to(self.device)
+        )
+        inputs = self._move_inputs_to_model_device(inputs)
 
         with torch.no_grad():
             output_ids = self.model.generate(
-                **inputs, max_new_tokens=300, do_sample=False, temperature=1.0
+                **inputs,
+                max_new_tokens=300,
+                do_sample=False,
+                temperature=1.0,
+                pad_token_id=self.model.generation_config.pad_token_id,
             )
 
         n_input   = inputs["input_ids"].shape[-1]

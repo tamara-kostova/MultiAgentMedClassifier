@@ -6,6 +6,7 @@ and returns a (partial) state dict with the fields it modifies.
 """
 
 import uuid
+import time
 from pathlib import Path
 
 import cv2
@@ -26,6 +27,19 @@ VERIFICATION_DISAGREEMENT_CONFIDENCE_CAP = 0.55
 # (avoids re-loading multi-GB models on every invocation)
 
 
+def _case_name(state: NeuroimagingState) -> str:
+    return Path(state["image_path"]).name
+
+
+def _log_node_start(node: str, state: NeuroimagingState) -> float:
+    print(f"[{node}] start {_case_name(state)}", flush=True)
+    return time.perf_counter()
+
+
+def _log_node_done(node: str, state: NeuroimagingState, t0: float) -> None:
+    print(f"[{node}] done {_case_name(state)} in {time.perf_counter() - t0:.1f}s", flush=True)
+
+
 def make_triage_node(agent, routing_cfg: RoutingConfig = None):
     """
     Factory: returns an initial MedGemma triage node.
@@ -33,7 +47,9 @@ def make_triage_node(agent, routing_cfg: RoutingConfig = None):
     downstream specialist outputs.
     """
     def triage_node(state: NeuroimagingState) -> dict:
+        t0 = _log_node_start("triage", state)
         dx, routing = agent.diagnose(state["image_path"])
+        _log_node_done("triage", state, t0)
 
         return {
             "routing_decision": "full_workup",
@@ -53,7 +69,9 @@ def make_cnn_node(cnn_tool):
     """CNN classifier node. Uses best-performing model per task (from cnns.tex)."""
 
     def cnn_node(state: NeuroimagingState) -> dict:
+        t0 = _log_node_start("cnn_classify", state)
         result = cnn_tool.classify(state["image_path"], state["task"])
+        _log_node_done("cnn_classify", state, t0)
         return {
             "classification_result": result,
             "routing_path": state["routing_path"] + ["cnn_classify"],
@@ -66,8 +84,10 @@ def make_sam3_node(sam3_tool):
     """SAM3 segmentation node. Produces mask + bbox overlay for downstream nodes."""
 
     def sam3_node(state: NeuroimagingState) -> dict:
+        t0 = _log_node_start("sam3_segment", state)
         pathology = state.get("suspected_pathology") or "brain lesion"
         result = sam3_tool.segment(state["image_path"], text_prompt=pathology)
+        _log_node_done("sam3_segment", state, t0)
         return {
             "segmentation_result": result,
             "routing_path": state["routing_path"] + ["sam3_segment"],
@@ -79,11 +99,12 @@ def make_sam3_node(sam3_tool):
 def make_cnn_with_mask_node(cnn_tool, agent=None):
     """
     CNN node that operates on the SAM3 bbox-guided image.
-    Also runs MedGemma with system_prompt_bbox.txt on the overlay image
-    to get a spatially-informed diagnosis alongside the CNN result.
+    Also runs MedGemma with system_prompt_bbox.txt when SAM3 produced a real
+    overlay image, to get a spatially-informed diagnosis alongside the CNN result.
     """
 
     def cnn_with_mask_node(state: NeuroimagingState) -> dict:
+        t0 = _log_node_start("cnn_with_mask", state)
         seg = state.get("segmentation_result")
         seg_valid = seg and not seg.get("skipped")
 
@@ -96,16 +117,15 @@ def make_cnn_with_mask_node(cnn_tool, agent=None):
                 state["image_path"], state["task"]
             )
 
-        # MedGemma gets the red overlay for spatially-guided diagnosis
-        if agent is not None:
-            overlay_path = (
-                seg["guided_image_path"]
-                if seg_valid and seg.get("guided_image_path")
-                else state["image_path"]
-            )
+        # MedGemma gets the red overlay only when SAM3 actually produced one.
+        # If SAM3 is unavailable/skipped, avoid a duplicate MedGemma call on the
+        # original image; the initial triage already covered that view.
+        if agent is not None and seg_valid and seg.get("guided_image_path"):
+            overlay_path = seg["guided_image_path"]
             bbox_dx = agent.diagnose_with_bbox(overlay_path)
             updates["medgemma_bbox_diagnosis"] = bbox_dx.model_dump()
 
+        _log_node_done("cnn_with_mask", state, t0)
         return updates
 
     return cnn_with_mask_node
@@ -118,7 +138,9 @@ def make_biomedclip_node(biomedclip_tool, routing_cfg: RoutingConfig = None):
     """
 
     def biomedclip_node(state: NeuroimagingState) -> dict:
+        t0 = _log_node_start("biomedclip", state)
         result = biomedclip_tool.classify(state["image_path"], state["task"])
+        _log_node_done("biomedclip", state, t0)
         return {
             "biomedclip_result": result,
             "routing_path": state["routing_path"] + ["biomedclip"],
@@ -137,7 +159,9 @@ def make_report_node(agent, routing_cfg: RoutingConfig = None, skip_report: bool
     cfg = routing_cfg or DEFAULT_CONFIG.routing
 
     def report_node(state: NeuroimagingState) -> dict:
+        t0 = _log_node_start("report", state)
         saliency_iou = state.get("saliency_sam3_iou")
+        final_dx = None
         if skip_report:
             report = "[report skipped in eval mode]"
         else:
@@ -186,7 +210,7 @@ def make_report_node(agent, routing_cfg: RoutingConfig = None, skip_report: bool
             final_conf = penalised
             requires_review = True
 
-        return {
+        updates = {
             "final_report": report,
             "final_predicted_class": final_class,
             "final_confidence": final_conf,
@@ -196,6 +220,8 @@ def make_report_node(agent, routing_cfg: RoutingConfig = None, skip_report: bool
             "requires_human_review": requires_review,
             "routing_path": state["routing_path"] + ["report"],
         }
+        _log_node_done("report", state, t0)
+        return updates
 
     return report_node
 
@@ -222,9 +248,11 @@ def make_explainability_node(cnn_tool, output_dir: str = "outputs/explainability
     )
 
     def explainability_node(state: NeuroimagingState) -> dict:
+        t0 = _log_node_start("explainability", state)
         cnn_result = state.get("classification_result")
         if cnn_result is None:
             # No CNN ran — nothing to explain
+            _log_node_done("explainability", state, t0)
             return {"explainability_result": None}
 
         task = state["task"]
@@ -233,6 +261,7 @@ def make_explainability_node(cnn_tool, output_dir: str = "outputs/explainability
         # Resolve the model and its class mapping
         model, class_names = cnn_tool.get_model_and_classes(task)
         if model is None:
+            _log_node_done("explainability", state, t0)
             return {"explainability_result": None}
 
         predicted_class = cnn_result["predicted_class"]
@@ -297,13 +326,30 @@ def make_explainability_node(cnn_tool, output_dir: str = "outputs/explainability
             except Exception as e:
                 print(f"[explainability] IoU computation failed: {e}")
 
-        return {
+        updates = {
             "explainability_result": paths,
             "saliency_sam3_iou": saliency_sam3_iou,
             "routing_path": state["routing_path"] + ["explainability"],
         }
+        _log_node_done("explainability", state, t0)
+        return updates
 
     return explainability_node
+
+
+def make_skip_explainability_node():
+    """Fast no-op explainability node for evaluation and constrained devices."""
+
+    def skip_explainability_node(state: NeuroimagingState) -> dict:
+        t0 = _log_node_start("explainability", state)
+        _log_node_done("explainability", state, t0)
+        return {
+            "explainability_result": None,
+            "saliency_sam3_iou": None,
+            "routing_path": state["routing_path"] + ["explainability_skipped"],
+        }
+
+    return skip_explainability_node
 
 
 def human_review_node(state: NeuroimagingState) -> dict:
@@ -331,10 +377,12 @@ def make_verification_node(agent):
     """
 
     def verification_node(state: NeuroimagingState) -> dict:
+        t0 = _log_node_start("verification", state)
         saliency_paths = state.get("explainability_result") or {}
         gradcam_path = saliency_paths.get("gradcam_pp")
 
         if not gradcam_path:
+            _log_node_done("verification", state, t0)
             return {"verification_result": None}
 
         cnn_result = state.get("classification_result") or {}
@@ -358,11 +406,13 @@ def make_verification_node(agent):
             adjusted_conf = current_conf
             human_review = state.get("requires_human_review", False)
 
-        return {
+        updates = {
             "final_confidence": adjusted_conf,
             "requires_human_review": human_review,
             "verification_result": verification.model_dump(),
         }
+        _log_node_done("verification", state, t0)
+        return updates
 
     return verification_node
 

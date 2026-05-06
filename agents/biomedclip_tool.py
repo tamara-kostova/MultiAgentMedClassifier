@@ -26,6 +26,7 @@ from config import (
     TUMOR_12_CLASSES,
     ModelConfig,
     PreprocessConfig,
+    resolve_torch_device,
 )
 
 # Layer indices (0-indexed into BiomedCLIP ViT-B/16's 12 transformer blocks).
@@ -92,11 +93,10 @@ class BiomedCLIPTool:
     ):
         self.model_cfg = model_cfg or DEFAULT_CONFIG.model
         self.preprocess_cfg = preprocess_cfg or DEFAULT_CONFIG.preprocess
-        self.device = torch.device(self.model_cfg.device)
+        self.device = resolve_torch_device(self.model_cfg.device, caller="BiomedCLIPTool")
 
-        # BiomedCLIP runs on CPU to leave GPU VRAM for MedGemma
-        self.clip_device = torch.device("cpu")
-        print("[BiomedCLIPTool] Loading BiomedCLIP model (CPU)...")
+        self.clip_device = self.device
+        print(f"[BiomedCLIPTool] Loading BiomedCLIP model ({self.clip_device})...")
         self.model, _, self.preprocess = open_clip.create_model_and_transforms(
             self.model_cfg.biomedclip_model_id
         )

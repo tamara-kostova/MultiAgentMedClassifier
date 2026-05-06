@@ -20,6 +20,13 @@ Usage examples:
   python run_pipeline.py --image image.jpg --task binary_tumor \
     --few_shot --few_shot_data_dir /path/to/data
 
+  # Force Apple Silicon GPU:
+  python run_pipeline.py --image image.jpg --task binary_tumor --device mps
+
+  # Faster Mac evaluation: use MPS and skip final MedGemma report generation.
+  python run_pipeline.py --tumor_eval --tumor_eval_dir data/Br35H \
+    --task binary_tumor --label_map br35h --device mps --skip_report
+
 Checkpoints:
   CNN checkpoints should be PyTorch state dicts saved as:
       torch.save({"model_state_dict": model.state_dict(), ...}, path)
@@ -31,11 +38,16 @@ import argparse
 import json
 from pathlib import Path
 
-from config import DEFAULT_CONFIG, ModelConfig, PipelineConfig, RoutingConfig
+from config import (
+    DEFAULT_CONFIG,
+    ModelConfig,
+    PipelineConfig,
+    RoutingConfig,
+    resolve_torch_device,
+)
 from eval.evaluate import compare_configurations, load_test_split, run_single
 from eval.tumor_eval import LABEL_MAPS, run_tumor_eval
 from pipeline.graph import build_pipeline
-from pipeline.state import initial_state
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -161,6 +173,16 @@ def parse_args():
 
     # Eval optimisation
     p.add_argument(
+        "--device",
+        type=str,
+        choices=["cuda", "mps", "cpu"],
+        default=None,
+        help=(
+            "Override compute device, e.g. --device mps on Apple Silicon. "
+            "Defaults to CUDA, then Apple MPS, then CPU."
+        ),
+    )
+    p.add_argument(
         "--skip_report",
         action="store_true",
         help="Skip MedGemma report generation (eval mode — saves ~5–9 s/image)",
@@ -201,6 +223,11 @@ def build_config(args) -> PipelineConfig:
         else:
             print(f"[calibration] File not found: {cal_path} — using T=1.0 defaults")
 
+    device = resolve_torch_device(
+        args.device or default_model_cfg.device,
+        caller="run_pipeline",
+    )
+
     model_cfg = ModelConfig(
         cnn_checkpoints=cnn_checkpoints,
         sam3_linear_probe_checkpoint=(
@@ -210,6 +237,7 @@ def build_config(args) -> PipelineConfig:
         cnn_temperatures=temperatures,
         use_few_shot=args.few_shot,
         few_shot_data_dir=args.few_shot_data_dir,
+        device=device.type,
     )
 
     routing_cfg = RoutingConfig(

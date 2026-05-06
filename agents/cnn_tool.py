@@ -22,6 +22,7 @@ from config import (
     TUMOR_12_CLASSES,
     ModelConfig,
     PreprocessConfig,
+    resolve_torch_device,
 )
 
 NUM_CLASSES = {
@@ -162,7 +163,7 @@ class CNNClassifier:
     ):
         self.model_cfg = model_cfg or DEFAULT_CONFIG.model
         self.preprocess_cfg = preprocess_cfg or DEFAULT_CONFIG.preprocess
-        self.device = torch.device(self.model_cfg.device)
+        self.device = resolve_torch_device(self.model_cfg.device, caller="CNNClassifier")
         self._models: dict[str, nn.Module] = {}
         self._transform = _get_transform(self.preprocess_cfg)
 
