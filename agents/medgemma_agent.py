@@ -459,7 +459,7 @@ class MedGemmaAgent:
         self,
         image: Image.Image,
         text_prompt: str,
-        max_new_tokens: int = 1024,
+        max_new_tokens: int = 2048,
         few_shot: list[tuple[Image.Image, str]] | None = None,
     ) -> str:
         images = image if isinstance(image, list) else [image]
@@ -507,11 +507,45 @@ class MedGemmaAgent:
 
     @staticmethod
     def _parse_diagnosis(text: str) -> MedicalDiagnosis:
-        text = re.sub(r"```(?:json)?\s*", "", text).strip().rstrip("`")
-        match = re.search(r"\{.*\}", text, re.DOTALL)
-        if not match:
+        payload = MedGemmaAgent._extract_json_object(text)
+        if payload.get("diagnosis_confidence") is None:
+            payload["diagnosis_confidence"] = 0.5
+        return MedicalDiagnosis(**payload)
+
+    @staticmethod
+    def _strip_generation_noise(text: str) -> str:
+        """Drop MedGemma hidden/thought tag chatter before JSON extraction."""
+        text = text.strip()
+        if "<unused95>" in text:
+            text = text.rsplit("<unused95>", 1)[-1]
+        text = re.sub(r"<unused\d+>\s*(?:thought)?", "", text, flags=re.IGNORECASE)
+        return text.strip()
+
+    @staticmethod
+    def _extract_json_object(text: str) -> dict:
+        text = MedGemmaAgent._strip_generation_noise(text)
+
+        fenced_blocks = re.findall(
+            r"```(?:json)?\s*(\{.*?\})\s*```",
+            text,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        candidates = fenced_blocks or [text]
+
+        decoder = json.JSONDecoder()
+        parsed_objects = []
+        for candidate in candidates:
+            for match in re.finditer(r"\{", candidate):
+                try:
+                    obj, _ = decoder.raw_decode(candidate[match.start():])
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(obj, dict):
+                    parsed_objects.append(obj)
+
+        if not parsed_objects:
             raise json.JSONDecodeError("No JSON object found", text, 0)
-        return MedicalDiagnosis(**json.loads(match.group()))
+        return parsed_objects[-1]
 
     def verify_cnn_prediction(
         self,
@@ -561,13 +595,13 @@ class MedGemmaAgent:
 
         n_input   = inputs["input_ids"].shape[-1]
         raw       = self.processor.decode(output_ids[0][n_input:], skip_special_tokens=True).strip()
-        raw       = re.sub(r"```(?:json)?\s*", "", raw).strip().rstrip("`")
-        match     = re.search(r"\{.*\}", raw, re.DOTALL)
-        if not match:
+        try:
+            payload = self._extract_json_object(raw)
+        except json.JSONDecodeError:
             # Verification failed to parse — treat as non-committal agreement
             return VerificationResult(
                 agreement=True, saliency_plausible=True,
                 alternative_diagnosis=None, verification_confidence=0.5,
                 reasoning="Verification parse failed — defaulting to CNN prediction.",
             )
-        return VerificationResult(**json.loads(match.group()))
+        return VerificationResult(**payload)

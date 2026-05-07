@@ -13,6 +13,20 @@ _DEFAULT_SAM3_PROBE = "checkpoints/sam3_probe.pth"
 _DEFAULT_SAM3_BPE_PATH = "sam3/sam3/assets/bpe_simple_vocab_16e6.txt.gz"
 
 
+def cuda_is_usable() -> tuple[bool, str | None]:
+    try:
+        if not torch.cuda.is_available():
+            return False, None
+    except (AssertionError, RuntimeError) as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+
+    try:
+        torch.empty(1, device="cuda")
+    except (AssertionError, RuntimeError) as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+    return True, None
+
+
 def _mps_is_usable() -> bool:
     if not torch.backends.mps.is_available():
         return False
@@ -28,14 +42,32 @@ def resolve_torch_device(device_name: str, caller: str = "config") -> torch.devi
     if device.type == "mps" and not _mps_is_usable():
         print(f"[{caller}] MPS requested but unusable; falling back to CPU.")
         return torch.device("cpu")
-    if device.type == "cuda" and not torch.cuda.is_available():
-        print(f"[{caller}] CUDA requested but unavailable; falling back to CPU.")
-        return torch.device("cpu")
+    if device.type == "cuda":
+        usable, reason = cuda_is_usable()
+        if not usable:
+            detail = f" ({reason})" if reason else ""
+            print(f"[{caller}] CUDA requested but unusable{detail}; falling back to CPU.")
+            return torch.device("cpu")
     return device
 
 
+def resolve_vision_device(
+    device_name: str,
+    caller: str = "config",
+    prefer_cuda: bool = True,
+) -> torch.device:
+    """Resolve the device for CNN/BiomedCLIP vision models.
+
+    Vision-side inference is small enough to share the GPU with the larger
+    agents, and keeping it on CUDA avoids slow CPU fallbacks during evaluation.
+    """
+    if prefer_cuda and cuda_is_usable()[0]:
+        return torch.device("cuda")
+    return resolve_torch_device(device_name, caller=caller)
+
+
 def _default_torch_device() -> str:
-    if torch.cuda.is_available():
+    if cuda_is_usable()[0]:
         return "cuda"
     if _mps_is_usable():
         return "mps"
@@ -146,6 +178,9 @@ class ModelConfig:
     # Auto-selects "cuda" on NVIDIA/Linux, "mps" on Apple Silicon when available,
     # otherwise "cpu". Override from the CLI with --device {cuda,mps,cpu}.
     device: str = field(default_factory=_default_torch_device)
+    # Keep CNN and BiomedCLIP on CUDA whenever available, unless the CLI/user
+    # explicitly asks for cpu or mps.
+    prefer_cuda_for_vision: bool = True
 
 
 @dataclass

@@ -221,3 +221,4 @@ memory/
 *.jpeg
 data/
 papers/
+outputs/

@@ -238,6 +238,7 @@ def build_config(args) -> PipelineConfig:
         use_few_shot=args.few_shot,
         few_shot_data_dir=args.few_shot_data_dir,
         device=device.type,
+        prefer_cuda_for_vision=(args.device is None or args.device == "cuda"),
     )
 
     routing_cfg = RoutingConfig(

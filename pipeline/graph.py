@@ -8,8 +8,6 @@ Graph structure:
                            │
                       sam3_segment
                            │
-                     cnn_with_mask
-                           │
                        biomedclip
                            │
                     explainability
@@ -33,7 +31,6 @@ from config import DEFAULT_CONFIG, PipelineConfig
 from pipeline.nodes import (
     make_biomedclip_node,
     make_cnn_node,
-    make_cnn_with_mask_node,
     make_explainability_node,
     make_fhir_node,
     make_report_node,
@@ -68,7 +65,6 @@ def build_pipeline(cfg: PipelineConfig = None):
     triage_fn = make_triage_node(medgemma, cfg.routing)
     cnn_fn = make_cnn_node(cnn)
     sam3_fn = make_sam3_node(sam3)
-    cnn_with_mask_fn = make_cnn_with_mask_node(cnn, agent=medgemma)
     biomedclip_fn = make_biomedclip_node(clip, cfg.routing)
     report_fn = make_report_node(medgemma, cfg.routing, skip_report=cfg.skip_report)
     verification_fn = make_verification_node(medgemma)
@@ -80,7 +76,6 @@ def build_pipeline(cfg: PipelineConfig = None):
     workflow.add_node("triage", triage_fn)
     workflow.add_node("cnn_classify", cnn_fn)
     workflow.add_node("sam3_segment", sam3_fn)
-    workflow.add_node("cnn_with_mask", cnn_with_mask_fn)
     workflow.add_node("biomedclip", biomedclip_fn)
     workflow.add_node("verification", verification_fn)
     workflow.add_node("report", report_fn)
@@ -96,8 +91,7 @@ def build_pipeline(cfg: PipelineConfig = None):
 
     workflow.add_edge("triage", "cnn_classify")
     workflow.add_edge("cnn_classify", "sam3_segment")
-    workflow.add_edge("sam3_segment", "cnn_with_mask")
-    workflow.add_edge("cnn_with_mask", "biomedclip")
+    workflow.add_edge("sam3_segment", "biomedclip")
     workflow.add_edge("biomedclip", "explainability")
     workflow.add_edge("explainability", "verification")
     workflow.add_edge("verification", "report")
