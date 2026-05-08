@@ -197,6 +197,7 @@ def extract_row(
         "biomedclip_top_score": clip.get("top_score"),
         "biomedclip_ranked_labels": clip.get("ranked_labels"),
         "biomedclip_scores": clip.get("scores"),
+        "biomedclip_mode": clip.get("mode"),
         # ── Explainability ────────────────────────────────────────────────────
         "gradcam_pp_path": expl.get("gradcam_pp"),
         "integrated_gradients_path": expl.get("integrated_gradients"),

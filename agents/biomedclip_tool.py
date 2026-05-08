@@ -182,22 +182,23 @@ class BiomedCLIPTool:
     def _zero_shot_classify(
         self, image_tensor: torch.Tensor, labels: list[str]
     ) -> dict:
-        """Cosine similarity between layer-6 CLS features and text embeddings."""
-        features = self._extract_layer_features(image_tensor)
-        image_feat = features[MIDDLE_LAYER]  # (1, 768), already L2-normalised
+        """
+        Standard CLIP zero-shot: encode_image() into the joint embedding space, then
+        cosine similarity against text embeddings using the model's learned logit_scale.
 
-        visual = self.model.visual
-        if hasattr(visual, "head") and hasattr(visual.head, "proj"):
-            proj = visual.head.proj  # nn.Linear(768, 512)
-            image_feat = F.normalize(proj(image_feat).float(), dim=-1)
-        elif hasattr(visual, "proj") and visual.proj is not None:
-            image_feat = F.normalize((image_feat @ visual.proj).float(), dim=-1)
+        Previously used visual.head.proj applied to layer-6 intermediate features, which
+        produced embeddings outside the joint space and caused label collapse (every image
+        predicted as the same class). Layer-6 features are only valid for the linear probe
+        path where the probe head is trained on those features directly.
+        """
+        image_feat = F.normalize(self.model.encode_image(image_tensor).float(), dim=-1)
 
         tokens = self.tokenizer(labels).to(self.clip_device)
         text_feats = F.normalize(self.model.encode_text(tokens).float(), dim=-1)
 
-        logits = (image_feat @ text_feats.T).squeeze(0)
-        scores = torch.softmax(logits * 100, dim=0).cpu().numpy()
+        logit_scale = self.model.logit_scale.exp()
+        logits = (image_feat @ text_feats.T).squeeze(0) * logit_scale
+        scores = torch.softmax(logits, dim=0).cpu().numpy()
 
         ranked_idx = np.argsort(scores)[::-1]
         return {
