@@ -119,9 +119,20 @@ class BiomedCLIPTool:
         Supports:
           - MLP concat-fusion head  (in_dim=768*3, CLIP-Fusion-Concat checkpoints)
           - MLP single-layer head   (in_dim=768,   CLIP-Layer* checkpoints)
-          - Legacy nn.Linear        (backward compat)
+          - Legacy nn.Linear        (backward compat, various key conventions)
+          - Wrapped checkpoints     (model_state_dict / state_dict wrappers)
         """
-        state = torch.load(checkpoint_path, map_location=self.device)
+        raw = torch.load(checkpoint_path, map_location=self.device)
+
+        # Unwrap common training-checkpoint wrappers
+        if isinstance(raw, dict):
+            state = (
+                raw.get("model_state_dict")
+                or raw.get("state_dict")
+                or raw
+            )
+        else:
+            state = raw
 
         if "head.1.weight" in state:
             # MLP head: LayerNorm → Linear(in→512) → ReLU → Dropout → Linear(512→out)
@@ -137,11 +148,22 @@ class BiomedCLIPTool:
             mlp.load_state_dict({k[5:]: v for k, v in state.items() if k.startswith("head.")})
             return mlp.to(self.device).eval(), (in_dim == 768 * 3)
 
-        # Legacy: simple nn.Linear
-        in_dim = state["weight"].shape[1]
-        head = nn.Linear(in_dim, state["weight"].shape[0])
-        head.load_state_dict(state)
-        return head.to(self.device).eval(), (in_dim == 768 * 3)
+        # Normalise alternative key prefixes to bare "weight" / "bias"
+        for prefix in ("", "fc.", "linear.", "classifier.", "0."):
+            w_key = f"{prefix}weight"
+            b_key = f"{prefix}bias"
+            if w_key in state:
+                linear_state = {"weight": state[w_key], "bias": state[b_key]}
+                in_dim  = linear_state["weight"].shape[1]
+                out_dim = linear_state["weight"].shape[0]
+                head = nn.Linear(in_dim, out_dim)
+                head.load_state_dict(linear_state)
+                return head.to(self.device).eval(), (in_dim == 768 * 3)
+
+        raise ValueError(
+            f"Unrecognised probe checkpoint format in {checkpoint_path}. "
+            f"Top-level keys: {list(state.keys())[:10]}"
+        )
 
     def _extract_layer_features(
         self, image_tensor: torch.Tensor
@@ -212,16 +234,30 @@ class BiomedCLIPTool:
     def _linear_probe_classify(
         self, image_tensor: torch.Tensor, labels: list[str], task: str
     ) -> dict:
-        """MLP probe on layer-6 features or concat fusion of layers 2, 6, 11."""
-        features = self._extract_layer_features(image_tensor)
+        """MLP probe on layer-6 features or concat fusion of layers 2, 6, 11.
+
+        If the probe head expects 512-dim input it was trained on encode_image()
+        projected embeddings; use those instead of raw layer-6 CLS tokens.
+        """
         head, is_fusion = self._probe_heads[task]
 
-        if is_fusion:
+        # Determine the head's expected input dimension
+        if isinstance(head, nn.Sequential):
+            in_dim = head[1].in_features  # index 1 is the first Linear (after LayerNorm)
+        else:
+            in_dim = head.in_features
+
+        if in_dim == 512:
+            # Probe trained on the 512-dim projected CLIP embedding space
+            feat = F.normalize(self.model.encode_image(image_tensor).float(), dim=-1)
+        elif is_fusion:
+            features = self._extract_layer_features(image_tensor)
             feat = torch.cat(
                 [features[SHALLOW_LAYER], features[MIDDLE_LAYER], features[DEEP_LAYER]],
                 dim=-1,
             )
         else:
+            features = self._extract_layer_features(image_tensor)
             feat = features[MIDDLE_LAYER]
 
         logits = head(feat.to(self.device)).squeeze(0)
