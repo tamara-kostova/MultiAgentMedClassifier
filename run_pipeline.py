@@ -16,6 +16,10 @@ Usage examples:
   python run_pipeline.py --image image.jpg --task binary_tumor \
     --cnn_binary_tumor checkpoints/densenet169_binary_tumor.pt
 
+  # With BiomedCLIP linear probe (layer-6 or concat-fusion head):
+  python run_pipeline.py --image image.jpg --task binary_tumor \
+    --clip_binary_tumor checkpoints/biomedclip_probe_binary_tumor.pt
+
   # With few-shot examples (one image per class prepended to MedGemma triage):
   python run_pipeline.py --image image.jpg --task binary_tumor \
     --few_shot --few_shot_data_dir /path/to/data
@@ -120,6 +124,16 @@ def parse_args():
     p.add_argument("--cnn_multiclass", type=str, default=None)
     p.add_argument("--cnn_ms", type=str, default=None)
     p.add_argument("--cnn_stroke", type=str, default=None)
+
+    # BiomedCLIP linear probe checkpoint overrides (layer-6 or concat-fusion heads)
+    p.add_argument("--clip_binary_tumor", type=str, default=None,
+                   help="BiomedCLIP probe checkpoint for binary_tumor task")
+    p.add_argument("--clip_multiclass", type=str, default=None,
+                   help="BiomedCLIP probe checkpoint for multiclass_tumor task")
+    p.add_argument("--clip_ms", type=str, default=None,
+                   help="BiomedCLIP probe checkpoint for ms task")
+    p.add_argument("--clip_stroke", type=str, default=None,
+                   help="BiomedCLIP probe checkpoint for stroke task")
     p.add_argument(
         "--sam3_probe",
         type=str,
@@ -228,8 +242,20 @@ def build_config(args) -> PipelineConfig:
         caller="run_pipeline",
     )
 
+    clip_checkpoints = default_model_cfg.biomedclip_probe_checkpoints.copy()
+    clip_overrides = {
+        "binary_tumor":     args.clip_binary_tumor,
+        "multiclass_tumor": args.clip_multiclass,
+        "ms":               args.clip_ms,
+        "stroke":           args.clip_stroke,
+    }
+    clip_checkpoints.update(
+        {task: path for task, path in clip_overrides.items() if path is not None}
+    )
+
     model_cfg = ModelConfig(
         cnn_checkpoints=cnn_checkpoints,
+        biomedclip_probe_checkpoints=clip_checkpoints,
         sam3_linear_probe_checkpoint=(
             args.sam3_probe or default_model_cfg.sam3_linear_probe_checkpoint
         ),

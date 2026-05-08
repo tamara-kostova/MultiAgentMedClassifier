@@ -124,10 +124,10 @@ class ModelConfig:
     # Probe heads from 18_layer_fusion_benchmark.py (layer-6 or concat fusion of layers 2,6,11)
     biomedclip_probe_checkpoints: dict = field(
         default_factory=lambda: {
-            "binary_tumor": None,
-            "multiclass_tumor": None,
-            "ms": None,
-            "stroke": None,
+            "binary_tumor":     "checkpoints/linear_probe_BiomedCLIP_MRI_tumor_binary_norm_best.pt",
+            "multiclass_tumor": "checkpoints/linear_probe_BiomedCLIP_MRI_tumor_multiclass_norm_best.pt",
+            "ms":               "checkpoints/linear_probe_BiomedCLIP_MRI_ms_norm_best.pt",
+            "stroke":           "checkpoints/linear_probe_BiomedCLIP_CT_stroke_binary_norm_best.pt",
         }
     )
 
