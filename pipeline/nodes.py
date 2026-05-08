@@ -310,6 +310,10 @@ def make_explainability_node(cnn_tool, output_dir: str = "outputs/explainability
         paths["integrated_gradients"] = ig_path
 
         # ── GradCAM++ / SAM3 mask IoU ─────────────────────────────────────────
+        # IoU is only meaningful when SAM3 actually found something (non-empty
+        # mask).  An all-zero mask means SAM3 predicted no lesion — that is
+        # correct for normal scans and should NOT trigger a confidence penalty.
+        # We record None in that case so report_node skips the penalty.
         saliency_sam3_iou = None
         seg_result = state.get("segmentation_result")
         if _cam_r is not None and seg_result and seg_result.get("mask_path"):
@@ -318,17 +322,24 @@ def make_explainability_node(cnn_tool, output_dir: str = "outputs/explainability
                     Image.open(seg_result["mask_path"]).convert("L").resize((224, 224))
                 )
                 sam_binary = (sam_mask > 127).astype(np.uint8)
-                cam_binary = (_cam_r >= 0.5).astype(np.uint8)
-                intersection = int((cam_binary & sam_binary).sum())
-                union = int((cam_binary | sam_binary).sum())
-                saliency_sam3_iou = intersection / union if union > 0 else 0.0
-                print(f"[explainability] GradCAM++/SAM3 IoU = {saliency_sam3_iou:.3f}")
+                if sam_binary.sum() == 0:
+                    # SAM3 found no lesion pixels — IoU undefined, skip penalty
+                    print("[explainability] SAM3 mask empty (no lesion predicted) — IoU skipped")
+                else:
+                    cam_binary = (_cam_r >= 0.5).astype(np.uint8)
+                    intersection = int((cam_binary & sam_binary).sum())
+                    union = int((cam_binary | sam_binary).sum())
+                    saliency_sam3_iou = intersection / union if union > 0 else 0.0
+                    print(f"[explainability] GradCAM++/SAM3 IoU = {saliency_sam3_iou:.3f}")
             except Exception as e:
                 print(f"[explainability] IoU computation failed: {e}")
 
         updates = {
             "explainability_result": paths,
             "saliency_sam3_iou": saliency_sam3_iou,
+            "sam3_mask_empty": (saliency_sam3_iou is None and
+                                seg_result is not None and
+                                seg_result.get("mask_path") is not None),
             "routing_path": state["routing_path"] + ["explainability"],
         }
         _log_node_done("explainability", state, t0)

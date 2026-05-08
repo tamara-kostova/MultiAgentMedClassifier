@@ -190,8 +190,9 @@ def extract_row(
         "sam3_mask_path": seg.get("mask_path"),
         "sam3_bbox": seg.get("bbox"),
         "sam3_guided_image_path": seg.get("guided_image_path"),
-        "sam3_dice_estimate": seg.get("dice_estimate"),
+
         "sam3_skipped": seg.get("skipped", False),
+        "sam3_mask_empty": final_state.get("sam3_mask_empty", False),
         # ── BiomedCLIP ────────────────────────────────────────────────────────
         "biomedclip_top_label": clip.get("top_label"),
         "biomedclip_top_score": clip.get("top_score"),

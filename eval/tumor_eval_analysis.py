@@ -560,11 +560,7 @@ def section_sam3(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataF
     coverage = _bbox_coverage(df["sam3_bbox"].tolist())
     skipped  = df["sam3_skipped"].values
 
-    dice_vals = df["sam3_dice_estimate"].values
     print(f"  sam3_skipped : {skipped.sum()} / {len(df)}")
-    dice_unique = sorted(set(dice_vals[~np.isnan(dice_vals)]))
-    print(f"  sam3_dice_estimate unique values: {dice_unique}  "
-          f"(constant={len(dice_unique)==1})")
 
     # ── IoU percentile table by class ─────────────────────────────────────────
     print("\n  [IoU (GradCAM++ ∩ SAM3 mask) — percentiles by true class]")
@@ -983,7 +979,6 @@ def generate_report(
         fp_df.to_markdown(index=False),
         "",
         "### Key SAM3 findings:",
-        "- `sam3_dice_estimate` is a **constant** (0.836) from config — not computed per-image.",
         "- IoU with GradCAM++ is near-zero for the majority of samples, especially normals.",
         "- This drives `final_confidence → 0` and flags 100% of samples for human review.",
         "",
@@ -1029,7 +1024,6 @@ def generate_report(
         "| SAM3 IoU ≈ 0 for 81.7% of samples → `final_confidence` zeroed out | SAM3 + report_node | 100% human-review flag rate |",
         "| MedGemma overconfident on wrong predictions (conf_wrong > conf_correct) | MedGemma | ECE = 0.31–0.24 |",
         "| Pipeline specificity degrades from CNN (1.00) to 0.35 due to MedGemma/CLIP FPs | Pipeline fusion | Specificity collapse |",
-        "| `sam3_dice_estimate` is a constant (not per-image computed) | SAM3 | Misleading metric |",
         "| 100% human-review rate makes triage flag useless | Pipeline | No filtering signal |",
         "",
     ]

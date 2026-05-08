@@ -207,7 +207,7 @@ class SAM3Tool:
                 "mask_path": str,
                 "bbox": [x1, y1, x2, y2],
                 "guided_image_path": str,   # original image with red bbox overlay (for MedGemma)
-                "dice_estimate": float,
+
                 "skipped": bool
             }
         """
@@ -255,14 +255,13 @@ class SAM3Tool:
         )
         mask = logits.argmax(dim=1).squeeze(0).cpu().numpy().astype(np.uint8)
 
-        return self._save_results(image, mask, image_path, dice_estimate=0.836)
+        return self._save_results(image, mask, image_path)
 
     def _save_results(
         self,
         image: np.ndarray,
         mask: np.ndarray,
         image_path: str,
-        dice_estimate: float,
     ) -> dict:
         """Save binary mask and bbox overlay image; compute bounding box."""
         uid = uuid.uuid4().hex[:8]
@@ -293,7 +292,7 @@ class SAM3Tool:
             "mask_path": mask_path,
             "bbox": bbox,
             "guided_image_path": guided_path,
-            "dice_estimate": dice_estimate,
+
             "skipped": False,
         }
 
@@ -303,6 +302,5 @@ class SAM3Tool:
             "mask_path": None,
             "bbox": None,
             "guided_image_path": image_path,
-            "dice_estimate": 0.0,
             "skipped": True,
         }
