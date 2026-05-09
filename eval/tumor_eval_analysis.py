@@ -859,6 +859,56 @@ def generate_report(
         v = row.iloc[0].get(col, "N/A")
         return f"{v:.4f}" if isinstance(v, float) else str(v)
 
+    def _float_metric(model, col):
+        v = get_metric(model, col)
+        try:
+            return float(v)
+        except (ValueError, TypeError):
+            return float("nan")
+
+    # Detect BiomedCLIP label collapse
+    clip_preds = df["biomedclip_top_label"].apply(to_binary)
+    clip_unique = clip_preds.unique()
+    clip_collapsed = len(clip_unique) == 1
+
+    # Compute human-review rate from data
+    total_flagged = int(df["requires_human_review"].sum()) if "requires_human_review" in df.columns else n
+    flag_pct = total_flagged / n * 100 if n > 0 else 0.0
+
+    # Compute SAM3 zero-IoU rate from data
+    iou_vals = df["saliency_sam3_iou"].values if "saliency_sam3_iou" in df.columns else np.array([])
+    iou_zero_rate = float((iou_vals == 0).mean()) if len(iou_vals) > 0 else float("nan")
+
+    # BiomedCLIP key observation
+    if clip_collapsed:
+        clip_obs = (
+            f"- **BiomedCLIP** collapsed to a single label ('{clip_unique[0]}') for all {n} samples, "
+            f"giving {_float_metric('biomedclip','accuracy')*100:.1f}% accuracy (chance level). Specificity = 0."
+        )
+    else:
+        clip_obs = (
+            f"- **BiomedCLIP** (linear probe): acc={get_metric('biomedclip','accuracy')}, "
+            f"F1={get_metric('biomedclip','f1_macro')}, "
+            f"sensitivity={get_metric('biomedclip','sensitivity')}, "
+            f"specificity={get_metric('biomedclip','specificity')}."
+        )
+
+    # Pipeline final observation
+    pf_spec = _float_metric('pipeline_final', 'specificity')
+    cnn_spec = _float_metric('cnn', 'specificity')
+    if not (np.isnan(pf_spec) or np.isnan(cnn_spec)) and pf_spec < cnn_spec - 0.05:
+        pipeline_obs = (
+            f"- The **pipeline final** result has specificity={get_metric('pipeline_final','specificity')} — "
+            f"degraded from CNN ({get_metric('cnn','specificity')}) due to false positives introduced by "
+            f"MedGemma and/or BiomedCLIP on normal scans."
+        )
+    else:
+        pipeline_obs = (
+            f"- The **pipeline final** result: acc={get_metric('pipeline_final','accuracy')}, "
+            f"sensitivity={get_metric('pipeline_final','sensitivity')}, "
+            f"specificity={get_metric('pipeline_final','specificity')}."
+        )
+
     lines = [
         "# Binary Tumor Evaluation — Analysis Report",
         "",
@@ -873,11 +923,16 @@ def generate_report(
         accuracy_df.to_markdown(index=False),
         "",
         "### Key observations",
-        f"- **CNN** achieves perfect accuracy ({get_metric('cnn','accuracy')}) and AUC ({get_metric('cnn','roc_auc')}) — likely memorised Br35H patterns.",
-        f"- **BiomedCLIP** collapsed to a single label ('brain tumor MRI') for all {n} samples, giving 50% accuracy (chance level). Specificity = 0.",
+        (
+            f"- **CNN** achieves perfect accuracy ({get_metric('cnn','accuracy')}) and AUC ({get_metric('cnn','roc_auc')}) — likely memorised Br35H patterns."
+            if _float_metric('cnn', 'accuracy') >= 0.9999
+            else f"- **CNN**: acc={get_metric('cnn','accuracy')}, F1={get_metric('cnn','f1_macro')}, "
+                 f"sensitivity={get_metric('cnn','sensitivity')}, specificity={get_metric('cnn','specificity')}."
+        ),
+        clip_obs,
         f"- **MedGemma initial triage**: acc={get_metric('medgemma_initial','accuracy')}, F1={get_metric('medgemma_initial','f1_macro')}, sensitivity={get_metric('medgemma_initial','sensitivity')}, specificity={get_metric('medgemma_initial','specificity')}.",
         f"- **MedGemma final report**: acc={get_metric('medgemma_final','accuracy')}, F1={get_metric('medgemma_final','f1_macro')}, sensitivity={get_metric('medgemma_final','sensitivity')}, specificity={get_metric('medgemma_final','specificity')}.",
-        f"- The **pipeline final** result has specificity={get_metric('pipeline_final','specificity')} — significantly degraded from CNN because MedGemma and BiomedCLIP introduce false positives on normal scans.",
+        pipeline_obs,
         "",
         "---",
         "",
@@ -952,15 +1007,30 @@ def generate_report(
     if not clip_metrics_df.empty:
         lines.append(clip_metrics_df.to_markdown(index=False))
 
+    clip_score_note: list[str] = []
+    if clip_collapsed:
+        clip_score_note = [
+            f"> **Note:** BiomedCLIP predicted '{clip_unique[0]}' for ALL {n} samples (label collapse). ",
+            "> Score distributions for tumor vs normal are nearly identical — label embedding dominates visual features.",
+        ]
+    else:
+        clip_score_mean_diff = (
+            df["biomedclip_top_score"][(gt == "tumor").values].mean()
+            - df["biomedclip_top_score"][(gt == "normal").values].mean()
+        )
+        clip_score_note = [
+            f"> Mean score: tumor={df['biomedclip_top_score'][(gt=='tumor').values].mean():.4f}  "
+            f"normal={df['biomedclip_top_score'][(gt=='normal').values].mean():.4f}  "
+            f"diff={clip_score_mean_diff:+.4f}",
+        ]
+
     lines += [
         "",
         "### Score percentiles by true class:",
         "",
         clip_pct_df.to_markdown(index=False),
         "",
-        "> **Note:** BiomedCLIP scored all samples as 'brain tumor MRI' (mean score ≈ 0.99). ",
-        "> The score distributions for tumor vs normal are nearly identical, confirming the label",
-        "> embedding dominates over visual features for this binary task.",
+        *clip_score_note,
         "",
         "---",
         "",
@@ -979,8 +1049,12 @@ def generate_report(
         fp_df.to_markdown(index=False),
         "",
         "### Key SAM3 findings:",
-        "- IoU with GradCAM++ is near-zero for the majority of samples, especially normals.",
-        "- This drives `final_confidence → 0` and flags 100% of samples for human review.",
+        f"- IoU with GradCAM++ is zero for {iou_zero_rate*100:.1f}% of samples (especially normals).",
+        (
+            f"- Near-zero IoU triggers the confidence penalty → `final_confidence` collapse → {flag_pct:.1f}% of samples flagged for human review."
+            if flag_pct > 50
+            else f"- {flag_pct:.1f}% of samples flagged for human review (IoU-driven confidence penalty)."
+        ),
         "",
         "---",
         "",
@@ -998,7 +1072,7 @@ def generate_report(
         "",
         "## 8. Human-review flag analysis",
         "",
-        f"- **100%** of samples flagged for human review (caused by IoU=0 → confidence penalty → threshold trigger).",
+        f"- **{flag_pct:.1f}%** of samples flagged for human review ({total_flagged}/{n}) — caused by low IoU → confidence penalty → threshold trigger.",
         "",
         review_df.dropna(subset=["accuracy"]).to_markdown(index=False),
         "",
@@ -1020,11 +1094,28 @@ def generate_report(
         "",
         "| Issue | Component | Impact |",
         "|-------|-----------|--------|",
-        "| BiomedCLIP label collapse — predicts 'brain tumor MRI' for all samples | BiomedCLIP | Specificity = 0 |",
-        "| SAM3 IoU ≈ 0 for 81.7% of samples → `final_confidence` zeroed out | SAM3 + report_node | 100% human-review flag rate |",
-        "| MedGemma overconfident on wrong predictions (conf_wrong > conf_correct) | MedGemma | ECE = 0.31–0.24 |",
-        "| Pipeline specificity degrades from CNN (1.00) to 0.35 due to MedGemma/CLIP FPs | Pipeline fusion | Specificity collapse |",
-        "| 100% human-review rate makes triage flag useless | Pipeline | No filtering signal |",
+        *(
+            [f"| BiomedCLIP label collapse — predicts '{clip_unique[0]}' for all samples | BiomedCLIP | Specificity = 0 |"]
+            if clip_collapsed else
+            [f"| BiomedCLIP linear probe: acc={get_metric('biomedclip','accuracy')}, spec={get_metric('biomedclip','specificity')} | BiomedCLIP | — |"]
+        ),
+        f"| SAM3 IoU = 0 for {iou_zero_rate*100:.1f}% of samples → `final_confidence` zeroed out | SAM3 + report_node | {flag_pct:.1f}% human-review flag rate |",
+        *(
+            ["| MedGemma overconfident on wrong predictions (conf_wrong > conf_correct) | MedGemma | High ECE |"]
+            if any(
+                (r.get("mean_conf_wrong", 0) or 0) > (r.get("mean_conf_correct", 1) or 1)
+                for r in conf_summary_df.to_dict("records")
+                if "medgemma" in str(r.get("model", ""))
+            ) else []
+        ),
+        *(
+            [f"| Pipeline specificity ({get_metric('pipeline_final','specificity')}) degrades from CNN ({get_metric('cnn','specificity')}) — MedGemma/CLIP FPs on normal scans | Pipeline fusion | Specificity collapse |"]
+            if not np.isnan(pf_spec) and not np.isnan(cnn_spec) and pf_spec < cnn_spec - 0.05 else []
+        ),
+        *(
+            [f"| {flag_pct:.1f}% human-review flag rate makes triage signal useless | Pipeline | No filtering signal |"]
+            if flag_pct > 90 else []
+        ),
         "",
     ]
 

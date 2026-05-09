@@ -557,9 +557,79 @@ def generate_report(
 
     mean_q_tumor  = quality_df[quality_df["gt"] == "tumor"]["quality_score"].mean()
     mean_q_normal = quality_df[quality_df["gt"] == "normal"]["quality_score"].mean()
+    mean_q_all    = quality_df["quality_score"].mean()
 
-    top_halluc = halluc_df.head(5)
-    top_rec    = rec_df.head(5)
+    top_rec = rec_df.head(5)
+
+    # ── compute summary issue rows dynamically ────────────────────────────────
+    issue_rows: list[str] = []
+
+    # Hallucination: top phrase in normal reports
+    if not halluc_df.empty:
+        top = halluc_df.iloc[0]
+        issue_rows.append(
+            f"| Hallucination — top phrase in normal reports "
+            f"| '{top['phrase']}' in {top['pct_normal']:.1f}% of normal reports "
+            f"(vs {top['pct_tumor']:.1f}% of tumor reports) |"
+        )
+
+    # Contrast-enhanced MRI over-recommendation on normal scans
+    if 'contrast-enhanced mri' in rec_df['phrase'].values:
+        r = rec_df[rec_df['phrase'] == 'contrast-enhanced mri'].iloc[0]
+        if r['pct_normal'] > 10:
+            issue_rows.append(
+                f"| Contrast-enhanced MRI over-recommended "
+                f"| {r['pct_normal']:.1f}% of normal scans get this recommendation "
+                f"(tumor: {r['pct_tumor']:.1f}%) |"
+            )
+
+    # Internal JSON agreement for diagnosis_name
+    if 'diagnosis_name' in field_df['field'].values:
+        r = field_df[field_df['field'] == 'diagnosis_name'].iloc[0]
+        agree_pct = r['agreement_rate'] * 100
+        if agree_pct < 95:
+            issue_rows.append(
+                f"| Embedded JSON vs state mismatch "
+                f"| diagnosis_name agrees in only {agree_pct:.1f}% of cases |"
+            )
+        else:
+            issue_rows.append(
+                f"| Embedded JSON vs state consistency "
+                f"| diagnosis_name agrees in {agree_pct:.1f}% of cases |"
+            )
+
+    # Quality score — low scoring class
+    if mean_q_normal < mean_q_tumor - 0.3:
+        issue_rows.append(
+            f"| Quality gap between classes "
+            f"| Normal scans score {mean_q_normal:.2f}/5 vs tumor {mean_q_tumor:.2f}/5 |"
+        )
+
+    # Criterion pass rates
+    for col, label in [
+        ("has_findings",          "Missing FINDINGS section"),
+        ("has_embedded_json",     "Unparseable embedded JSON"),
+        ("json_diagnosis_not_null", "Null diagnosis_name in embedded JSON"),
+        ("has_recommendation",    "No recommendation present"),
+    ]:
+        if col in quality_df.columns:
+            fail_pct = (1 - quality_df[col].mean()) * 100
+            if fail_pct > 5:
+                issue_rows.append(
+                    f"| {label} | {fail_pct:.1f}% of reports fail this criterion |"
+                )
+
+    if not issue_rows:
+        issue_rows = ["| No significant quality issues detected | — |"]
+
+    # ── quality score distribution table ──────────────────────────────────────
+    qs_dist = (
+        quality_df["quality_score"]
+        .value_counts()
+        .sort_index()
+        .rename_axis("score")
+        .reset_index(name="n")
+    )
 
     lines = [
         "# MedGemma Report Analysis",
@@ -619,12 +689,11 @@ def generate_report(
         "",
         "## 9. Report quality scores",
         "",
-        f"- Mean quality score (tumor scans): **{mean_q_tumor:.3f} / 5**",
-        f"- Mean quality score (normal scans): **{mean_q_normal:.3f} / 5**",
+        f"- Mean quality score (all):    **{mean_q_all:.3f} / 5**",
+        f"- Mean quality score (tumor):  **{mean_q_tumor:.3f} / 5**",
+        f"- Mean quality score (normal): **{mean_q_normal:.3f} / 5**",
         "",
-        quality_df["quality_score"].value_counts().sort_index().reset_index(
-            ).rename(columns={"index":"score","quality_score":"n"}
-            ).to_markdown(index=False),
+        qs_dist.to_markdown(index=False),
         "",
         "---",
         "",
@@ -632,11 +701,7 @@ def generate_report(
         "",
         "| Issue | Finding |",
         "|-------|---------|",
-        f"| Hallucination rate (normal scans) | Top phrase: '{top_halluc.iloc[0]['phrase']}' appears in {top_halluc.iloc[0]['pct_normal']:.1f}% of normal reports |",
-        f"| contrast-enhanced MRI recommendation | {rec_df[rec_df['phrase']=='contrast-enhanced mri'].iloc[0]['pct_normal']:.1f}% of normal scans get this recommendation |"
-        if 'contrast-enhanced mri' in rec_df['phrase'].values else "",
-        f"| Internal JSON agreement | diagnosis_name agrees in {field_df[field_df['field']=='diagnosis_name'].iloc[0]['agreement_rate']*100:.1f}% of cases |"
-        if 'diagnosis_name' in field_df['field'].values else "",
+        *issue_rows,
         "",
     ]
 
