@@ -23,7 +23,7 @@ from PIL import Image
 from config import (
     BINARY_LABELS,
     DEFAULT_CONFIG,
-    TUMOR_12_CLASSES,
+    TUMOR_MULTICLASS_CLASSES,
     ModelConfig,
     PreprocessConfig,
     resolve_torch_device,
@@ -41,7 +41,24 @@ CANDIDATE_LABELS = {
     "stroke": BINARY_LABELS["stroke"],
     "multiclass_tumor": [
         f"brain MRI showing {cls} tumor" if cls != "normal" else "normal brain MRI"
-        for cls in TUMOR_12_CLASSES
+        for cls in TUMOR_MULTICLASS_CLASSES
+    ],
+}
+PROBE_CANDIDATE_LABELS: dict[str, list[str]] = {
+    "multiclass_tumor": [
+        "brain MRI showing carcinoma",      # [0] Carcinoma
+        "brain MRI showing ependymoma",     # [1] Ependymoma
+        "brain MRI showing germinoma",      # [2] Germinoma
+        "brain MRI showing glioma",         # [3] Glioma
+        "brain MRI showing granuloma",      # [4] Granuloma
+        "brain MRI showing medulloblastoma",# [5] Meduloblastoma
+        "brain MRI showing meningioma",     # [6] Meningioma
+        "brain MRI showing neurocytoma",    # [7] Neurocitoma
+        "normal brain MRI",                 # [8] Normal
+        "brain MRI showing other tumor",    # [9] Other
+        "brain MRI showing papilloma",      # [10] Papiloma
+        "brain MRI showing schwannoma",     # [11] Schwannoma
+        "brain MRI showing tuberculoma",    # [12] Tuberculoma
     ],
 }
 
@@ -195,10 +212,14 @@ class BiomedCLIPTool:
         """
         image = Image.open(image_path).convert("RGB")
         image_tensor = self.preprocess(image).unsqueeze(0).to(self.clip_device)
-        labels = CANDIDATE_LABELS.get(task, CANDIDATE_LABELS["binary_tumor"])
 
         if task in self._probe_heads:
+            labels = PROBE_CANDIDATE_LABELS.get(
+                task, CANDIDATE_LABELS.get(task, CANDIDATE_LABELS["binary_tumor"])
+            )
             return self._linear_probe_classify(image_tensor, labels, task)
+
+        labels = CANDIDATE_LABELS.get(task, CANDIDATE_LABELS["binary_tumor"])
         return self._zero_shot_classify(image_tensor, labels)
 
     def _zero_shot_classify(
