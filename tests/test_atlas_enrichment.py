@@ -50,7 +50,7 @@ def make_synthetic_mask(image_path: str) -> str:
     return tmp.name
 
 
-def run(image_path: str, mask_path: str | None, nifti_path: str | None, dicom_path: str | None):
+def run(image_path: str, mask_path: str | None, nifti_path: str | None, dicom_path: str | None, output_path: str | None = None):
     from agents.sibra_tool import SiibraAtlasTool
     from pipeline.nodes import make_atlas_enrichment_node
     from pipeline.state import initial_state
@@ -108,6 +108,20 @@ def run(image_path: str, mask_path: str | None, nifti_path: str | None, dicom_pa
             print(f"    {c['score']:.4f}  {c['region']}")
     print(f"  Routing path : {node_output.get('routing_path')}")
 
+    if output_path:
+        record = {
+            "image":        image_path,
+            "mask":         mask_path,
+            "mask_synthetic": synthetic_mask,
+            "nifti":        nifti_path,
+            "dicom":        dicom_path,
+            "atlas_enrichment": enrichment,
+        }
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "w") as fh:
+            json.dump(record, fh, indent=2, default=str)
+        print(f"\n  Saved to     : {output_path}")
+
     if synthetic_mask:
         Path(mask_path).unlink(missing_ok=True)
 
@@ -118,6 +132,7 @@ def main():
     parser.add_argument("--mask",   default=None,  help="Binary mask PNG (white = lesion). Auto-generated if omitted.")
     parser.add_argument("--nifti",  default=None,  help="NIfTI file for accurate MNI affine")
     parser.add_argument("--dicom",  default=None,  help="DICOM file for scanner-space coords")
+    parser.add_argument("--output", default=None,  help="Save result JSON to this path (e.g. outputs/brats_test/result.json)")
     args = parser.parse_args()
 
     if not Path(args.image).exists():
@@ -125,7 +140,7 @@ def main():
         sys.exit(1)
 
     try:
-        run(args.image, args.mask, args.nifti, args.dicom)
+        run(args.image, args.mask, args.nifti, args.dicom, args.output)
     except ModuleNotFoundError as e:
         print(f"\nERROR: missing dependency — {e}")
         print("Run:  pip install siibra nibabel pydicom")

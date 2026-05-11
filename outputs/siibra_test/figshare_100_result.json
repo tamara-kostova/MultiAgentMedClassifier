@@ -1,0 +1,22 @@
+{
+  "image": "data/processed/1/100.jpg",
+  "mask": "data/processed/1_mask/100_mask.png",
+  "mask_synthetic": false,
+  "nifti": null,
+  "dicom": null,
+  "atlas_enrichment": {
+    "mni_coords": [
+      -20.82,
+      -14.39,
+      0.0
+    ],
+    "assigned_region": "CGL (Metathalamus) right",
+    "hemisphere": "right",
+    "assignment_scores": [
+      {
+        "region": "CGL (Metathalamus) right",
+        "score": 0.0
+      }
+    ]
+  }
+}
