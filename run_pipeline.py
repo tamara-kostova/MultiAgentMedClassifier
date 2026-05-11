@@ -19,9 +19,20 @@ Usage examples:
   python run_pipeline.py --image image.jpg --task binary_tumor \
     --cnn_binary_tumor checkpoints/densenet169_binary_tumor.pt
 
+  # With BiomedCLIP linear probe (layer-6 or concat-fusion head):
+  python run_pipeline.py --image image.jpg --task binary_tumor \
+    --clip_binary_tumor checkpoints/biomedclip_probe_binary_tumor.pt
+
   # With few-shot examples (one image per class prepended to MedGemma triage):
   python run_pipeline.py --image image.jpg --task binary_tumor \
     --few_shot --few_shot_data_dir /path/to/data
+
+  # Force Apple Silicon GPU:
+  python run_pipeline.py --image image.jpg --task binary_tumor --device mps
+
+  # Faster Mac evaluation: use MPS and skip final MedGemma report generation.
+  python run_pipeline.py --tumor_eval --tumor_eval_dir data/Br35H \
+    --task binary_tumor --label_map br35h --device mps --skip_report
 
 Checkpoints:
   CNN checkpoints should be PyTorch state dicts saved as:
@@ -34,7 +45,13 @@ import argparse
 import json
 from pathlib import Path
 
-from config import DEFAULT_CONFIG, ModelConfig, PipelineConfig, RoutingConfig
+from config import (
+    DEFAULT_CONFIG,
+    ModelConfig,
+    PipelineConfig,
+    RoutingConfig,
+    resolve_torch_device,
+)
 from eval.evaluate import compare_configurations, load_test_split, run_single
 from eval.tumor_eval import LABEL_MAPS, run_tumor_eval
 from pipeline.graph import build_pipeline
@@ -114,6 +131,16 @@ def parse_args():
     p.add_argument("--cnn_multiclass", type=str, default=None)
     p.add_argument("--cnn_ms", type=str, default=None)
     p.add_argument("--cnn_stroke", type=str, default=None)
+
+    # BiomedCLIP linear probe checkpoint overrides (layer-6 or concat-fusion heads)
+    p.add_argument("--clip_binary_tumor", type=str, default=None,
+                   help="BiomedCLIP probe checkpoint for binary_tumor task")
+    p.add_argument("--clip_multiclass", type=str, default=None,
+                   help="BiomedCLIP probe checkpoint for multiclass_tumor task")
+    p.add_argument("--clip_ms", type=str, default=None,
+                   help="BiomedCLIP probe checkpoint for ms task")
+    p.add_argument("--clip_stroke", type=str, default=None,
+                   help="BiomedCLIP probe checkpoint for stroke task")
     p.add_argument(
         "--sam3_probe",
         type=str,
@@ -167,6 +194,16 @@ def parse_args():
 
     # Eval optimisation
     p.add_argument(
+        "--device",
+        type=str,
+        choices=["cuda", "mps", "cpu"],
+        default=None,
+        help=(
+            "Override compute device, e.g. --device mps on Apple Silicon. "
+            "Defaults to CUDA, then Apple MPS, then CPU."
+        ),
+    )
+    p.add_argument(
         "--skip_report",
         action="store_true",
         help="Skip MedGemma report generation (eval mode — saves ~5–9 s/image)",
@@ -207,8 +244,25 @@ def build_config(args) -> PipelineConfig:
         else:
             print(f"[calibration] File not found: {cal_path} — using T=1.0 defaults")
 
+    device = resolve_torch_device(
+        args.device or default_model_cfg.device,
+        caller="run_pipeline",
+    )
+
+    clip_checkpoints = default_model_cfg.biomedclip_probe_checkpoints.copy()
+    clip_overrides = {
+        "binary_tumor":     args.clip_binary_tumor,
+        "multiclass_tumor": args.clip_multiclass,
+        "ms":               args.clip_ms,
+        "stroke":           args.clip_stroke,
+    }
+    clip_checkpoints.update(
+        {task: path for task, path in clip_overrides.items() if path is not None}
+    )
+
     model_cfg = ModelConfig(
         cnn_checkpoints=cnn_checkpoints,
+        biomedclip_probe_checkpoints=clip_checkpoints,
         sam3_linear_probe_checkpoint=(
             args.sam3_probe or default_model_cfg.sam3_linear_probe_checkpoint
         ),
@@ -216,6 +270,8 @@ def build_config(args) -> PipelineConfig:
         cnn_temperatures=temperatures,
         use_few_shot=args.few_shot,
         few_shot_data_dir=args.few_shot_data_dir,
+        device=device.type,
+        prefer_cuda_for_vision=(args.device is None or args.device == "cuda"),
     )
 
     routing_cfg = RoutingConfig(

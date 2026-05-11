@@ -12,6 +12,67 @@ import torch
 _DEFAULT_SAM3_PROBE = "checkpoints/sam3_probe.pth"
 _DEFAULT_SAM3_BPE_PATH = "sam3/sam3/assets/bpe_simple_vocab_16e6.txt.gz"
 
+
+def cuda_is_usable() -> tuple[bool, str | None]:
+    try:
+        if not torch.cuda.is_available():
+            return False, None
+    except (AssertionError, RuntimeError) as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+
+    try:
+        torch.empty(1, device="cuda")
+    except (AssertionError, RuntimeError) as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+    return True, None
+
+
+def _mps_is_usable() -> bool:
+    if not torch.backends.mps.is_available():
+        return False
+    try:
+        torch.empty(1, device="mps")
+    except RuntimeError:
+        return False
+    return True
+
+
+def resolve_torch_device(device_name: str, caller: str = "config") -> torch.device:
+    device = torch.device(device_name)
+    if device.type == "mps" and not _mps_is_usable():
+        print(f"[{caller}] MPS requested but unusable; falling back to CPU.")
+        return torch.device("cpu")
+    if device.type == "cuda":
+        usable, reason = cuda_is_usable()
+        if not usable:
+            detail = f" ({reason})" if reason else ""
+            print(f"[{caller}] CUDA requested but unusable{detail}; falling back to CPU.")
+            return torch.device("cpu")
+    return device
+
+
+def resolve_vision_device(
+    device_name: str,
+    caller: str = "config",
+    prefer_cuda: bool = True,
+) -> torch.device:
+    """Resolve the device for CNN/BiomedCLIP vision models.
+
+    Vision-side inference is small enough to share the GPU with the larger
+    agents, and keeping it on CUDA avoids slow CPU fallbacks during evaluation.
+    """
+    if prefer_cuda and cuda_is_usable()[0]:
+        return torch.device("cuda")
+    return resolve_torch_device(device_name, caller=caller)
+
+
+def _default_torch_device() -> str:
+    if cuda_is_usable()[0]:
+        return "cuda"
+    if _mps_is_usable():
+        return "mps"
+    return "cpu"
+
 # ── Task identifiers ──────────────────────────────────────────────────────────
 TASKS = ["binary_tumor", "multiclass_tumor", "ms", "stroke"]
 
@@ -23,20 +84,23 @@ BEST_CNN_PER_TASK = {
     "stroke": "densenet169",
 }
 
-# 12-class tumor labels
-TUMOR_12_CLASSES = [
-    "meningioma",
-    "glioma",
-    "neurocytoma",
-    "pituitary",
-    "schwannoma",
+# 13-class tumor labels — alphabetically sorted, matching MRI_tumor_multiclass_norm directory names.
+# CNN checkpoint (DenseNet169) was trained on a prior 12-class split that included Pituitary;
+# use cnn_tool._CNN_MULTICLASS_CLASSES for CNN output-index → label mapping.
+TUMOR_MULTICLASS_CLASSES = [
     "carcinoma",
+    "ependymoma",
+    "germinoma",
+    "glioma",
     "granuloma",
     "medulloblastoma",
-    "papilloma",
-    "tuberculoma",
-    "germinoma",
+    "meningioma",
+    "neurocytoma",
     "normal",
+    "other",
+    "papilloma",
+    "schwannoma",
+    "tuberculoma",
 ]
 
 # Binary task labels
@@ -63,10 +127,10 @@ class ModelConfig:
     # Probe heads from 18_layer_fusion_benchmark.py (layer-6 or concat fusion of layers 2,6,11)
     biomedclip_probe_checkpoints: dict = field(
         default_factory=lambda: {
-            "binary_tumor": None,
-            "multiclass_tumor": None,
-            "ms": None,
-            "stroke": None,
+            "binary_tumor":     "checkpoints/linear_probe_BiomedCLIP_MRI_tumor_binary_norm_best.pt",
+            "multiclass_tumor": "checkpoints/linear_probe_BiomedCLIP_MRI_tumor_multiclass_norm_best.pt",
+            "ms":               "checkpoints/linear_probe_BiomedCLIP_MRI_ms_norm_best.pt",
+            "stroke":           "checkpoints/linear_probe_BiomedCLIP_CT_stroke_binary_norm_best.pt",
         }
     )
 
@@ -114,9 +178,12 @@ class ModelConfig:
     )
 
     # ── Device ────────────────────────────────────────────────────────────────
-    device: str = field(
-        default_factory=lambda: "cuda" if torch.cuda.is_available() else "cpu"
-    )
+    # Auto-selects "cuda" on NVIDIA/Linux, "mps" on Apple Silicon when available,
+    # otherwise "cpu". Override from the CLI with --device {cuda,mps,cpu}.
+    device: str = field(default_factory=_default_torch_device)
+    # Keep CNN and BiomedCLIP on CUDA whenever available, unless the CLI/user
+    # explicitly asks for cpu or mps.
+    prefer_cuda_for_vision: bool = True
 
 
 @dataclass

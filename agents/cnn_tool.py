@@ -19,9 +19,9 @@ from torchvision import models, transforms
 from config import (
     BEST_CNN_PER_TASK,
     DEFAULT_CONFIG,
-    TUMOR_12_CLASSES,
     ModelConfig,
     PreprocessConfig,
+    resolve_torch_device,
 )
 
 NUM_CLASSES = {
@@ -31,9 +31,15 @@ NUM_CLASSES = {
     "stroke": 2,
 }
 
+_CNN_MULTICLASS_CLASSES = [
+    "carcinoma", "germinoma", "glioma", "granuloma", "medulloblastoma",
+    "meningioma", "neurocytoma", "normal", "other", "papilloma",
+    "schwannoma", "tuberculoma",
+]
+
 CLASS_NAMES = {
     "binary_tumor": ["normal", "tumor"],
-    "multiclass_tumor": TUMOR_12_CLASSES,
+    "multiclass_tumor": _CNN_MULTICLASS_CLASSES,
     "ms": ["normal", "ms"],
     "stroke": ["normal", "stroke"],
 }
@@ -162,7 +168,7 @@ class CNNClassifier:
     ):
         self.model_cfg = model_cfg or DEFAULT_CONFIG.model
         self.preprocess_cfg = preprocess_cfg or DEFAULT_CONFIG.preprocess
-        self.device = torch.device(self.model_cfg.device)
+        self.device = resolve_torch_device(self.model_cfg.device, caller="CNNClassifier")
         self._models: dict[str, nn.Module] = {}
         self._transform = _get_transform(self.preprocess_cfg)
 

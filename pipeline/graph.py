@@ -10,8 +10,6 @@ Graph structure:
                            |
                     atlas_enrichment
                            │
-                     cnn_with_mask
-                           │
                        biomedclip
                            │
                     explainability
@@ -38,11 +36,11 @@ from pipeline.nodes import (
     make_atlas_enrichment_node,
     make_biomedclip_node,
     make_cnn_node,
-    make_cnn_with_mask_node,
     make_explainability_node,
     make_fhir_node,
     make_report_node,
     make_sam3_node,
+    make_skip_explainability_node,
     make_triage_node,
     make_verification_node,
 )
@@ -74,7 +72,6 @@ def build_pipeline(cfg: PipelineConfig = None):
     cnn_fn = make_cnn_node(cnn)
     sam3_fn = make_sam3_node(sam3)
     atlas_fn = make_atlas_enrichment_node(siibra)
-    cnn_with_mask_fn = make_cnn_with_mask_node(cnn, agent=medgemma)
     biomedclip_fn = make_biomedclip_node(clip, cfg.routing)
     report_fn = make_report_node(medgemma, cfg.routing, skip_report=cfg.skip_report)
     verification_fn = make_verification_node(medgemma)
@@ -87,23 +84,23 @@ def build_pipeline(cfg: PipelineConfig = None):
     workflow.add_node("cnn_classify", cnn_fn)
     workflow.add_node("sam3_segment", sam3_fn)
     workflow.add_node("atlas_enrichment", atlas_fn)
-    workflow.add_node("cnn_with_mask", cnn_with_mask_fn)
     workflow.add_node("biomedclip", biomedclip_fn)
     workflow.add_node("verification", verification_fn)
     workflow.add_node("report", report_fn)
     workflow.add_node("fhir_output", fhir_fn)
     workflow.set_entry_point("triage")
 
-    explainability_fn = make_explainability_node(
-        cnn, output_dir=f"{cfg.output_dir}/explainability"
+    explainability_fn = (
+        make_explainability_node(cnn, output_dir=f"{cfg.output_dir}/explainability")
+        if cfg.generate_explainability
+        else make_skip_explainability_node()
     )
     workflow.add_node("explainability", explainability_fn)
 
     workflow.add_edge("triage", "cnn_classify")
     workflow.add_edge("cnn_classify", "sam3_segment")
     workflow.add_edge("sam3_segment", "atlas_enrichment")
-    workflow.add_edge("atlas_enrichment", "cnn_with_mask")
-    workflow.add_edge("cnn_with_mask", "biomedclip")
+    workflow.add_edge("atlas_enrichment", "biomedclip")
     workflow.add_edge("biomedclip", "explainability")
     workflow.add_edge("explainability", "verification")
     workflow.add_edge("verification", "report")

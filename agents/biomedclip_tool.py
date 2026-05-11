@@ -23,9 +23,10 @@ from PIL import Image
 from config import (
     BINARY_LABELS,
     DEFAULT_CONFIG,
-    TUMOR_12_CLASSES,
+    TUMOR_MULTICLASS_CLASSES,
     ModelConfig,
     PreprocessConfig,
+    resolve_torch_device,
 )
 
 # Layer indices (0-indexed into BiomedCLIP ViT-B/16's 12 transformer blocks).
@@ -40,7 +41,24 @@ CANDIDATE_LABELS = {
     "stroke": BINARY_LABELS["stroke"],
     "multiclass_tumor": [
         f"brain MRI showing {cls} tumor" if cls != "normal" else "normal brain MRI"
-        for cls in TUMOR_12_CLASSES
+        for cls in TUMOR_MULTICLASS_CLASSES
+    ],
+}
+PROBE_CANDIDATE_LABELS: dict[str, list[str]] = {
+    "multiclass_tumor": [
+        "brain MRI showing carcinoma",      # [0] Carcinoma
+        "brain MRI showing ependymoma",     # [1] Ependymoma
+        "brain MRI showing germinoma",      # [2] Germinoma
+        "brain MRI showing glioma",         # [3] Glioma
+        "brain MRI showing granuloma",      # [4] Granuloma
+        "brain MRI showing medulloblastoma",# [5] Meduloblastoma
+        "brain MRI showing meningioma",     # [6] Meningioma
+        "brain MRI showing neurocytoma",    # [7] Neurocitoma
+        "normal brain MRI",                 # [8] Normal
+        "brain MRI showing other tumor",    # [9] Other
+        "brain MRI showing papilloma",      # [10] Papiloma
+        "brain MRI showing schwannoma",     # [11] Schwannoma
+        "brain MRI showing tuberculoma",    # [12] Tuberculoma
     ],
 }
 
@@ -92,11 +110,10 @@ class BiomedCLIPTool:
     ):
         self.model_cfg = model_cfg or DEFAULT_CONFIG.model
         self.preprocess_cfg = preprocess_cfg or DEFAULT_CONFIG.preprocess
-        self.device = torch.device(self.model_cfg.device)
+        self.device = resolve_torch_device(self.model_cfg.device, caller="BiomedCLIPTool")
 
-        # BiomedCLIP runs on CPU to leave GPU VRAM for MedGemma
-        self.clip_device = torch.device("cpu")
-        print("[BiomedCLIPTool] Loading BiomedCLIP model (CPU)...")
+        self.clip_device = self.device
+        print(f"[BiomedCLIPTool] Loading BiomedCLIP model ({self.clip_device})...")
         self.model, _, self.preprocess = open_clip.create_model_and_transforms(
             self.model_cfg.biomedclip_model_id
         )
@@ -119,9 +136,20 @@ class BiomedCLIPTool:
         Supports:
           - MLP concat-fusion head  (in_dim=768*3, CLIP-Fusion-Concat checkpoints)
           - MLP single-layer head   (in_dim=768,   CLIP-Layer* checkpoints)
-          - Legacy nn.Linear        (backward compat)
+          - Legacy nn.Linear        (backward compat, various key conventions)
+          - Wrapped checkpoints     (model_state_dict / state_dict wrappers)
         """
-        state = torch.load(checkpoint_path, map_location=self.device)
+        raw = torch.load(checkpoint_path, map_location=self.device)
+
+        # Unwrap common training-checkpoint wrappers
+        if isinstance(raw, dict):
+            state = (
+                raw.get("model_state_dict")
+                or raw.get("state_dict")
+                or raw
+            )
+        else:
+            state = raw
 
         if "head.1.weight" in state:
             # MLP head: LayerNorm → Linear(in→512) → ReLU → Dropout → Linear(512→out)
@@ -137,11 +165,22 @@ class BiomedCLIPTool:
             mlp.load_state_dict({k[5:]: v for k, v in state.items() if k.startswith("head.")})
             return mlp.to(self.device).eval(), (in_dim == 768 * 3)
 
-        # Legacy: simple nn.Linear
-        in_dim = state["weight"].shape[1]
-        head = nn.Linear(in_dim, state["weight"].shape[0])
-        head.load_state_dict(state)
-        return head.to(self.device).eval(), (in_dim == 768 * 3)
+        # Normalise alternative key prefixes to bare "weight" / "bias"
+        for prefix in ("", "fc.", "linear.", "classifier.", "0."):
+            w_key = f"{prefix}weight"
+            b_key = f"{prefix}bias"
+            if w_key in state:
+                linear_state = {"weight": state[w_key], "bias": state[b_key]}
+                in_dim  = linear_state["weight"].shape[1]
+                out_dim = linear_state["weight"].shape[0]
+                head = nn.Linear(in_dim, out_dim)
+                head.load_state_dict(linear_state)
+                return head.to(self.device).eval(), (in_dim == 768 * 3)
+
+        raise ValueError(
+            f"Unrecognised probe checkpoint format in {checkpoint_path}. "
+            f"Top-level keys: {list(state.keys())[:10]}"
+        )
 
     def _extract_layer_features(
         self, image_tensor: torch.Tensor
@@ -173,31 +212,36 @@ class BiomedCLIPTool:
         """
         image = Image.open(image_path).convert("RGB")
         image_tensor = self.preprocess(image).unsqueeze(0).to(self.clip_device)
-        labels = CANDIDATE_LABELS.get(task, CANDIDATE_LABELS["binary_tumor"])
 
         if task in self._probe_heads:
+            labels = PROBE_CANDIDATE_LABELS.get(
+                task, CANDIDATE_LABELS.get(task, CANDIDATE_LABELS["binary_tumor"])
+            )
             return self._linear_probe_classify(image_tensor, labels, task)
+
+        labels = CANDIDATE_LABELS.get(task, CANDIDATE_LABELS["binary_tumor"])
         return self._zero_shot_classify(image_tensor, labels)
 
     def _zero_shot_classify(
         self, image_tensor: torch.Tensor, labels: list[str]
     ) -> dict:
-        """Cosine similarity between layer-6 CLS features and text embeddings."""
-        features = self._extract_layer_features(image_tensor)
-        image_feat = features[MIDDLE_LAYER]  # (1, 768), already L2-normalised
+        """
+        Standard CLIP zero-shot: encode_image() into the joint embedding space, then
+        cosine similarity against text embeddings using the model's learned logit_scale.
 
-        visual = self.model.visual
-        if hasattr(visual, "head") and hasattr(visual.head, "proj"):
-            proj = visual.head.proj  # nn.Linear(768, 512)
-            image_feat = F.normalize(proj(image_feat).float(), dim=-1)
-        elif hasattr(visual, "proj") and visual.proj is not None:
-            image_feat = F.normalize((image_feat @ visual.proj).float(), dim=-1)
+        Previously used visual.head.proj applied to layer-6 intermediate features, which
+        produced embeddings outside the joint space and caused label collapse (every image
+        predicted as the same class). Layer-6 features are only valid for the linear probe
+        path where the probe head is trained on those features directly.
+        """
+        image_feat = F.normalize(self.model.encode_image(image_tensor).float(), dim=-1)
 
         tokens = self.tokenizer(labels).to(self.clip_device)
         text_feats = F.normalize(self.model.encode_text(tokens).float(), dim=-1)
 
-        logits = (image_feat @ text_feats.T).squeeze(0)
-        scores = torch.softmax(logits * 100, dim=0).cpu().numpy()
+        logit_scale = self.model.logit_scale.exp()
+        logits = (image_feat @ text_feats.T).squeeze(0) * logit_scale
+        scores = torch.softmax(logits, dim=0).cpu().numpy()
 
         ranked_idx = np.argsort(scores)[::-1]
         return {
@@ -211,16 +255,30 @@ class BiomedCLIPTool:
     def _linear_probe_classify(
         self, image_tensor: torch.Tensor, labels: list[str], task: str
     ) -> dict:
-        """MLP probe on layer-6 features or concat fusion of layers 2, 6, 11."""
-        features = self._extract_layer_features(image_tensor)
+        """MLP probe on layer-6 features or concat fusion of layers 2, 6, 11.
+
+        If the probe head expects 512-dim input it was trained on encode_image()
+        projected embeddings; use those instead of raw layer-6 CLS tokens.
+        """
         head, is_fusion = self._probe_heads[task]
 
-        if is_fusion:
+        # Determine the head's expected input dimension
+        if isinstance(head, nn.Sequential):
+            in_dim = head[1].in_features  # index 1 is the first Linear (after LayerNorm)
+        else:
+            in_dim = head.in_features
+
+        if in_dim == 512:
+            # Probe trained on the 512-dim projected CLIP embedding space
+            feat = F.normalize(self.model.encode_image(image_tensor).float(), dim=-1)
+        elif is_fusion:
+            features = self._extract_layer_features(image_tensor)
             feat = torch.cat(
                 [features[SHALLOW_LAYER], features[MIDDLE_LAYER], features[DEEP_LAYER]],
                 dim=-1,
             )
         else:
+            features = self._extract_layer_features(image_tensor)
             feat = features[MIDDLE_LAYER]
 
         logits = head(feat.to(self.device)).squeeze(0)
