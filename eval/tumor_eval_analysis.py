@@ -149,6 +149,59 @@ def roc_auc_binary(y_true, y_scores, pos_label="tumor"):
         return float("nan")
 
 
+# ── multiclass helpers ────────────────────────────────────────────────────────
+
+_BINARY_CLASS_SET = frozenset({"tumor", "normal"})
+
+
+def _is_binary(df: pd.DataFrame) -> bool:
+    return set(df["gt"].dropna().unique()).issubset(_BINARY_CLASS_SET | {"unknown"})
+
+
+def _unique_classes(df: pd.DataFrame) -> list[str]:
+    return sorted(c for c in df["gt"].dropna().unique() if c != "unknown")
+
+
+def _normalize_pred(pred_str, classes: list[str]) -> str:
+    if pred_str is None or str(pred_str).lower() in ("null", "none", "nan", ""):
+        return "unknown"
+    s = str(pred_str).lower().strip()
+    for c in classes:
+        if c.lower() == s:
+            return c
+    for c in classes:
+        if c.lower() in s:
+            return c
+    return "unknown"
+
+
+def multiclass_metrics_dict(y_true, y_pred) -> dict:
+    pairs = [(t, p) for t, p in zip(y_true, y_pred) if t != "unknown" and p != "unknown"]
+    if not pairs:
+        return {}
+    yt, yp = zip(*pairs)
+    return {
+        "n": len(yt),
+        "accuracy": round(accuracy_score(yt, yp), 4),
+        "f1_macro": round(f1_score(yt, yp, average="macro", zero_division=0), 4),
+    }
+
+
+def _mg_norm_series(diag_series: "pd.Series", binary: bool, classes: list) -> "pd.Series":
+    """Normalise a MedGemma diagnosis-dict series to a prediction label.
+
+    Binary mode  → binary label via mg_to_binary (uses diagnosis_name).
+    Multiclass   → subtype via diagnosis_detailed (glioma/meningioma/pituitary_tumor),
+                   because the prompt constrains diagnosis_name to 'tumor' for all tumors.
+    """
+    if binary:
+        return diag_series.apply(mg_to_binary)
+    return diag_series.apply(lambda d: _normalize_pred(mg_field(d, "diagnosis_detailed"), classes))
+
+
+# ── end multiclass helpers ────────────────────────────────────────────────────
+
+
 def percentile_table(values: np.ndarray, name: str) -> dict:
     v = values[~np.isnan(values)]
     if len(v) == 0:
@@ -193,6 +246,12 @@ def load(path: str) -> pd.DataFrame:
     df["final_medgemma_diagnosis"] = df["final_medgemma_diagnosis"].apply(
         lambda x: x if isinstance(x, dict) else {})
     df["gt"] = df["true_label"].map(GT_MAP)
+    # Figshare3 labels ("1","2","3") are not in GT_MAP — use true_label_name
+    missing = df["gt"].isna()
+    if missing.any():
+        df.loc[missing, "gt"] = (
+            df.loc[missing, "true_label_name"].fillna(df.loc[missing, "true_label"])
+        )
     return df
 
 
@@ -215,51 +274,54 @@ def section_dataset(df: pd.DataFrame) -> dict:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def section_model_accuracy(df: pd.DataFrame) -> pd.DataFrame:
-    print_section("2. Per-model binary accuracy summary")
+    binary = _is_binary(df)
+    classes = _unique_classes(df)
+    title = "2. Per-model binary accuracy summary" if binary else "2. Per-model accuracy summary (multiclass)"
+    print_section(title)
 
     gt = df["gt"]
 
-    # Build per-model predictions + confidence score for AUC
+    def _norm(series):
+        if binary:
+            return series.apply(to_binary)
+        return series.apply(lambda x: _normalize_pred(x, classes))
+
     models = {
-        "pipeline_final":  (df["predicted_class"].apply(to_binary),
-                            df["final_confidence"]),
-        "cnn":             (df["cnn_predicted_class"].apply(to_binary),
-                            df["cnn_confidence"]),
-        "biomedclip":      (df["biomedclip_top_label"].apply(to_binary),
-                            df["biomedclip_top_score"]),
-        "medgemma_initial":(df["medgemma_diagnosis"].apply(mg_to_binary),
-                            df["medgemma_diagnosis"].apply(lambda d: mg_field(d, "diagnosis_confidence") or 0.0)),
-        "medgemma_final":  (df["final_medgemma_diagnosis"].apply(mg_to_binary),
-                            df["final_medgemma_diagnosis"].apply(lambda d: mg_field(d, "diagnosis_confidence") or 0.0)),
+        "pipeline_final":   (_norm(df["predicted_class"]),     df["final_confidence"]),
+        "cnn":              (_norm(df["cnn_predicted_class"]),  df["cnn_confidence"]),
+        "biomedclip":       (_norm(df["biomedclip_top_label"]), df["biomedclip_top_score"]),
+        "medgemma_initial": (_mg_norm_series(df["medgemma_diagnosis"], binary, classes),
+                             df["medgemma_diagnosis"].apply(lambda d: mg_field(d, "diagnosis_confidence") or 0.0)),
+        "medgemma_final":   (_mg_norm_series(df["final_medgemma_diagnosis"], binary, classes),
+                             df["final_medgemma_diagnosis"].apply(lambda d: mg_field(d, "diagnosis_confidence") or 0.0)),
     }
 
     rows = []
     for name, (preds, scores) in models.items():
-        m = binary_metrics_dict(gt, preds)
-        if not m:
-            continue
-        # AUC: use score oriented toward "tumor" prediction
-        auc_scores = [
-            s if p == "tumor" else (1 - s)
-            for p, s in zip(preds, scores)
-            if gt[preds.index[list(preds).index(p)]] not in ("unknown",)
-        ]
-        # simpler approach: build aligned lists
-        valid_mask = (gt != "unknown") & (preds != "unknown")
-        yt_valid = gt[valid_mask].tolist()
-        yp_valid = preds[valid_mask].tolist()
-        ys_valid = scores[valid_mask].tolist()
-        auc_oriented = [s if p == "tumor" else 1 - s for p, s in zip(yp_valid, ys_valid)]
-        auc = roc_auc_binary(yt_valid, auc_oriented)
-
-        rows.append({
-            "model": name, "n": m["n"],
-            "accuracy": m["accuracy"], "f1_macro": m["f1_macro"],
-            "roc_auc": auc,
-            "sensitivity": m["sensitivity"], "specificity": m["specificity"],
-            "prec_tumor": m["prec_tumor"],   "rec_tumor": m["rec_tumor"],
-            "prec_normal": m["prec_normal"], "rec_normal": m["rec_normal"],
-        })
+        if binary:
+            m = binary_metrics_dict(gt, preds)
+            if not m:
+                continue
+            valid_mask = (gt != "unknown") & (preds != "unknown")
+            yt_valid  = gt[valid_mask].tolist()
+            yp_valid  = preds[valid_mask].tolist()
+            ys_valid  = scores[valid_mask].tolist()
+            auc_oriented = [s if p == "tumor" else 1 - s for p, s in zip(yp_valid, ys_valid)]
+            auc = roc_auc_binary(yt_valid, auc_oriented)
+            rows.append({
+                "model": name, "n": m["n"],
+                "accuracy": m["accuracy"], "f1_macro": m["f1_macro"],
+                "roc_auc": auc,
+                "sensitivity": m["sensitivity"], "specificity": m["specificity"],
+                "prec_tumor": m["prec_tumor"],   "rec_tumor": m["rec_tumor"],
+                "prec_normal": m["prec_normal"], "rec_normal": m["rec_normal"],
+            })
+        else:
+            m = multiclass_metrics_dict(gt, preds)
+            if not m:
+                continue
+            rows.append({"model": name, "n": m["n"],
+                         "accuracy": m["accuracy"], "f1_macro": m["f1_macro"]})
 
     out = pd.DataFrame(rows)
     print(out.to_string(index=False))
@@ -290,6 +352,8 @@ def _extract_field_series(diag_col: pd.Series, field: str) -> pd.Series:
 def section_medgemma_fields(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     print_section("3. MedGemma structured-output per-field analysis")
 
+    binary  = _is_binary(df)
+    classes = _unique_classes(df)
     gt = df["gt"]
 
     distribution_rows = []   # value counts per (field, stage, value)
@@ -329,8 +393,19 @@ def section_medgemma_fields(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFram
         # ── accuracy vs GT ─────────────────────────────────────────────────────
         if field in GT_APPLICABLE_FIELDS:
             for stage, vals in [("initial", init_vals), ("final", fin_vals)]:
-                preds = vals.apply(to_binary)
-                m = binary_metrics_dict(gt, preds)
+                if binary:
+                    preds = vals.apply(to_binary)
+                    m = binary_metrics_dict(gt, preds)
+                elif field == "diagnosis_name":
+                    # In multiclass context, diagnosis_name is always "tumor" per schema;
+                    # gt for all figshare3 images is also tumor at this level.
+                    gt_tumor = pd.Series(["tumor"] * len(df), index=df.index)
+                    preds = vals.astype(str).str.lower().str.strip()
+                    m = multiclass_metrics_dict(gt_tumor, preds)
+                else:
+                    # diagnosis_detailed → compare against actual subtypes
+                    preds = vals.apply(lambda x: _normalize_pred(x, classes))
+                    m = multiclass_metrics_dict(gt, preds)
                 if m:
                     accuracy_rows.append({
                         "field": field, "stage": stage, **m
@@ -387,45 +462,53 @@ def section_medgemma_fields(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFram
 def section_initial_vs_final(df: pd.DataFrame) -> pd.DataFrame:
     print_section("4. Initial vs final MedGemma diagnosis shift")
 
-    gt         = df["gt"]
-    init_bin   = df["medgemma_diagnosis"].apply(mg_to_binary)
-    fin_bin    = df["final_medgemma_diagnosis"].apply(mg_to_binary)
+    binary  = _is_binary(df)
+    classes = _unique_classes(df)
+    gt      = df["gt"]
 
-    agree_mask = (init_bin == fin_bin)
-    print(f"  Agreement (binary) : {agree_mask.sum()} / {len(df)}  ({agree_mask.mean()*100:.1f}%)")
-    print(f"  Changed            : {(~agree_mask).sum()} ({(~agree_mask).mean()*100:.1f}%)")
+    init_pred = _mg_norm_series(df["medgemma_diagnosis"],       binary, classes)
+    fin_pred  = _mg_norm_series(df["final_medgemma_diagnosis"], binary, classes)
+    if binary:
+        cnn_pred = df["cnn_predicted_class"].apply(to_binary)
+    else:
+        cnn_pred = df["cnn_predicted_class"].apply(lambda x: _normalize_pred(x, classes))
+
+    agree_mask = (init_pred == fin_pred)
+    label = "binary" if binary else "class"
+    print(f"  Agreement ({label}) : {agree_mask.sum()} / {len(df)}  ({agree_mask.mean()*100:.1f}%)")
+    print(f"  Changed             : {(~agree_mask).sum()} ({(~agree_mask).mean()*100:.1f}%)")
 
     shift_df = pd.DataFrame({
-        "init_bin": init_bin, "fin_bin": fin_bin, "gt": gt,
-        "cnn_pred": df["cnn_predicted_class"].apply(to_binary),
-        "cnn_conf": df["cnn_confidence"],
+        "init_pred": init_pred, "fin_pred": fin_pred, "gt": gt,
+        "cnn_pred": cnn_pred, "cnn_conf": df["cnn_confidence"],
     })
-    shift_counts = shift_df.groupby(["init_bin", "fin_bin"]).size().reset_index(name="n")
-    print("\n  Shift breakdown (init_bin → fin_bin):")
+    shift_counts = shift_df.groupby(["init_pred", "fin_pred"]).size().reset_index(name="n")
+    print(f"\n  Shift breakdown (init → fin):")
     print(shift_counts.to_string(index=False))
 
-    # Accuracy per stage
     print()
-    for stage, preds in [("initial", init_bin), ("final", fin_bin)]:
+    for stage, preds in [("initial", init_pred), ("final", fin_pred)]:
         both = (gt != "unknown") & (preds != "unknown")
-        m = binary_metrics_dict(gt[both], preds[both])
-        if m:
-            print(f"  {stage:8s}  n={m['n']}  acc={m['accuracy']}  f1={m['f1_macro']}  "
-                  f"sens={m['sensitivity']}  spec={m['specificity']}")
+        if binary:
+            m = binary_metrics_dict(gt[both], preds[both])
+            if m:
+                print(f"  {stage:8s}  n={m['n']}  acc={m['accuracy']}  f1={m['f1_macro']}  "
+                      f"sens={m['sensitivity']}  spec={m['specificity']}")
+        else:
+            m = multiclass_metrics_dict(gt[both], preds[both])
+            if m:
+                print(f"  {stage:8s}  n={m['n']}  acc={m['accuracy']}  f1={m['f1_macro']}")
 
-    # Where initial was right but final was wrong and vice versa
-    init_correct = (init_bin == gt) & (gt != "unknown") & (init_bin != "unknown")
-    fin_correct  = (fin_bin  == gt) & (gt != "unknown") & (fin_bin  != "unknown")
-    recovered = (~init_correct) & fin_correct
-    degraded  = init_correct & (~fin_correct)
-    print(f"\n  Final recovered cases (init wrong → final right) : {recovered.sum()}")
-    print(f"  Final degraded  cases (init right → final wrong) : {degraded.sum()}")
+    init_correct = (init_pred == gt) & (gt != "unknown") & (init_pred != "unknown")
+    fin_correct  = (fin_pred  == gt) & (gt != "unknown") & (fin_pred  != "unknown")
+    print(f"\n  Final recovered cases (init wrong → final right) : {((~init_correct) & fin_correct).sum()}")
+    print(f"  Final degraded  cases (init right → final wrong) : {(init_correct & (~fin_correct)).sum()}")
 
     disagree = df[~agree_mask].copy()
-    disagree["gt_bin"]   = gt[~agree_mask].values
-    disagree["init_bin"] = init_bin[~agree_mask].values
-    disagree["fin_bin"]  = fin_bin[~agree_mask].values
-    return disagree[["image_path","true_label","gt_bin","init_bin","fin_bin",
+    disagree["gt_val"]    = gt[~agree_mask].values
+    disagree["init_pred"] = init_pred[~agree_mask].values
+    disagree["fin_pred"]  = fin_pred[~agree_mask].values
+    return disagree[["image_path","true_label","gt_val","init_pred","fin_pred",
                       "cnn_predicted_class","cnn_confidence"]]
 
 
@@ -436,22 +519,29 @@ def section_initial_vs_final(df: pd.DataFrame) -> pd.DataFrame:
 def section_cnn(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     print_section("5. CNN detailed metrics + calibration")
 
-    gt       = df["gt"]
-    pred     = df["cnn_predicted_class"].apply(to_binary)
-    conf     = df["cnn_confidence"].values
+    binary  = _is_binary(df)
+    classes = _unique_classes(df)
+    gt      = df["gt"]
 
-    valid    = (gt != "unknown") & (pred != "unknown")
-    gt_v     = gt[valid];  pred_v = pred[valid];  conf_v = conf[valid.values]
-    correct  = (pred_v == gt_v).values.astype(float)
+    if binary:
+        pred = df["cnn_predicted_class"].apply(to_binary)
+    else:
+        pred = df["cnn_predicted_class"].apply(lambda x: _normalize_pred(x, classes))
 
-    m = binary_metrics_dict(gt, pred)
-    auc_scores = [s if p == "tumor" else 1 - s for p, s in zip(pred_v, conf_v)]
-    auc = roc_auc_binary(gt_v.tolist(), auc_scores)
+    conf    = df["cnn_confidence"].values
+    valid   = (gt != "unknown") & (pred != "unknown")
+    gt_v    = gt[valid]
+    pred_v  = pred[valid]
+    conf_v  = conf[valid.values]
+    correct = (pred_v == gt_v).values.astype(float)
+    ece     = compute_ece(conf_v, correct)
+    cal_df  = calibration_bins(conf_v, correct)
 
-    # Per-class confidence stats
     per_class_rows = []
-    for cls in ["tumor", "normal"]:
+    for cls in classes:
         cls_mask = (gt_v == cls).values
+        if cls_mask.sum() == 0:
+            continue
         c = conf_v[cls_mask]
         per_class_rows.append({
             "true_class": cls,
@@ -459,23 +549,30 @@ def section_cnn(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
             "conf_mean": round(float(c.mean()), 4),
             "conf_std":  round(float(c.std()),  4),
             "conf_min":  round(float(c.min()),  4),
-            "conf_p25":  round(float(np.percentile(c, 25)), 4),
             "conf_p50":  round(float(np.percentile(c, 50)), 4),
-            "conf_p75":  round(float(np.percentile(c, 75)), 4),
             "conf_max":  round(float(c.max()),  4),
             "accuracy":  round(float((pred_v[gt_v == cls] == cls).mean()), 4),
         })
     per_class_df = pd.DataFrame(per_class_rows)
 
-    # Calibration
-    ece = compute_ece(conf_v, correct)
-    cal_df = calibration_bins(conf_v, correct)
+    if binary:
+        m = binary_metrics_dict(gt, pred)
+        auc_scores = [s if p == "tumor" else 1 - s for p, s in zip(pred_v, conf_v)]
+        auc = roc_auc_binary(gt_v.tolist(), auc_scores)
+        metrics_row = {**m, "roc_auc": auc, "ece": round(ece, 4)}
+        print(f"  Accuracy:    {m['accuracy']}    F1-macro: {m['f1_macro']}    AUC: {auc}    ECE: {round(ece,4)}")
+        print(f"  Sensitivity: {m['sensitivity']}   Specificity: {m['specificity']}")
+        print(f"  Confusion matrix (normal/tumor):  TN={m['tn']} FP={m['fp']} FN={m['fn']} TP={m['tp']}")
+    else:
+        m = multiclass_metrics_dict(gt, pred)
+        metrics_row = {**m, "ece": round(ece, 4)}
+        print(f"  Accuracy: {m['accuracy']}    F1-macro: {m['f1_macro']}    ECE: {round(ece,4)}")
+        cm = confusion_matrix(gt_v.tolist(), pred_v.tolist(), labels=classes)
+        cm_df = pd.DataFrame(cm, index=[f"true_{c}" for c in classes],
+                             columns=[f"pred_{c}" for c in classes])
+        print("\n  Confusion matrix:")
+        print(cm_df.to_string())
 
-    metrics_row = {**m, "roc_auc": auc, "ece": round(ece, 4)}
-
-    print(f"  Accuracy:    {m['accuracy']}    F1-macro: {m['f1_macro']}    AUC: {auc}    ECE: {round(ece,4)}")
-    print(f"  Sensitivity: {m['sensitivity']}   Specificity: {m['specificity']}")
-    print(f"  Confusion matrix (normal/tumor):  TN={m['tn']} FP={m['fp']} FN={m['fn']} TP={m['tp']}")
     print("\n  Per-class confidence:")
     print(per_class_df.to_string(index=False))
     print("\n  Calibration bins (10 equal-width):")
@@ -491,23 +588,33 @@ def section_cnn(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
 def section_clip(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     print_section("6. BiomedCLIP detailed metrics")
 
-    gt     = df["gt"]
-    pred   = df["biomedclip_top_label"].apply(to_binary)
+    binary  = _is_binary(df)
+    classes = _unique_classes(df)
+    gt      = df["gt"]
+
+    if binary:
+        pred = df["biomedclip_top_label"].apply(to_binary)
+    else:
+        pred = df["biomedclip_top_label"].apply(lambda x: _normalize_pred(x, classes))
+
     scores = df["biomedclip_top_score"].values
 
     unique_preds = pred.unique()
     print(f"  Unique predictions : {unique_preds.tolist()}")
     if len(unique_preds) == 1:
         print(f"  ⚠  BiomedCLIP predicted '{unique_preds[0]}' for ALL {len(df)} samples (label collapse).")
-        print(f"     Effective accuracy = class balance = {(gt == unique_preds[0]).mean():.4f}")
 
-    m   = binary_metrics_dict(gt, pred)
-    print(f"\n  Accuracy: {m.get('accuracy','N/A')}  F1: {m.get('f1_macro','N/A')}  "
-          f"Sens: {m.get('sensitivity','N/A')}  Spec: {m.get('specificity','N/A')}")
+    if binary:
+        m = binary_metrics_dict(gt, pred)
+        print(f"\n  Accuracy: {m.get('accuracy','N/A')}  F1: {m.get('f1_macro','N/A')}  "
+              f"Sens: {m.get('sensitivity','N/A')}  Spec: {m.get('specificity','N/A')}")
+    else:
+        m = multiclass_metrics_dict(gt, pred)
+        print(f"\n  Accuracy: {m.get('accuracy','N/A')}  F1: {m.get('f1_macro','N/A')}")
 
     # Score distribution by true class
     pct_rows = []
-    for cls in ["tumor", "normal", "all"]:
+    for cls in classes + ["all"]:
         mask = (gt == cls) if cls != "all" else pd.Series([True]*len(df), index=df.index)
         s = scores[mask.values]
         row = percentile_table(s, cls)
@@ -516,12 +623,22 @@ def section_clip(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     print("\n  Top-score percentiles by true class:")
     print(pct_df.to_string(index=False))
 
-    # Score difference between classes (if possible)
-    score_tumor  = scores[(gt == "tumor").values]
-    score_normal = scores[(gt == "normal").values]
-    diff = score_tumor.mean() - score_normal.mean()
-    print(f"\n  Mean score: tumor={score_tumor.mean():.4f}  normal={score_normal.mean():.4f}  "
-          f"diff={diff:.4f}  (positive = BiomedCLIP scores tumors higher)")
+    # Score difference between classes
+    if binary:
+        score_tumor  = scores[(gt == "tumor").values]
+        score_normal = scores[(gt == "normal").values]
+        if len(score_tumor) and len(score_normal):
+            diff = score_tumor.mean() - score_normal.mean()
+            print(f"\n  Mean score: tumor={score_tumor.mean():.4f}  normal={score_normal.mean():.4f}  "
+                  f"diff={diff:.4f}  (positive = BiomedCLIP scores tumors higher)")
+    else:
+        score_parts = []
+        for cls in classes:
+            s = scores[(gt == cls).values]
+            if len(s):
+                score_parts.append(f"{cls}={s.mean():.4f}")
+        if score_parts:
+            print(f"\n  Mean top-score by class:  {',  '.join(score_parts)}")
 
     valid = (gt != "unknown") & (pred != "unknown")
     conf_v   = scores[valid.values]
@@ -555,6 +672,7 @@ def _bbox_coverage(bboxes, img_size=512) -> np.ndarray:
 def section_sam3(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     print_section("7. SAM3 detailed analysis")
 
+    classes  = _unique_classes(df)
     gt       = df["gt"]
     iou      = df["saliency_sam3_iou"].values
     coverage = _bbox_coverage(df["sam3_bbox"].tolist())
@@ -565,11 +683,12 @@ def section_sam3(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataF
     # ── IoU percentile table by class ─────────────────────────────────────────
     print("\n  [IoU (GradCAM++ ∩ SAM3 mask) — percentiles by true class]")
     iou_rows = []
-    for cls in ["tumor", "normal", "all"]:
+    for cls in classes + ["all"]:
         mask = (gt == cls) if cls != "all" else pd.Series([True]*len(df), index=df.index)
         iou_cls = iou[mask.values]
         row = percentile_table(iou_cls, cls)
-        row["zero_rate"] = round(float((iou_cls == 0).mean()), 4)
+        if row:
+            row["zero_rate"] = round(float((iou_cls == 0).mean()), 4)
         iou_rows.append(row)
     iou_df = pd.DataFrame(iou_rows)
     print(iou_df.to_string(index=False))
@@ -577,28 +696,25 @@ def section_sam3(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataF
     # ── bbox coverage by class ─────────────────────────────────────────────────
     print("\n  [Bbox coverage (bbox_area / 512²) by true class]")
     bbox_rows = []
-    for cls in ["tumor", "normal", "all"]:
+    for cls in classes + ["all"]:
         mask = (gt == cls) if cls != "all" else pd.Series([True]*len(df), index=df.index)
         cov = coverage[mask.values]
         row = percentile_table(cov, cls)
-        row["full_image_rate"] = round(float((cov >= 0.99).mean()), 4)
+        if row:
+            row["full_image_rate"] = round(float((cov >= 0.99).mean()), 4)
         bbox_rows.append(row)
     bbox_df = pd.DataFrame(bbox_rows)
     print(bbox_df.to_string(index=False))
 
-    # ── false-positive analysis: SAM3 activation on normal scans ──────────────
-    print("\n  [SAM3 false-positive activation on normal scans]")
-    normal_mask = (gt == "normal").values
-
-    # "Activation" = SAM3 bbox is NOT full-image (it localised something)
-    not_full_img = (coverage < 0.99) & ~np.isnan(coverage)
-    fp_activation_rate = not_full_img[normal_mask].mean()
-
+    # ── per-class SAM3 activation (coverage bins) ──────────────────────────────
+    print("\n  [SAM3 bbox coverage distribution by true class]")
     cov_bins = [0.0, 0.1, 0.25, 0.5, 0.75, 0.99, 1.01]
     fp_rows = []
-    for cls in ["tumor", "normal"]:
+    for cls in classes:
         cls_mask = (gt == cls).values
         cov_cls  = coverage[cls_mask]
+        if len(cov_cls) == 0:
+            continue
         for lo, hi in zip(cov_bins[:-1], cov_bins[1:]):
             n_in = int(((cov_cls >= lo) & (cov_cls < hi)).sum())
             fp_rows.append({
@@ -608,8 +724,8 @@ def section_sam3(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataF
                 "pct": round(n_in / len(cov_cls) * 100, 1),
             })
     fp_df = pd.DataFrame(fp_rows)
-    print(f"  SAM3 activation rate on NORMAL scans (bbox <99% of image): "
-          f"{fp_activation_rate*100:.1f}%")
+    not_full = (coverage < 0.99) & ~np.isnan(coverage)
+    print(f"  SAM3 localised (bbox <99% of image): {not_full.sum()} / {len(df)} ({not_full.mean()*100:.1f}%)")
     print(fp_df.to_string(index=False))
 
     # ── IoU vs CNN confidence cross-analysis ──────────────────────────────────
@@ -630,7 +746,9 @@ def section_sam3(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataF
 def section_confidence_summary(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     print_section("8. Confidence calibration summary (all models)")
 
-    gt = df["gt"]
+    binary  = _is_binary(df)
+    classes = _unique_classes(df)
+    gt      = df["gt"]
     valid_mask = (gt != "unknown")
 
     def get_conf_correct(pred_series, conf_series):
@@ -641,21 +759,26 @@ def section_confidence_summary(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
         c    = (pv == gv).values.astype(float)
         return cv, c
 
+    def _norm(series):
+        if binary:
+            return series.apply(to_binary)
+        return series.apply(lambda x: _normalize_pred(x, classes))
+
     models_conf = {
         "cnn": (
-            df["cnn_predicted_class"].apply(to_binary),
+            _norm(df["cnn_predicted_class"]),
             df["cnn_confidence"],
         ),
         "medgemma_initial": (
-            df["medgemma_diagnosis"].apply(mg_to_binary),
+            _mg_norm_series(df["medgemma_diagnosis"], binary, classes),
             df["medgemma_diagnosis"].apply(lambda d: mg_field(d, "diagnosis_confidence") or 0.0),
         ),
         "medgemma_final": (
-            df["final_medgemma_diagnosis"].apply(mg_to_binary),
+            _mg_norm_series(df["final_medgemma_diagnosis"], binary, classes),
             df["final_medgemma_diagnosis"].apply(lambda d: mg_field(d, "diagnosis_confidence") or 0.0),
         ),
         "biomedclip": (
-            df["biomedclip_top_label"].apply(to_binary),
+            _norm(df["biomedclip_top_label"]),
             df["biomedclip_top_score"],
         ),
     }
@@ -702,6 +825,8 @@ def section_confidence_summary(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
 def section_human_review(df: pd.DataFrame) -> pd.DataFrame:
     print_section("9. Human-review flag analysis")
 
+    binary  = _is_binary(df)
+    classes = _unique_classes(df)
     gt      = df["gt"]
     flagged = df["requires_human_review"]
     iou     = df["saliency_sam3_iou"].values
@@ -709,27 +834,42 @@ def section_human_review(df: pd.DataFrame) -> pd.DataFrame:
     total_flagged = int(flagged.sum())
     print(f"  Flagged : {total_flagged} / {len(df)}  ({total_flagged/len(df)*100:.1f}%)")
 
+    if binary:
+        pred_models = [
+            ("cnn",           df["cnn_predicted_class"].apply(to_binary)),
+            ("medgemma_init", _mg_norm_series(df["medgemma_diagnosis"], binary, classes)),
+        ]
+    else:
+        pred_models = [
+            ("cnn",           df["cnn_predicted_class"].apply(lambda x: _normalize_pred(x, classes))),
+            ("medgemma_init", _mg_norm_series(df["medgemma_diagnosis"], binary, classes)),
+        ]
+
     rows = []
     for label, mask in [("flagged", flagged), ("not_flagged", ~flagged)]:
         n = int(mask.sum())
         if n == 0:
             rows.append({"subset": label, "n": 0})
             continue
-        for model_name, pred in [
-            ("cnn",          df["cnn_predicted_class"].apply(to_binary)),
-            ("medgemma_init",df["medgemma_diagnosis"].apply(mg_to_binary)),
-        ]:
+        for model_name, pred in pred_models:
             sub_gt   = gt[mask]
             sub_pred = pred[mask]
             both     = (sub_gt != "unknown") & (sub_pred != "unknown")
             if both.sum() == 0:
                 continue
-            m = binary_metrics_dict(sub_gt[both], sub_pred[both])
-            rows.append({
-                "subset": label, "model": model_name, "n": n,
-                "accuracy": m.get("accuracy"), "f1_macro": m.get("f1_macro"),
-                "sensitivity": m.get("sensitivity"), "specificity": m.get("specificity"),
-            })
+            if binary:
+                m = binary_metrics_dict(sub_gt[both], sub_pred[both])
+                rows.append({
+                    "subset": label, "model": model_name, "n": n,
+                    "accuracy": m.get("accuracy"), "f1_macro": m.get("f1_macro"),
+                    "sensitivity": m.get("sensitivity"), "specificity": m.get("specificity"),
+                })
+            else:
+                m = multiclass_metrics_dict(sub_gt[both], sub_pred[both])
+                rows.append({
+                    "subset": label, "model": model_name, "n": n,
+                    "accuracy": m.get("accuracy"), "f1_macro": m.get("f1_macro"),
+                })
 
     review_df = pd.DataFrame(rows)
     print(review_df.dropna(subset=["accuracy"]).to_string(index=False))
@@ -752,7 +892,8 @@ def section_human_review(df: pd.DataFrame) -> pd.DataFrame:
 def section_severity(df: pd.DataFrame) -> pd.DataFrame:
     print_section("10. Severity score analysis")
 
-    gt = df["gt"]
+    classes = _unique_classes(df)
+    gt      = df["gt"]
 
     init_sev = _extract_field_series(df["medgemma_diagnosis"],       "severity_score")
     fin_sev  = _extract_field_series(df["final_medgemma_diagnosis"], "severity_score")
@@ -761,7 +902,7 @@ def section_severity(df: pd.DataFrame) -> pd.DataFrame:
 
     rows = []
     for stage, vals_num in [("initial", init_sev_num), ("final", fin_sev_num)]:
-        for cls in ["tumor", "normal", "all"]:
+        for cls in classes + ["all"]:
             mask = (gt == cls) if cls != "all" else pd.Series([True]*len(df), index=df.index)
             v = vals_num[mask].dropna().values
             if len(v) == 0:
@@ -789,15 +930,14 @@ def section_severity(df: pd.DataFrame) -> pd.DataFrame:
 def section_latency(df: pd.DataFrame) -> pd.DataFrame:
     print_section("11. Latency analysis")
 
-    lat = df["latency_s"].values
-    gt  = df["gt"]
+    classes = _unique_classes(df)
+    lat     = df["latency_s"].values
+    gt      = df["gt"]
 
-    summary = {
-        "all":    percentile_table(lat, "all"),
-        "tumor":  percentile_table(lat[(gt == "tumor").values], "tumor"),
-        "normal": percentile_table(lat[(gt == "normal").values], "normal"),
-    }
-    lat_df = pd.DataFrame(list(summary.values()))
+    summary_rows = [percentile_table(lat, "all")]
+    for cls in classes:
+        summary_rows.append(percentile_table(lat[(gt == cls).values], cls))
+    lat_df = pd.DataFrame(summary_rows)
     print(lat_df.to_string(index=False))
 
     # By routing path
@@ -821,6 +961,125 @@ def section_latency(df: pd.DataFrame) -> pd.DataFrame:
 # ══════════════════════════════════════════════════════════════════════════════
 # Report generation
 # ══════════════════════════════════════════════════════════════════════════════
+
+def _generate_multiclass_report(
+    jsonl_path: str,
+    df: pd.DataFrame,
+    accuracy_df: pd.DataFrame,
+    dist_df: pd.DataFrame,
+    agree_df: pd.DataFrame,
+    field_acc_df: pd.DataFrame,
+    cnn_class_df: pd.DataFrame,
+    cnn_cal_df: pd.DataFrame,
+    cnn_metrics_df: pd.DataFrame,
+    clip_pct_df: pd.DataFrame,
+    iou_df: pd.DataFrame,
+    bbox_df: pd.DataFrame,
+    fp_df: pd.DataFrame,
+    conf_summary_df: pd.DataFrame,
+    review_df: pd.DataFrame,
+    sev_df: pd.DataFrame,
+    lat_df: pd.DataFrame,
+    out_dir: Path,
+):
+    """Markdown report for multiclass (Figshare3 meningioma/glioma/pituitary)."""
+    classes = _unique_classes(df)
+    n       = len(df)
+    gt      = df["gt"]
+
+    def get_metric(model, col):
+        row = accuracy_df[accuracy_df["model"] == model]
+        if row.empty:
+            return "N/A"
+        v = row.iloc[0].get(col, "N/A")
+        return f"{v:.4f}" if isinstance(v, float) else str(v)
+
+    class_counts = {c: int((gt == c).sum()) for c in classes}
+    counts_str   = "  ".join(f"{c}={n2}" for c, n2 in class_counts.items())
+
+    total_flagged = int(df["requires_human_review"].sum()) if "requires_human_review" in df.columns else n
+    flag_pct      = total_flagged / n * 100 if n > 0 else 0.0
+    iou_vals      = df["saliency_sam3_iou"].values if "saliency_sam3_iou" in df.columns else np.array([])
+    iou_zero_rate = float((iou_vals == 0).mean()) if len(iou_vals) > 0 else float("nan")
+
+    lines = [
+        "# Multiclass Tumor Evaluation — Analysis Report",
+        "",
+        f"**Source:** `{jsonl_path}`  ",
+        f"**Total samples:** {n}  ({counts_str})  ",
+        f"**Task:** multiclass tumor subtype classification (Figshare3: {', '.join(classes)})  ",
+        "",
+        "---",
+        "",
+        "## 1. Per-model accuracy summary",
+        "",
+        accuracy_df.to_markdown(index=False),
+        "",
+        "### Key observations",
+        f"- **CNN**: acc={get_metric('cnn','accuracy')},  F1-macro={get_metric('cnn','f1_macro')}",
+        f"- **BiomedCLIP**: acc={get_metric('biomedclip','accuracy')},  F1-macro={get_metric('biomedclip','f1_macro')}",
+        f"- **MedGemma initial**: acc={get_metric('medgemma_initial','accuracy')},  F1-macro={get_metric('medgemma_initial','f1_macro')}",
+        f"- **MedGemma final**: acc={get_metric('medgemma_final','accuracy')},  F1-macro={get_metric('medgemma_final','f1_macro')}",
+        f"- **Pipeline final**: acc={get_metric('pipeline_final','accuracy')},  F1-macro={get_metric('pipeline_final','f1_macro')}",
+        "",
+        "---",
+        "",
+        "## 2. MedGemma structured-output field agreement",
+        "",
+        agree_df[["field", "agreement_rate", "n_agree", "n_differ", "null_initial", "null_final"]].to_markdown(index=False),
+        "",
+        "---",
+        "",
+        "## 3. CNN per-class confidence + calibration",
+        "",
+        cnn_class_df.to_markdown(index=False),
+        "",
+        cnn_cal_df.to_markdown(index=False),
+        "",
+        "---",
+        "",
+        "## 4. BiomedCLIP top-score percentiles by class",
+        "",
+        clip_pct_df.to_markdown(index=False),
+        "",
+        "---",
+        "",
+        "## 5. SAM3 IoU percentiles by class",
+        "",
+        iou_df.to_markdown(index=False),
+        "",
+        "### Bbox coverage by class",
+        "",
+        bbox_df.to_markdown(index=False),
+        "",
+        "---",
+        "",
+        "## 6. Confidence calibration (ECE)",
+        "",
+        conf_summary_df.to_markdown(index=False),
+        "",
+        "---",
+        "",
+        "## 7. Human-review flag analysis",
+        "",
+        f"- **{flag_pct:.1f}%** of samples flagged ({total_flagged}/{n})",
+        "",
+        review_df.dropna(subset=["accuracy"]).to_markdown(index=False) if not review_df.dropna(subset=["accuracy"]).empty else "_No data._",
+        "",
+        "---",
+        "",
+        "## 8. Latency",
+        "",
+        lat_df.to_markdown(index=False),
+        "",
+    ]
+
+    report = "\n".join(lines)
+    report_path = out_dir / "analysis_report.md"
+    report_path.write_text(report, encoding="utf-8")
+    print(f"\n  Report written to {report_path}")
+    return report_path
+
 
 def generate_report(
     jsonl_path: str,
@@ -846,6 +1105,14 @@ def generate_report(
     lat_df: pd.DataFrame,
     out_dir: Path,
 ):
+    if not _is_binary(df):
+        return _generate_multiclass_report(
+            jsonl_path, df, accuracy_df, dist_df, agree_df, field_acc_df,
+            cnn_class_df, cnn_cal_df, cnn_metrics_df,
+            clip_pct_df, iou_df, bbox_df, fp_df,
+            conf_summary_df, review_df, sev_df, lat_df, out_dir,
+        )
+
     gt = df["gt"]
     n = len(df)
     n_tumor  = int((gt == "tumor").sum())
@@ -1133,11 +1400,17 @@ def generate_report(
 def main():
     parser = argparse.ArgumentParser(description="Comprehensive binary tumor_eval analysis")
     parser.add_argument("--jsonl", required=True)
-    parser.add_argument("--output_dir", default="outputs/analysis")
+    parser.add_argument("--output_dir", default=None,
+                        help="Output directory (default: outputs/analysis/<jsonl-stem>)")
     args = parser.parse_args()
 
     df  = load(args.jsonl)
-    out = Path(args.output_dir)
+    # Default: outputs/analysis/<stem> so binary and multiclass never clobber each other
+    if args.output_dir is None:
+        stem = Path(args.jsonl).stem  # e.g. binary_tumor_tumor_eval
+        out  = Path("outputs/analysis") / stem
+    else:
+        out  = Path(args.output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
     section_dataset(df)
