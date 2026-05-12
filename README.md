@@ -3,7 +3,7 @@
 a LangGraph-based multi-agent pipeline for automated classification of neuroimaging findings (brain tumour, multiple sclerosis, stroke).
 
 ## Architecture
-![System architecture diagram](system_diagram_updated.png)
+![System architecture diagram](system_diagram.png)
 
 **Agents / tools**
 
