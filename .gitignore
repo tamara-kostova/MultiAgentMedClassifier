@@ -215,6 +215,9 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 docs/
+# Checkpoints are too large (3.7 GB) for regular git.
+# The 4 default task checkpoints + BiomedCLIP probes must be placed in checkpoints/
+# before running. See README for details.
 checkpoints/
 memory/
 *.jpg
@@ -222,3 +225,5 @@ memory/
 data/
 papers/
 outputs/
+# Keep the env template (not the actual secrets)
+!.env.example

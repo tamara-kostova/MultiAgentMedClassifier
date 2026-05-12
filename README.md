@@ -69,10 +69,31 @@ MultiAgentMedClassifier/
 │   ├── explainability/     # Saliency maps: gradcam_pp_*.png, ig_*.png
 │   ├── fhir/               # FHIR R4 bundles: fhir_<id>.json
 │   └── eval/               # comparison_summary.csv, <task>_tumor_eval.jsonl
+├── app.py                  # Gradio web GUI (python app.py → http://localhost:7860)
 ├── config.py               # Central config dataclasses
 ├── run_pipeline.py         # CLI entry point
+├── .env.example            # API key template — copy to .env and fill in HF_TOKEN
 └── requirements.txt
 ```
+
+## Quick Start (GUI)
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+# Set your HuggingFace token (see Setup section below)
+cp .env.example .env
+# edit .env and paste your HF_TOKEN
+
+# Launch the web interface
+python app.py
+# Open http://localhost:7860 in a browser
+```
+
+Upload a brain scan, choose a task, click **Run Pipeline** — the full agent pipeline runs and
+displays the prediction, clinical report, segmentation overlay, and saliency maps.
 
 ## Setup
 
@@ -85,8 +106,14 @@ pip install -r requirements.txt
 **MedGemma** is a gated model — accept the terms of use at [hf.co/google/medgemma-1.5-4b-it](https://huggingface.co/google/medgemma-1.5-4b-it) then authenticate:
 
 ```bash
+# Option A — .env file (recommended)
+cp .env.example .env          # copy the template
+# open .env and set: HF_TOKEN=hf_your_token_here
+
+# Option B — CLI login
 huggingface-cli login
-# or
+
+# Option C — environment variable
 export HF_TOKEN=hf_...
 ```
 
@@ -99,15 +126,20 @@ ModelConfig(use_4bit_quantization=True)
 
 ## CNN Checkpoints
 
-Place the `_final.pt` checkpoints (plain state dicts) in `checkpoints/`:
+The pretrained checkpoints (~800 MB for the 4 default models) are not stored in the repository.
+Place the following files in `checkpoints/` before running:
 
 ```
 checkpoints/
-  vgg16_MRI_tumor_binary_norm_final.pt
-  densenet169_MRI_tumor_multiclass_norm_final.pt
-  resnet101_MRI_ms_norm_final.pt
-  densenet169_CT_stroke_binary_norm_final.pt
-  sam3_probe.pth
+  vgg16_MRI_tumor_binary_norm_final.pt          # binary_tumor task
+  densenet169_MRI_tumor_multiclass_norm_final.pt # multiclass_tumor task
+  resnet101_MRI_ms_norm_final.pt                # ms task
+  densenet169_CT_stroke_binary_norm_final.pt    # stroke task
+  linear_probe_BiomedCLIP_MRI_tumor_binary_norm_best.pt
+  linear_probe_BiomedCLIP_MRI_tumor_multiclass_norm_best.pt
+  linear_probe_BiomedCLIP_MRI_ms_norm_best.pt
+  linear_probe_BiomedCLIP_CT_stroke_binary_norm_best.pt
+  sam3_probe.pth                                # optional SAM3 segmentation head
 ```
 
 The pipeline selects the checkpoint automatically based on `--task`.
