@@ -138,6 +138,12 @@ HF_CHECKPOINT_REPOS: dict[str, dict] = {
             ),
         },
     },
+    "tumor_segmentation": {
+        "sam3": {
+            "repo_id": "tamara-kostova/multiagentmed-tumor-segmentation",
+            "filename": "tumor_segmentation/sam3/sam3_linear_probe_tumor_segmentation_best.pt",
+        },
+    },
 }
 
 

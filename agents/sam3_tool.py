@@ -10,10 +10,9 @@ The main pipeline can run in a Python 3.9 / macOS MPS environment, but SAM3
 cannot be installed there cleanly. In that case this tool returns a skipped
 segmentation result and the rest of the pipeline continues without SAM3.
 
-Based on sam3_pipeline.tex findings:
-  - Zero-shot SAM3: Dice=0.189, IoU=0.124, Sensitivity=0.397 (insufficient)
-  - Linear probe on frozen SAM3 encoder: Dice=0.836 pixel-level, 0.801 per-case mean
-  - SAM3→MedGemma pipeline: tumor detection 85.1%→96.3% but specificity 67.1%→41.3%
+- Zero-shot SAM3: Dice=0.189, IoU=0.124, Sensitivity=0.397 (insufficient)
+- Linear probe on frozen SAM3 encoder: Dice=0.836 pixel-level, 0.801 per-case mean
+- SAM3→MedGemma pipeline: tumor detection 85.1%→96.3% but specificity 67.1%→41.3%
 
 This tool uses SAM3's frozen backbone as a feature extractor with a linear
 1×1 conv probe head for segmentation. It also returns a bounding-box overlay
@@ -32,7 +31,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image, ImageDraw
 
-from config import DEFAULT_CONFIG, ModelConfig, resolve_torch_device
+from config import CHECKPOINT_SOURCE, DEFAULT_CONFIG, HF_CHECKPOINT_REPOS, ModelConfig, download_hf_checkpoint, resolve_torch_device
 
 # ── Try to import SAM3 ────────────────────────────────────────────────────────
 _SAM_IMPORT_ERROR = None
@@ -179,6 +178,32 @@ class SAM3Tool:
                 "[SAM3Tool] No BPE path configured (sam3_bpe_path) — segmentation skipped."
             )
             return
+        
+        probe_ckpt_path = Path(probe_ckpt)
+
+        if not probe_ckpt_path.exists():
+            if (
+                CHECKPOINT_SOURCE != "local"
+                and "tumor_segmentation" in HF_CHECKPOINT_REPOS
+                and "sam3" in HF_CHECKPOINT_REPOS["tumor_segmentation"]
+            ):
+                try:
+                    probe_ckpt_path = download_hf_checkpoint(
+                        "tumor_segmentation", "sam3", probe_ckpt_path, caller="SAM3Tool"
+                    )
+                    probe_ckpt = str(probe_ckpt_path)
+                except Exception as exc:
+                    print(
+                        f"[SAM3Tool] HF download failed for SAM3 probe "
+                        f"({exc}); segmentation skipped."
+                    )
+                    return
+            else:
+                print(
+                    f"[SAM3Tool] Probe checkpoint not found: {probe_ckpt}; "
+                    "segmentation skipped."
+                )
+                return
 
         print(f"[SAM3Tool] Loading SAM3 backbone (bpe={bpe_path})")
         _patch_sam3_position_encoding_precompute()
