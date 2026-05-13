@@ -51,19 +51,18 @@ CANDIDATE_LABELS = {
 }
 PROBE_CANDIDATE_LABELS: dict[str, list[str]] = {
     "multiclass_tumor": [
-        "brain MRI showing carcinoma",      # [0] Carcinoma
-        "brain MRI showing ependymoma",     # [1] Ependymoma
-        "brain MRI showing germinoma",      # [2] Germinoma
-        "brain MRI showing glioma",         # [3] Glioma
-        "brain MRI showing granuloma",      # [4] Granuloma
-        "brain MRI showing medulloblastoma",# [5] Meduloblastoma
-        "brain MRI showing meningioma",     # [6] Meningioma
-        "brain MRI showing neurocytoma",    # [7] Neurocitoma
-        "normal brain MRI",                 # [8] Normal
-        "brain MRI showing other tumor",    # [9] Other
-        "brain MRI showing papilloma",      # [10] Papiloma
-        "brain MRI showing schwannoma",     # [11] Schwannoma
-        "brain MRI showing tuberculoma",    # [12] Tuberculoma
+        "brain MRI showing carcinoma",       # [0]
+        "brain MRI showing germinoma",       # [1]
+        "brain MRI showing glioma",          # [2]
+        "brain MRI showing granuloma",       # [3]
+        "brain MRI showing medulloblastoma", # [4]
+        "brain MRI showing meningioma",      # [5]
+        "brain MRI showing neurocytoma",     # [6]
+        "normal brain MRI",                  # [7]
+        "brain MRI showing papilloma",       # [8]
+        "brain MRI showing pituitary tumor", # [9]
+        "brain MRI showing schwannoma",      # [10]
+        "brain MRI showing tuberculoma",     # [11]
     ],
 }
 

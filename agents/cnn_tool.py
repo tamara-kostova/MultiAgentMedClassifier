@@ -36,7 +36,7 @@ NUM_CLASSES = {
 
 _CNN_MULTICLASS_CLASSES = [
     "carcinoma", "germinoma", "glioma", "granuloma", "medulloblastoma",
-    "meningioma", "neurocytoma", "normal", "other", "papilloma",
+    "meningioma", "neurocytoma", "normal", "papilloma", "pituitary_tumor",
     "schwannoma", "tuberculoma",
 ]
 

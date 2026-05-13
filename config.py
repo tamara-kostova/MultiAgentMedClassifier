@@ -193,12 +193,10 @@ BEST_CNN_PER_TASK = {
     "stroke": "densenet169",
 }
 
-# 13-class tumor labels — alphabetically sorted, matching MRI_tumor_multiclass_norm directory names.
-# CNN checkpoint (DenseNet169) was trained on a prior 12-class split that included Pituitary;
-# use cnn_tool._CNN_MULTICLASS_CLASSES for CNN output-index → label mapping.
+# 12-class tumor labels — alphabetically sorted, matching MRI_tumor_multiclass_norm directory names.
+# Used for BiomedCLIP zero-shot candidate labels and the probe label list.
 TUMOR_MULTICLASS_CLASSES = [
     "carcinoma",
-    "ependymoma",
     "germinoma",
     "glioma",
     "granuloma",
@@ -206,8 +204,8 @@ TUMOR_MULTICLASS_CLASSES = [
     "meningioma",
     "neurocytoma",
     "normal",
-    "other",
     "papilloma",
+    "pituitary_tumor",
     "schwannoma",
     "tuberculoma",
 ]
