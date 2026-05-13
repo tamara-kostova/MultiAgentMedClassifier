@@ -18,9 +18,12 @@ from torchvision import models, transforms
 
 from config import (
     BEST_CNN_PER_TASK,
+    CHECKPOINT_SOURCE,
     DEFAULT_CONFIG,
+    HF_CHECKPOINT_REPOS,
     ModelConfig,
     PreprocessConfig,
+    download_hf_checkpoint,
     resolve_torch_device,
 )
 
@@ -186,6 +189,24 @@ class CNNClassifier:
         if checkpoint_path is not None:
             checkpoint_path = Path(checkpoint_path)
             if not checkpoint_path.exists():
+                if (
+                    CHECKPOINT_SOURCE != "local"
+                    and task in HF_CHECKPOINT_REPOS
+                    and "cnn" in HF_CHECKPOINT_REPOS[task]
+                ):
+                    try:
+                        checkpoint_path = download_hf_checkpoint(
+                            task, "cnn", checkpoint_path, caller="CNNClassifier"
+                        )
+                    except Exception as exc:
+                        print(
+                            f"[CNNClassifier] HF download failed ({exc}); "
+                            "falling back to ImageNet pretrained weights."
+                        )
+                        checkpoint_path = None
+                else:
+                    checkpoint_path = None
+            if checkpoint_path is None or not checkpoint_path.exists():
                 model = _build_model_with_fallback(
                     arch, n_cls, use_imagenet_weights=True
                 )

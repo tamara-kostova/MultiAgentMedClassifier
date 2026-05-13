@@ -144,6 +144,64 @@ checkpoints/
 
 The pipeline selects the checkpoint automatically based on `--task`.
 
+## Downloading Checkpoints from Hugging Face
+
+All four task checkpoints (CNN + BiomedCLIP probe) are published on Hugging Face:
+
+| Repo | Task | CNN |
+|------|------|-----|
+| [`tamara-kostova/multiagentmed-binary-tumor`](https://huggingface.co/tamara-kostova/multiagentmed-binary-tumor) | `binary_tumor` | VGG16 |
+| [`tamara-kostova/multiagentmed-multiclass-tumor`](https://huggingface.co/tamara-kostova/multiagentmed-multiclass-tumor) | `multiclass_tumor` | DenseNet169 |
+| [`tamara-kostova/multiagentmed-stroke`](https://huggingface.co/tamara-kostova/multiagentmed-stroke) | `stroke` | DenseNet169 |
+| [`tamara-kostova/multiagentmed-ms`](https://huggingface.co/tamara-kostova/multiagentmed-ms) | `ms` | ResNet101 |
+
+### Option A — Auto-download (default)
+
+By default (`CHECKPOINT_SOURCE=hf`) the pipeline downloads any missing
+`binary_tumor` or `multiclass_tumor` checkpoint automatically the first time
+it is needed. No extra steps required — just run the pipeline as normal:
+
+```bash
+python run_pipeline.py --image scan.png --task binary_tumor
+```
+
+The file is fetched to the HF Hub cache and then copied to `checkpoints/`.
+Subsequent runs read the local copy.
+
+### Option B — Pre-download all checkpoints
+
+To download all published checkpoints up-front:
+
+```bash
+python checkpoints/download_checkpoints.py
+```
+
+Selective download:
+
+```bash
+# CNN weights only
+python checkpoints/download_checkpoints.py --kinds cnn
+
+# One task
+python checkpoints/download_checkpoints.py --tasks multiclass_tumor
+
+# Both kinds for both tumor tasks (same as default)
+python checkpoints/download_checkpoints.py --tasks binary_tumor multiclass_tumor --kinds cnn biomedclip
+```
+
+### Option C — Local files only
+
+If you have all checkpoints locally and want to disable any network access,
+add this to your `.env`:
+
+```bash
+CHECKPOINT_SOURCE=local
+```
+
+With this set, missing files fall back to ImageNet pretrained weights (CNN) or
+zero-shot mode (BiomedCLIP) instead of attempting a download.
+
+
 ## Usage
 
 **Single image:**

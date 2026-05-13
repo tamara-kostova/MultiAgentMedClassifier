@@ -13,6 +13,8 @@ Two modes:
      18_layer_fusion_benchmark.py to enable probe mode for that task.
 """
 
+from pathlib import Path
+
 import numpy as np
 import open_clip
 import torch
@@ -22,10 +24,13 @@ from PIL import Image
 
 from config import (
     BINARY_LABELS,
+    CHECKPOINT_SOURCE,
     DEFAULT_CONFIG,
+    HF_CHECKPOINT_REPOS,
     TUMOR_MULTICLASS_CLASSES,
     ModelConfig,
     PreprocessConfig,
+    download_hf_checkpoint,
     resolve_torch_device,
 )
 
@@ -123,11 +128,36 @@ class BiomedCLIPTool:
         # Per-task probe heads: dict[task] = (head_module, is_concat_fusion)
         self._probe_heads: dict[str, tuple[nn.Module, bool]] = {}
         for task, ckpt in self.model_cfg.biomedclip_probe_checkpoints.items():
-            if ckpt is not None:
-                head, is_fusion = self._load_probe_head(ckpt)
-                self._probe_heads[task] = (head, is_fusion)
-                mode = "concat-fusion" if is_fusion else "single-layer"
-                print(f"[BiomedCLIPTool] Loaded {mode} probe for '{task}': {ckpt}")
+            if ckpt is None:
+                continue
+            ckpt_path = Path(ckpt)
+            if not ckpt_path.exists():
+                if (
+                    CHECKPOINT_SOURCE != "local"
+                    and task in HF_CHECKPOINT_REPOS
+                    and "biomedclip" in HF_CHECKPOINT_REPOS[task]
+                ):
+                    try:
+                        ckpt_path = download_hf_checkpoint(
+                            task, "biomedclip", ckpt_path, caller="BiomedCLIPTool"
+                        )
+                        ckpt = str(ckpt_path)
+                    except Exception as exc:
+                        print(
+                            f"[BiomedCLIPTool] HF download failed for '{task}' probe "
+                            f"({exc}); running zero-shot for this task."
+                        )
+                        continue
+                else:
+                    print(
+                        f"[BiomedCLIPTool] Probe checkpoint not found: {ckpt}; "
+                        "running zero-shot for this task."
+                    )
+                    continue
+            head, is_fusion = self._load_probe_head(ckpt)
+            self._probe_heads[task] = (head, is_fusion)
+            mode = "concat-fusion" if is_fusion else "single-layer"
+            print(f"[BiomedCLIPTool] Loaded {mode} probe for '{task}': {ckpt}")
 
     def _load_probe_head(self, checkpoint_path: str) -> tuple[nn.Module, bool]:
         """
