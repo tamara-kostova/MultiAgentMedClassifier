@@ -3,6 +3,7 @@ Central configuration for the multi-agent neuroimaging pipeline.
 Adjust model checkpoint paths and thresholds before running.
 """
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -73,6 +74,120 @@ def _default_torch_device() -> str:
         return "mps"
     return "cpu"
 
+# ── Checkpoint source ─────────────────────────────────────────────────────────
+# CHECKPOINT_SOURCE=hf  (default) — if a local checkpoint file is missing,
+#   auto-download from Hugging Face Hub for tasks that have a published repo.
+# CHECKPOINT_SOURCE=local — use local files only; fall back to ImageNet
+#   pretrained weights (CNN) or zero-shot mode (BiomedCLIP) if a file is absent.
+CHECKPOINT_SOURCE: str = os.environ.get("CHECKPOINT_SOURCE", "hf").lower()
+
+# Published HF repos for all four tasks.
+HF_CHECKPOINT_REPOS: dict[str, dict] = {
+    "binary_tumor": {
+        "cnn": {
+            "repo_id": "tamara-kostova/multiagentmed-binary-tumor",
+            "filename": "binary_tumor/cnn/vgg16_MRI_tumor_binary_norm_final.pt",
+        },
+        "biomedclip": {
+            "repo_id": "tamara-kostova/multiagentmed-binary-tumor",
+            "filename": (
+                "binary_tumor/biomedclip/"
+                "linear_probe_BiomedCLIP_MRI_tumor_binary_norm_best.pt"
+            ),
+        },
+    },
+    "multiclass_tumor": {
+        "cnn": {
+            "repo_id": "tamara-kostova/multiagentmed-multiclass-tumor",
+            "filename": (
+                "multiclass_tumor/cnn/"
+                "densenet169_MRI_tumor_multiclass_norm_final.pt"
+            ),
+        },
+        "biomedclip": {
+            "repo_id": "tamara-kostova/multiagentmed-multiclass-tumor",
+            "filename": (
+                "multiclass_tumor/biomedclip/"
+                "linear_probe_BiomedCLIP_MRI_tumor_multiclass_norm_best.pt"
+            ),
+        },
+    },
+    "stroke": {
+        "cnn": {
+            "repo_id": "tamara-kostova/multiagentmed-stroke",
+            "filename": "stroke/cnn/densenet169_CT_stroke_binary_norm_final.pt",
+        },
+        "biomedclip": {
+            "repo_id": "tamara-kostova/multiagentmed-stroke",
+            "filename": (
+                "stroke/biomedclip/"
+                "linear_probe_BiomedCLIP_CT_stroke_binary_norm_best.pt"
+            ),
+        },
+    },
+    "ms": {
+        "cnn": {
+            "repo_id": "tamara-kostova/multiagentmed-ms",
+            "filename": "ms/cnn/resnet101_MRI_ms_norm_final.pt",
+        },
+        "biomedclip": {
+            "repo_id": "tamara-kostova/multiagentmed-ms",
+            "filename": (
+                "ms/biomedclip/"
+                "linear_probe_BiomedCLIP_MRI_ms_norm_best.pt"
+            ),
+        },
+    },
+    "tumor_segmentation": {
+        "sam3": {
+            "repo_id": "tamara-kostova/multiagentmed-tumor-segmentation",
+            "filename": "tumor_segmentation/sam3/sam3_linear_probe_tumor_segmentation_best.pt",
+        },
+    },
+}
+
+
+def download_hf_checkpoint(
+    task: str,
+    kind: str,
+    local_path: "str | Path",
+    caller: str = "",
+) -> Path:
+    """Download a checkpoint from HF Hub into *local_path* if it is absent.
+
+    Downloads to the HF cache first, then copies to *local_path* so the file
+    lives at the path the rest of the codebase expects.
+
+    Raises:
+        KeyError: no HF source is registered for (task, kind).
+        ImportError: huggingface_hub is not installed.
+    """
+    import shutil
+    from huggingface_hub import hf_hub_download
+
+    local_path = Path(local_path)
+    if local_path.exists():
+        return local_path
+
+    entry = HF_CHECKPOINT_REPOS.get(task, {}).get(kind)
+    if entry is None:
+        raise KeyError(
+            f"No HF source registered for task={task!r}, kind={kind!r}. "
+            f"Available: {list(HF_CHECKPOINT_REPOS)}"
+        )
+
+    prefix = f"[{caller}] " if caller else ""
+    print(
+        f"{prefix}Checkpoint not found locally — downloading from "
+        f"HF Hub ({entry['repo_id']}/{entry['filename']})..."
+    )
+    cached = hf_hub_download(repo_id=entry["repo_id"], filename=entry["filename"])
+    local_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(cached, local_path)
+    print(f"{prefix}Saved to {local_path}")
+    return local_path
+
+
 # ── Task identifiers ──────────────────────────────────────────────────────────
 TASKS = ["binary_tumor", "multiclass_tumor", "ms", "stroke"]
 
@@ -84,12 +199,10 @@ BEST_CNN_PER_TASK = {
     "stroke": "densenet169",
 }
 
-# 13-class tumor labels — alphabetically sorted, matching MRI_tumor_multiclass_norm directory names.
-# CNN checkpoint (DenseNet169) was trained on a prior 12-class split that included Pituitary;
-# use cnn_tool._CNN_MULTICLASS_CLASSES for CNN output-index → label mapping.
+# 12-class tumor labels — alphabetically sorted, matching MRI_tumor_multiclass_norm directory names.
+# Used for BiomedCLIP zero-shot candidate labels and the probe label list.
 TUMOR_MULTICLASS_CLASSES = [
     "carcinoma",
-    "ependymoma",
     "germinoma",
     "glioma",
     "granuloma",
@@ -97,8 +210,8 @@ TUMOR_MULTICLASS_CLASSES = [
     "meningioma",
     "neurocytoma",
     "normal",
-    "other",
     "papilloma",
+    "pituitary_tumor",
     "schwannoma",
     "tuberculoma",
 ]

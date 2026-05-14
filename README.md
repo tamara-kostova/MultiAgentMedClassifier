@@ -3,7 +3,7 @@
 a LangGraph-based multi-agent pipeline for automated classification of neuroimaging findings (brain tumour, multiple sclerosis, stroke).
 
 ## Architecture
-![System architecture diagram](system_diagram_updated.png)
+![System architecture diagram](system_diagram.png)
 
 **Agents / tools**
 
@@ -15,7 +15,7 @@ a LangGraph-based multi-agent pipeline for automated classification of neuroimag
 | `BiomedCLIPTool` | microsoft/BiomedCLIP (ViT-B/16, layer 6) | Zero-shot re-ranking for ambiguous multiclass cases |
 | `SiibraAtlasTool` | EBRAINS Julich-Brain v2.9 | Anatomical region assignment via MNI152 coordinates |
 
-**Pipeline flow** (linear — every node runs for every image):
+**Pipeline flow** (linear - every node runs for every image):
 
 ```
 triage (MedGemma)
@@ -74,10 +74,33 @@ MultiAgentMedClassifier/
 │   ├── segmentation/       # SAM3 binary masks (mask_*.png) and bbox overlays (guided_*.png)
 │   ├── fhir/               # FHIR R4 bundles: fhir_<id>.json
 │   └── eval/               # comparison_summary.csv, <task>_tumor_eval.jsonl
+├── app.py                  # Gradio web GUI (python app.py → http://localhost:7860)
 ├── config.py               # Central config dataclasses
 ├── run_pipeline.py         # CLI entry point
+├── .env.example            # API key template - copy to .env and fill in HF_TOKEN
 └── requirements.txt
 ```
+
+## Quick Start (GUI)
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+# Set your HuggingFace token (see Setup section below)
+cp .env.example .env
+# edit .env and paste your HF_TOKEN
+
+# Launch the web interface
+python app.py
+# Open http://localhost:7860 in a browser
+```
+
+Upload a brain scan, choose a task, click **Run Pipeline** - the full agent pipeline runs and
+displays the prediction, clinical report, segmentation overlay, and saliency maps.
+
+![App interface](app_preview.png)
 
 ## Setup
 
@@ -87,11 +110,17 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-**MedGemma** is a gated model — accept the terms of use at [hf.co/google/medgemma-1.5-4b-it](https://huggingface.co/google/medgemma-1.5-4b-it) then authenticate:
+**MedGemma** is a gated model - accept the terms of use at [hf.co/google/medgemma-1.5-4b-it](https://huggingface.co/google/medgemma-1.5-4b-it) then authenticate:
 
 ```bash
+# Option A - .env file (recommended)
+cp .env.example .env          # copy the template
+# open .env and set: HF_TOKEN=hf_your_token_here
+
+# Option B - CLI login
 huggingface-cli login
-# or
+
+# Option C - environment variable
 export HF_TOKEN=hf_...
 ```
 
@@ -104,18 +133,85 @@ ModelConfig(use_4bit_quantization=True)
 
 ## CNN Checkpoints
 
-Place the `_final.pt` checkpoints (plain state dicts) in `checkpoints/`:
+The pretrained checkpoints (~800 MB for the 4 default models) are not stored in the repository.
+Place the following files in `checkpoints/` before running:
 
 ```
 checkpoints/
-  vgg16_MRI_tumor_binary_norm_final.pt
-  densenet169_MRI_tumor_multiclass_norm_final.pt
-  resnet101_MRI_ms_norm_final.pt
-  densenet169_CT_stroke_binary_norm_final.pt
-  sam3_probe.pth
+  vgg16_MRI_tumor_binary_norm_final.pt          # binary_tumor task
+  densenet169_MRI_tumor_multiclass_norm_final.pt # multiclass_tumor task
+  resnet101_MRI_ms_norm_final.pt                # ms task
+  densenet169_CT_stroke_binary_norm_final.pt    # stroke task
+  linear_probe_BiomedCLIP_MRI_tumor_binary_norm_best.pt
+  linear_probe_BiomedCLIP_MRI_tumor_multiclass_norm_best.pt
+  linear_probe_BiomedCLIP_MRI_ms_norm_best.pt
+  linear_probe_BiomedCLIP_CT_stroke_binary_norm_best.pt
+  sam3_probe.pth                                # optional SAM3 segmentation head
 ```
 
 The pipeline selects the checkpoint automatically based on `--task`.
+
+## Downloading Checkpoints from Hugging Face
+
+All task checkpoints (CNN + BiomedCLIP probe + SAM3 segmentation probe) are published on Hugging Face:
+
+| Repo | Task | Model |
+|------|------|-------|
+| [`tamara-kostova/multiagentmed-binary-tumor`](https://huggingface.co/tamara-kostova/multiagentmed-binary-tumor) | `binary_tumor` | VGG16 + BiomedCLIP probe |
+| [`tamara-kostova/multiagentmed-multiclass-tumor`](https://huggingface.co/tamara-kostova/multiagentmed-multiclass-tumor) | `multiclass_tumor` | DenseNet169 + BiomedCLIP probe |
+| [`tamara-kostova/multiagentmed-stroke`](https://huggingface.co/tamara-kostova/multiagentmed-stroke) | `stroke` | DenseNet169 + BiomedCLIP probe |
+| [`tamara-kostova/multiagentmed-ms`](https://huggingface.co/tamara-kostova/multiagentmed-ms) | `ms` | ResNet101 + BiomedCLIP probe |
+| [`tamara-kostova/multiagentmed-tumor-segmentation`](https://huggingface.co/tamara-kostova/multiagentmed-tumor-segmentation) | `binary_tumor`, `multiclass_tumor` | SAM3 linear probe (Dice = 0.836) |
+
+### Option A - Auto-download (default)
+
+By default (`CHECKPOINT_SOURCE=hf`) the pipeline downloads any missing
+`binary_tumor` or `multiclass_tumor` checkpoint automatically the first time
+it is needed. No extra steps required - just run the pipeline as normal:
+
+```bash
+python run_pipeline.py --image scan.png --task binary_tumor
+```
+
+The file is fetched to the HF Hub cache and then copied to `checkpoints/`.
+Subsequent runs read the local copy.
+
+### Option B - Pre-download all checkpoints
+
+To download all published checkpoints up-front (CNN + BiomedCLIP probes + SAM3 probe):
+
+```bash
+python checkpoints/download_checkpoints.py
+```
+
+Selective download:
+
+```bash
+# CNN weights only
+python checkpoints/download_checkpoints.py --kinds cnn
+
+# One task
+python checkpoints/download_checkpoints.py --tasks multiclass_tumor
+
+# Both CNN and BiomedCLIP probe for tumor tasks only
+python checkpoints/download_checkpoints.py --tasks binary_tumor multiclass_tumor --kinds cnn biomedclip
+
+# SAM3 segmentation probe only
+python checkpoints/download_checkpoints.py --tasks tumor_segmentation --kinds sam3
+```
+
+### Option C - Local files only
+
+If you have all checkpoints locally and want to disable any network access,
+add this to your `.env`:
+
+```bash
+CHECKPOINT_SOURCE=local
+```
+
+With this set, missing files fall back to ImageNet pretrained weights (CNN) or
+zero-shot mode (BiomedCLIP) instead of attempting a download.
+
 
 ## Usage
 
@@ -174,7 +270,7 @@ python run_pipeline.py --tumor_eval \
 # Optional: cap total images (useful for quick tests or incremental runs)
   --max_samples 100
 ```
-Writes one JSONL record per image to `outputs/eval/<task>_tumor_eval.jsonl` immediately after inference — crash-safe. Re-running the same command resumes from where it left off. Each record captures outputs from every model: MedGemma triage + final diagnosis, CNN class probabilities, SAM3 mask/bbox/dice, BiomedCLIP ranked scores, Grad-CAM++ and IG paths, SAM3/saliency IoU, verification result, and the full MedGemma report.
+Writes one JSONL record per image to `outputs/eval/<task>_tumor_eval.jsonl` immediately after inference - crash-safe. Re-running the same command resumes from where it left off. Each record captures outputs from every model: MedGemma triage + final diagnosis, CNN class probabilities, SAM3 mask/bbox/dice, BiomedCLIP ranked scores, Grad-CAM++ and IG paths, SAM3/saliency IoU, verification result, and the full MedGemma report.
 
 **With SAM3 segmentation enabled:**
 
@@ -211,10 +307,10 @@ python run_pipeline.py --image scan.png --task stroke \
 
 The final report is a free-text triage summary generated by MedGemma, covering:
 
-1. **Primary finding** — diagnosis name and subtype
-2. **Confidence assessment** — routing confidence and tool agreement
-3. **Recommended next step** — discharge, further imaging, or specialist referral
-4. **Flags / caveats** — low-confidence warnings or human review triggers
+1. **Primary finding** - diagnosis name and subtype
+2. **Confidence assessment** - routing confidence and tool agreement
+3. **Recommended next step** - discharge, further imaging, or specialist referral
+4. **Flags / caveats** - low-confidence warnings or human review triggers
 
 The report is returned in `state["final_report"]` (plain text, ≤150 words). The pipeline also sets:
 

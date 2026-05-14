@@ -13,6 +13,8 @@ Two modes:
      18_layer_fusion_benchmark.py to enable probe mode for that task.
 """
 
+from pathlib import Path
+
 import numpy as np
 import open_clip
 import torch
@@ -22,10 +24,13 @@ from PIL import Image
 
 from config import (
     BINARY_LABELS,
+    CHECKPOINT_SOURCE,
     DEFAULT_CONFIG,
+    HF_CHECKPOINT_REPOS,
     TUMOR_MULTICLASS_CLASSES,
     ModelConfig,
     PreprocessConfig,
+    download_hf_checkpoint,
     resolve_torch_device,
 )
 
@@ -46,19 +51,18 @@ CANDIDATE_LABELS = {
 }
 PROBE_CANDIDATE_LABELS: dict[str, list[str]] = {
     "multiclass_tumor": [
-        "brain MRI showing carcinoma",      # [0] Carcinoma
-        "brain MRI showing ependymoma",     # [1] Ependymoma
-        "brain MRI showing germinoma",      # [2] Germinoma
-        "brain MRI showing glioma",         # [3] Glioma
-        "brain MRI showing granuloma",      # [4] Granuloma
-        "brain MRI showing medulloblastoma",# [5] Meduloblastoma
-        "brain MRI showing meningioma",     # [6] Meningioma
-        "brain MRI showing neurocytoma",    # [7] Neurocitoma
-        "normal brain MRI",                 # [8] Normal
-        "brain MRI showing other tumor",    # [9] Other
-        "brain MRI showing papilloma",      # [10] Papiloma
-        "brain MRI showing schwannoma",     # [11] Schwannoma
-        "brain MRI showing tuberculoma",    # [12] Tuberculoma
+        "brain MRI showing carcinoma",       # [0]
+        "brain MRI showing germinoma",       # [1]
+        "brain MRI showing glioma",          # [2]
+        "brain MRI showing granuloma",       # [3]
+        "brain MRI showing medulloblastoma", # [4]
+        "brain MRI showing meningioma",      # [5]
+        "brain MRI showing neurocytoma",     # [6]
+        "normal brain MRI",                  # [7]
+        "brain MRI showing papilloma",       # [8]
+        "brain MRI showing pituitary tumor", # [9]
+        "brain MRI showing schwannoma",      # [10]
+        "brain MRI showing tuberculoma",     # [11]
     ],
 }
 
@@ -123,11 +127,36 @@ class BiomedCLIPTool:
         # Per-task probe heads: dict[task] = (head_module, is_concat_fusion)
         self._probe_heads: dict[str, tuple[nn.Module, bool]] = {}
         for task, ckpt in self.model_cfg.biomedclip_probe_checkpoints.items():
-            if ckpt is not None:
-                head, is_fusion = self._load_probe_head(ckpt)
-                self._probe_heads[task] = (head, is_fusion)
-                mode = "concat-fusion" if is_fusion else "single-layer"
-                print(f"[BiomedCLIPTool] Loaded {mode} probe for '{task}': {ckpt}")
+            if ckpt is None:
+                continue
+            ckpt_path = Path(ckpt)
+            if not ckpt_path.exists():
+                if (
+                    CHECKPOINT_SOURCE != "local"
+                    and task in HF_CHECKPOINT_REPOS
+                    and "biomedclip" in HF_CHECKPOINT_REPOS[task]
+                ):
+                    try:
+                        ckpt_path = download_hf_checkpoint(
+                            task, "biomedclip", ckpt_path, caller="BiomedCLIPTool"
+                        )
+                        ckpt = str(ckpt_path)
+                    except Exception as exc:
+                        print(
+                            f"[BiomedCLIPTool] HF download failed for '{task}' probe "
+                            f"({exc}); running zero-shot for this task."
+                        )
+                        continue
+                else:
+                    print(
+                        f"[BiomedCLIPTool] Probe checkpoint not found: {ckpt}; "
+                        "running zero-shot for this task."
+                    )
+                    continue
+            head, is_fusion = self._load_probe_head(ckpt)
+            self._probe_heads[task] = (head, is_fusion)
+            mode = "concat-fusion" if is_fusion else "single-layer"
+            print(f"[BiomedCLIPTool] Loaded {mode} probe for '{task}': {ckpt}")
 
     def _load_probe_head(self, checkpoint_path: str) -> tuple[nn.Module, bool]:
         """
