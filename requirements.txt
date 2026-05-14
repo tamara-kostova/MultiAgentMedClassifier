@@ -50,6 +50,15 @@ scikit-learn
 # FHIR output
 fhir.resources>=7.0.0
 
+# EBRAINS atlas (siibra)
+siibra>=1.0a4
+nibabel>=5.0.0
+pydicom>=2.4.0
+
+# MNI152 registration (ANTsPy + nilearn template)
+antspyx>=0.5.0
+nilearn>=0.10.0
+
 # Code quality
 black>=24.0.0
 isort>=5.13.0

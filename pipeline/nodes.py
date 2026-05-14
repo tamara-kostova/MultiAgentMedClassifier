@@ -9,6 +9,7 @@ import uuid
 import time
 from pathlib import Path
 
+from agents.sibra_tool import SiibraAtlasTool
 import cv2
 import numpy as np
 import torchvision.transforms as T
@@ -48,7 +49,9 @@ def make_triage_node(agent, routing_cfg: RoutingConfig = None):
     """
     def triage_node(state: NeuroimagingState) -> dict:
         t0 = _log_node_start("triage", state)
-        dx, routing = agent.diagnose(state["image_path"])
+        dx, routing = agent.diagnose(
+            state["image_path"], metadata=state.get("metadata")
+        )
         _log_node_done("triage", state, t0)
 
         return {
@@ -121,8 +124,14 @@ def make_cnn_with_mask_node(cnn_tool, agent=None):
         # If SAM3 is unavailable/skipped, avoid a duplicate MedGemma call on the
         # original image; the initial triage already covered that view.
         if agent is not None and seg_valid and seg.get("guided_image_path"):
-            overlay_path = seg["guided_image_path"]
-            bbox_dx = agent.diagnose_with_bbox(overlay_path)
+            overlay_path = (
+                seg["guided_image_path"]
+                if seg_valid and seg.get("guided_image_path")
+                else state["image_path"]
+            )
+            bbox_dx = agent.diagnose_with_bbox(
+                overlay_path, metadata=state.get("metadata")
+            )
             updates["medgemma_bbox_diagnosis"] = bbox_dx.model_dump()
 
         _log_node_done("cnn_with_mask", state, t0)
@@ -177,6 +186,8 @@ def make_report_node(agent, routing_cfg: RoutingConfig = None, skip_report: bool
                 explainability_result=state.get("explainability_result"),
                 verification_result=state.get("verification_result"),
                 saliency_iou=saliency_iou,
+                atlas_enrichment=state.get("atlas_enrichment"),
+                metadata=state.get("metadata"),
             )
 
         # Determine final prediction from MedGemma's fused diagnosis when available.
@@ -449,3 +460,52 @@ def make_fhir_node(output_dir: str):
 def route_from_triage(state: NeuroimagingState) -> str:
     """Legacy helper retained for compatibility with older experiments."""
     return state["routing_decision"]
+
+def make_atlas_enrichment_node(siibra_tool: SiibraAtlasTool):
+    """
+    Runs after SAM3 segmentation (sam3_then_cnn path only).
+    Loads the SAM3 binary mask from disk, maps the lesion centroid to a
+    Julich-Brain region via siibra, and stores the result in atlas_enrichment.
+
+    Coordinate accuracy (best → worst):
+      NIfTI affine   — pass state["metadata"]["nifti_path"]
+      DICOM affine   — pass state["metadata"]["dicom_path"]
+      pixel fallback — approximate, axial centre slice only
+    """
+    def atlas_enrichment_node(state: NeuroimagingState) -> dict:
+        seg_result = state.get("segmentation_result")
+
+        if not seg_result or not seg_result.get("mask_path"):
+            return {
+                "atlas_enrichment": None,
+                "routing_path": state["routing_path"] + ["atlas_enrichment"],
+            }
+
+        mask = np.array(
+            Image.open(seg_result["mask_path"]).convert("L")
+        ) > 127  # binary uint8-like bool array
+
+        meta       = state.get("metadata") or {}
+        nifti_path = meta.get("nifti_path")
+        dicom_path = meta.get("dicom_path")
+
+        try:
+            atlas_result = siibra_tool.assign_lesion(
+                mask=mask.astype(np.uint8),
+                nifti_path=nifti_path,
+                dicom_path=dicom_path,
+            )
+            print(
+                f"[atlas_enrichment] lesion → {atlas_result['assigned_region']} "
+                f"({atlas_result['hemisphere']}) MNI {atlas_result['mni_coords']}"
+            )
+        except Exception as e:
+            print(f"[atlas_enrichment] siibra query failed: {e}")
+            atlas_result = None
+
+        return {
+            "atlas_enrichment": atlas_result,
+            "routing_path": state["routing_path"] + ["atlas_enrichment"],
+        }
+
+    return atlas_enrichment_node

@@ -2,7 +2,13 @@
 LangGraph state definition for the neuroimaging multi-agent pipeline.
 """
 
+from pathlib import Path
 from typing import Optional, TypedDict
+
+from agents.dicom_tool import DICOMPreprocessor
+
+
+_DICOM_PREPROCESSOR: Optional[DICOMPreprocessor] = None
 
 
 class SegmentationResult(TypedDict):
@@ -53,6 +59,9 @@ class NeuroimagingState(TypedDict):
     saliency_sam3_iou: Optional[float]    # IoU between GradCAM++ heatmap and SAM3 mask (None when SAM3 mask is empty)
     sam3_mask_empty: bool                 # True when SAM3 predicted no lesion pixels
 
+    # ── Atlas enrichment (siibra) ─────────────────────────────────────────────
+    atlas_enrichment: Optional[dict]  # assigned_region, mni_coords, hemisphere, scores
+
     # ── Final output ──────────────────────────────────────────────────────────
     final_report: Optional[str]
     final_predicted_class: Optional[str]
@@ -68,11 +77,30 @@ class NeuroimagingState(TypedDict):
 def initial_state(
     image_path: str, task: str, metadata: dict = None
 ) -> NeuroimagingState:
-    """Create a blank state for a new image."""
+    """
+    Create a blank state for a new image.
+
+    Raw DICOM inputs are converted to a PNG in `outputs/preprocessed/` so the
+    existing PNG-based agents can run unchanged. Relevant DICOM header fields
+    are merged into `metadata`, and the original DICOM slice path is preserved
+    as `metadata["dicom_path"]` for atlas coordinate mapping.
+    """
+    prepared = _prepare_input_image(image_path)
+    prepared_metadata = dict(prepared.get("dicom_metadata") or {})
+    if prepared.get("dicom_path"):
+        prepared_metadata["dicom_path"] = prepared["dicom_path"]
+    if prepared.get("nifti_path"):
+        prepared_metadata["nifti_path"] = prepared["nifti_path"]
+    prepared_metadata["source_image_path"] = str(Path(image_path))
+
+    merged_metadata = dict(prepared_metadata)
+    if metadata:
+        merged_metadata.update(metadata)
+
     return NeuroimagingState(
-        image_path=image_path,
+        image_path=prepared["image_path"],
         task=task,
-        metadata=metadata or {},
+        metadata=merged_metadata,
         routing_decision=None,
         routing_confidence=0.0,
         routing_reasoning="",
@@ -91,6 +119,14 @@ def initial_state(
         final_confidence=0.0,
         requires_human_review=False,
         verification_result=None,
+        atlas_enrichment=None,
         fhir_report=None,
         routing_path=[],
     )
+
+
+def _prepare_input_image(image_path: str) -> dict:
+    global _DICOM_PREPROCESSOR
+    if _DICOM_PREPROCESSOR is None:
+        _DICOM_PREPROCESSOR = DICOMPreprocessor()
+    return _DICOM_PREPROCESSOR.prepare(image_path)

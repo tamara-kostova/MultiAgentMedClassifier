@@ -166,6 +166,9 @@ Pipeline outputs (use these together with the images to inform your diagnosis):
 Task: {task}
 Route: {routing_path}
 
+Known scan metadata (DICOM/header context, if available):
+{metadata_context}
+
 Initial MedGemma triage diagnosis:
 {initial_medgemma_dx}
 
@@ -189,6 +192,10 @@ Explainability outputs:
 
 Spatial alignment — GradCAM++ ∩ SAM3 mask IoU: {saliency_iou}
 (IoU < 0.3 suggests the CNN attended to background rather than the lesion)
+
+EBRAINS atlas assignment (Julich-Brain parcellation):
+{atlas_enrichment}
+(If available, use the assigned_region and hemisphere to contextualise the finding anatomically)
 
 Your response MUST contain exactly two sections in this order:
 
@@ -343,25 +350,35 @@ class MedGemmaAgent:
 
     # ── Primary triage (raw image) ────────────────────────────────────────────
 
-    def diagnose(self, image_path: str) -> tuple[MedicalDiagnosis, RoutingDecision]:
+    def diagnose(
+        self, image_path: str, metadata: Optional[dict] = None
+    ) -> tuple[MedicalDiagnosis, RoutingDecision]:
         """
         Run system_prompt.txt on the raw image.
         Returns (structured diagnosis, derived routing decision).
         """
         image = Image.open(image_path).convert("RGB")
-        dx = self._run_diagnostic_prompt(image, SYSTEM_PROMPT)
+        dx = self._run_diagnostic_prompt(
+            image,
+            self._prepend_metadata_context(SYSTEM_PROMPT, metadata),
+        )
         routing = diagnosis_to_routing(dx, self.routing_cfg)
         return dx, routing
 
     # ── SAM3-guided diagnosis (bbox overlay image) ────────────────────────────
 
-    def diagnose_with_bbox(self, guided_image_path: str) -> MedicalDiagnosis:
+    def diagnose_with_bbox(
+        self, guided_image_path: str, metadata: Optional[dict] = None
+    ) -> MedicalDiagnosis:
         """
         Run system_prompt_bbox.txt on the SAM3 bbox-overlay image.
         Used on the sam3_then_cnn path after segmentation.
         """
         image = Image.open(guided_image_path).convert("RGB")
-        return self._run_diagnostic_prompt(image, SYSTEM_PROMPT_BBOX)
+        return self._run_diagnostic_prompt(
+            image,
+            self._prepend_metadata_context(SYSTEM_PROMPT_BBOX, metadata),
+        )
 
     # ── Report generator ──────────────────────────────────────────────────────
 
@@ -378,6 +395,8 @@ class MedGemmaAgent:
         explainability_result: Optional[dict] = None,
         verification_result: Optional[dict] = None,
         saliency_iou: Optional[float] = None,
+        atlas_enrichment: Optional[dict] = None,
+        metadata: Optional[dict] = None,
     ) -> tuple[str, Optional[MedicalDiagnosis]]:
         def fmt(d) -> str:
             if d is None:
@@ -388,9 +407,20 @@ class MedGemmaAgent:
 
         iou_str = f"{saliency_iou:.3f}" if saliency_iou is not None else "Not computed."
 
+        if atlas_enrichment:
+            atlas_str = (
+                f"Region: {atlas_enrichment.get('assigned_region', 'unassigned')} | "
+                f"Hemisphere: {atlas_enrichment.get('hemisphere', 'unknown')} | "
+                f"MNI: {atlas_enrichment.get('mni_coords', [])} | "
+                f"Top candidates: {atlas_enrichment.get('assignment_scores', [])[:3]}"
+            )
+        else:
+            atlas_str = "Not available (SAM3 path not taken or siibra query failed)."
+
         prompt = REPORT_PROMPT_TEMPLATE.format(
             task=task,
             routing_path=" → ".join(routing_path),
+            metadata_context=self._format_metadata_context(metadata),
             initial_medgemma_dx=fmt(initial_medgemma_dx),
             sam3_medgemma_dx=fmt(sam3_medgemma_dx),
             cnn_result=fmt(cnn_result),
@@ -399,6 +429,7 @@ class MedGemmaAgent:
             explainability_result=fmt(explainability_result),
             verification_result=fmt(verification_result),
             saliency_iou=iou_str,
+            atlas_enrichment=atlas_str,
         )
         image_paths = [image_path]
         if sam3_result and sam3_result.get("guided_image_path"):
@@ -454,6 +485,46 @@ class MedGemmaAgent:
                         diagnosis_confidence=0.5,
                         severity_confidence=None,
                     )
+
+    def _prepend_metadata_context(self, prompt: str, metadata: Optional[dict]) -> str:
+        context = self._format_metadata_context(metadata)
+        if context == "Not available.":
+            return prompt
+        return (
+            "Known scan metadata (DICOM/header context; may be incomplete):\n"
+            f"{context}\n\n"
+            f"{prompt}"
+        )
+
+    @staticmethod
+    def _format_metadata_context(metadata: Optional[dict]) -> str:
+        if not metadata:
+            return "Not available."
+
+        fields = [
+            ("Modality", "modality"),
+            ("Series description", "series_description"),
+            ("Scanning sequence", "scanning_sequence"),
+            ("Sequence variant", "sequence_name"),
+            ("Field strength", "field_strength"),
+            ("Patient age", "patient_age"),
+            ("Patient sex", "patient_sex"),
+            ("Slice thickness (mm)", "slice_thickness_mm"),
+            ("Pixel spacing", "pixel_spacing"),
+            ("Body part", "body_part"),
+        ]
+        lines = []
+        for label, key in fields:
+            value = metadata.get(key)
+            if value in (None, "", [], {}):
+                continue
+            if key == "modality" and value == "MR":
+                value = "MRI"
+            if isinstance(value, (list, dict)):
+                value = json.dumps(value)
+            lines.append(f"- {label}: {value}")
+
+        return "\n".join(lines) if lines else "Not available."
 
     def _generate(
         self,

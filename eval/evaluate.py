@@ -146,7 +146,7 @@ def compute_oracle_routing(cnn_result: dict, routing_cfg=None) -> str:
 def load_test_split(dataset_dir: str, task: str) -> list[dict]:
     """
     Load test split from a directory structured as:
-        <dataset_dir>/<class_name>/<image_file>
+        <dataset_dir>/<class_name>/<image_file_or_dicom_series_dir>
 
     Returns list of {"image_path": str, "label": str, "task": str}
     """
@@ -155,22 +155,32 @@ def load_test_split(dataset_dir: str, task: str) -> list[dict]:
     for class_dir in sorted(dataset_path.iterdir()):
         if not class_dir.is_dir():
             continue
-        for img_file in class_dir.glob("*.png"):
-            samples.append(
-                {
-                    "image_path": str(img_file),
-                    "label": class_dir.name,
-                    "task": task,
-                }
-            )
-        for img_file in class_dir.glob("*.jpg"):
-            samples.append(
-                {
-                    "image_path": str(img_file),
-                    "label": class_dir.name,
-                    "task": task,
-                }
-            )
+        for item in sorted(class_dir.iterdir()):
+            if item.is_file() and item.suffix.lower() in {
+                ".png",
+                ".jpg",
+                ".jpeg",
+                ".dcm",
+                ".dicom",
+                ".ima",
+            }:
+                samples.append(
+                    {
+                        "image_path": str(item),
+                        "label": class_dir.name,
+                        "task": task,
+                    }
+                )
+            elif item.is_dir() and any(
+                f.suffix.lower() in {".dcm", ".dicom", ".ima"} for f in item.iterdir()
+            ):
+                samples.append(
+                    {
+                        "image_path": str(item),
+                        "label": class_dir.name,
+                        "task": task,
+                    }
+                )
     return samples
 
 
