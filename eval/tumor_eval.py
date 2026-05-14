@@ -102,6 +102,28 @@ def load_dataset(
     return samples
 
 
+def _interleave_by_label(samples: list[dict]) -> list[dict]:
+    """Return samples in round-robin class order so caps stay class-balanced."""
+    by_label: dict[str, list[dict]] = {}
+    for sample in samples:
+        by_label.setdefault(sample["label"], []).append(sample)
+
+    labels = sorted(by_label)
+    interleaved = []
+    while any(by_label.values()):
+        for label in labels:
+            if by_label[label]:
+                interleaved.append(by_label[label].pop(0))
+    return interleaved
+
+
+def _class_counts(samples: list[dict]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for sample in samples:
+        counts[sample["label"]] = counts.get(sample["label"], 0) + 1
+    return counts
+
+
 def load_processed_paths(jsonl_path: Path) -> set[str]:
     """Return image_path values that are already written in the JSONL file."""
     if not jsonl_path.exists():
@@ -114,7 +136,7 @@ def load_processed_paths(jsonl_path: Path) -> set[str]:
                 continue
             try:
                 rec = json.loads(line)
-                if rec.get("image_path"):
+                if rec.get("image_path") and rec.get("error") is None:
                     done.add(rec["image_path"])
             except json.JSONDecodeError:
                 pass
@@ -168,13 +190,15 @@ def extract_row(
         "sam3_mask_path": seg.get("mask_path"),
         "sam3_bbox": seg.get("bbox"),
         "sam3_guided_image_path": seg.get("guided_image_path"),
-        "sam3_dice_estimate": seg.get("dice_estimate"),
+
         "sam3_skipped": seg.get("skipped", False),
+        "sam3_mask_empty": final_state.get("sam3_mask_empty", False),
         # ── BiomedCLIP ────────────────────────────────────────────────────────
         "biomedclip_top_label": clip.get("top_label"),
         "biomedclip_top_score": clip.get("top_score"),
         "biomedclip_ranked_labels": clip.get("ranked_labels"),
         "biomedclip_scores": clip.get("scores"),
+        "biomedclip_mode": clip.get("mode"),
         # ── Explainability ────────────────────────────────────────────────────
         "gradcam_pp_path": expl.get("gradcam_pp"),
         "integrated_gradients_path": expl.get("integrated_gradients"),
@@ -282,11 +306,14 @@ def run_tumor_eval(
     output_file = Path(output_file)
     output_file.parent.mkdir(parents=True, exist_ok=True)
 
-    samples = load_dataset(data_dir, task, exclude_dirs=exclude_dirs)
+    samples = _interleave_by_label(load_dataset(data_dir, task, exclude_dirs=exclude_dirs))
     if not samples:
         print(f"No images found in {data_dir}")
         return []
-    print(f"Dataset: {len(samples)} images  task={task}  dir={data_dir}")
+    print(
+        f"Dataset: {len(samples)} images  task={task}  dir={data_dir}  "
+        f"classes={_class_counts(samples)}"
+    )
 
     done = load_processed_paths(output_file)
     pending = [s for s in samples if s["image_path"] not in done]
@@ -306,6 +333,7 @@ def run_tumor_eval(
     if not pending:
         print("Nothing to do.")
         return []
+    print(f"Pending class mix: {_class_counts(pending)}")
 
     rows_this_run: list[dict] = []
     t_start = time.perf_counter()

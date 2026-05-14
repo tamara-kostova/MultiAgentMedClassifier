@@ -3,6 +3,7 @@ Central configuration for the multi-agent neuroimaging pipeline.
 Adjust model checkpoint paths and thresholds before running.
 """
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -11,6 +12,181 @@ import torch
 
 _DEFAULT_SAM3_PROBE = "checkpoints/sam3_probe.pth"
 _DEFAULT_SAM3_BPE_PATH = "sam3/sam3/assets/bpe_simple_vocab_16e6.txt.gz"
+
+
+def cuda_is_usable() -> tuple[bool, str | None]:
+    try:
+        if not torch.cuda.is_available():
+            return False, None
+    except (AssertionError, RuntimeError) as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+
+    try:
+        torch.empty(1, device="cuda")
+    except (AssertionError, RuntimeError) as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+    return True, None
+
+
+def _mps_is_usable() -> bool:
+    if not torch.backends.mps.is_available():
+        return False
+    try:
+        torch.empty(1, device="mps")
+    except RuntimeError:
+        return False
+    return True
+
+
+def resolve_torch_device(device_name: str, caller: str = "config") -> torch.device:
+    device = torch.device(device_name)
+    if device.type == "mps" and not _mps_is_usable():
+        print(f"[{caller}] MPS requested but unusable; falling back to CPU.")
+        return torch.device("cpu")
+    if device.type == "cuda":
+        usable, reason = cuda_is_usable()
+        if not usable:
+            detail = f" ({reason})" if reason else ""
+            print(f"[{caller}] CUDA requested but unusable{detail}; falling back to CPU.")
+            return torch.device("cpu")
+    return device
+
+
+def resolve_vision_device(
+    device_name: str,
+    caller: str = "config",
+    prefer_cuda: bool = True,
+) -> torch.device:
+    """Resolve the device for CNN/BiomedCLIP vision models.
+
+    Vision-side inference is small enough to share the GPU with the larger
+    agents, and keeping it on CUDA avoids slow CPU fallbacks during evaluation.
+    """
+    if prefer_cuda and cuda_is_usable()[0]:
+        return torch.device("cuda")
+    return resolve_torch_device(device_name, caller=caller)
+
+
+def _default_torch_device() -> str:
+    if cuda_is_usable()[0]:
+        return "cuda"
+    if _mps_is_usable():
+        return "mps"
+    return "cpu"
+
+# ── Checkpoint source ─────────────────────────────────────────────────────────
+# CHECKPOINT_SOURCE=hf  (default) — if a local checkpoint file is missing,
+#   auto-download from Hugging Face Hub for tasks that have a published repo.
+# CHECKPOINT_SOURCE=local — use local files only; fall back to ImageNet
+#   pretrained weights (CNN) or zero-shot mode (BiomedCLIP) if a file is absent.
+CHECKPOINT_SOURCE: str = os.environ.get("CHECKPOINT_SOURCE", "hf").lower()
+
+# Published HF repos for all four tasks.
+HF_CHECKPOINT_REPOS: dict[str, dict] = {
+    "binary_tumor": {
+        "cnn": {
+            "repo_id": "tamara-kostova/multiagentmed-binary-tumor",
+            "filename": "binary_tumor/cnn/vgg16_MRI_tumor_binary_norm_final.pt",
+        },
+        "biomedclip": {
+            "repo_id": "tamara-kostova/multiagentmed-binary-tumor",
+            "filename": (
+                "binary_tumor/biomedclip/"
+                "linear_probe_BiomedCLIP_MRI_tumor_binary_norm_best.pt"
+            ),
+        },
+    },
+    "multiclass_tumor": {
+        "cnn": {
+            "repo_id": "tamara-kostova/multiagentmed-multiclass-tumor",
+            "filename": (
+                "multiclass_tumor/cnn/"
+                "densenet169_MRI_tumor_multiclass_norm_final.pt"
+            ),
+        },
+        "biomedclip": {
+            "repo_id": "tamara-kostova/multiagentmed-multiclass-tumor",
+            "filename": (
+                "multiclass_tumor/biomedclip/"
+                "linear_probe_BiomedCLIP_MRI_tumor_multiclass_norm_best.pt"
+            ),
+        },
+    },
+    "stroke": {
+        "cnn": {
+            "repo_id": "tamara-kostova/multiagentmed-stroke",
+            "filename": "stroke/cnn/densenet169_CT_stroke_binary_norm_final.pt",
+        },
+        "biomedclip": {
+            "repo_id": "tamara-kostova/multiagentmed-stroke",
+            "filename": (
+                "stroke/biomedclip/"
+                "linear_probe_BiomedCLIP_CT_stroke_binary_norm_best.pt"
+            ),
+        },
+    },
+    "ms": {
+        "cnn": {
+            "repo_id": "tamara-kostova/multiagentmed-ms",
+            "filename": "ms/cnn/resnet101_MRI_ms_norm_final.pt",
+        },
+        "biomedclip": {
+            "repo_id": "tamara-kostova/multiagentmed-ms",
+            "filename": (
+                "ms/biomedclip/"
+                "linear_probe_BiomedCLIP_MRI_ms_norm_best.pt"
+            ),
+        },
+    },
+    "tumor_segmentation": {
+        "sam3": {
+            "repo_id": "tamara-kostova/multiagentmed-tumor-segmentation",
+            "filename": "tumor_segmentation/sam3/sam3_linear_probe_tumor_segmentation_best.pt",
+        },
+    },
+}
+
+
+def download_hf_checkpoint(
+    task: str,
+    kind: str,
+    local_path: "str | Path",
+    caller: str = "",
+) -> Path:
+    """Download a checkpoint from HF Hub into *local_path* if it is absent.
+
+    Downloads to the HF cache first, then copies to *local_path* so the file
+    lives at the path the rest of the codebase expects.
+
+    Raises:
+        KeyError: no HF source is registered for (task, kind).
+        ImportError: huggingface_hub is not installed.
+    """
+    import shutil
+    from huggingface_hub import hf_hub_download
+
+    local_path = Path(local_path)
+    if local_path.exists():
+        return local_path
+
+    entry = HF_CHECKPOINT_REPOS.get(task, {}).get(kind)
+    if entry is None:
+        raise KeyError(
+            f"No HF source registered for task={task!r}, kind={kind!r}. "
+            f"Available: {list(HF_CHECKPOINT_REPOS)}"
+        )
+
+    prefix = f"[{caller}] " if caller else ""
+    print(
+        f"{prefix}Checkpoint not found locally — downloading from "
+        f"HF Hub ({entry['repo_id']}/{entry['filename']})..."
+    )
+    cached = hf_hub_download(repo_id=entry["repo_id"], filename=entry["filename"])
+    local_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(cached, local_path)
+    print(f"{prefix}Saved to {local_path}")
+    return local_path
+
 
 # ── Task identifiers ──────────────────────────────────────────────────────────
 TASKS = ["binary_tumor", "multiclass_tumor", "ms", "stroke"]
@@ -23,20 +199,21 @@ BEST_CNN_PER_TASK = {
     "stroke": "densenet169",
 }
 
-# 12-class tumor labels
-TUMOR_12_CLASSES = [
-    "meningioma",
-    "glioma",
-    "neurocytoma",
-    "pituitary",
-    "schwannoma",
+# 12-class tumor labels — alphabetically sorted, matching MRI_tumor_multiclass_norm directory names.
+# Used for BiomedCLIP zero-shot candidate labels and the probe label list.
+TUMOR_MULTICLASS_CLASSES = [
     "carcinoma",
+    "germinoma",
+    "glioma",
     "granuloma",
     "medulloblastoma",
-    "papilloma",
-    "tuberculoma",
-    "germinoma",
+    "meningioma",
+    "neurocytoma",
     "normal",
+    "papilloma",
+    "pituitary_tumor",
+    "schwannoma",
+    "tuberculoma",
 ]
 
 # Binary task labels
@@ -63,10 +240,10 @@ class ModelConfig:
     # Probe heads from 18_layer_fusion_benchmark.py (layer-6 or concat fusion of layers 2,6,11)
     biomedclip_probe_checkpoints: dict = field(
         default_factory=lambda: {
-            "binary_tumor": None,
-            "multiclass_tumor": None,
-            "ms": None,
-            "stroke": None,
+            "binary_tumor":     "checkpoints/linear_probe_BiomedCLIP_MRI_tumor_binary_norm_best.pt",
+            "multiclass_tumor": "checkpoints/linear_probe_BiomedCLIP_MRI_tumor_multiclass_norm_best.pt",
+            "ms":               "checkpoints/linear_probe_BiomedCLIP_MRI_ms_norm_best.pt",
+            "stroke":           "checkpoints/linear_probe_BiomedCLIP_CT_stroke_binary_norm_best.pt",
         }
     )
 
@@ -114,9 +291,12 @@ class ModelConfig:
     )
 
     # ── Device ────────────────────────────────────────────────────────────────
-    device: str = field(
-        default_factory=lambda: "cuda" if torch.cuda.is_available() else "cpu"
-    )
+    # Auto-selects "cuda" on NVIDIA/Linux, "mps" on Apple Silicon when available,
+    # otherwise "cpu". Override from the CLI with --device {cuda,mps,cpu}.
+    device: str = field(default_factory=_default_torch_device)
+    # Keep CNN and BiomedCLIP on CUDA whenever available, unless the CLI/user
+    # explicitly asks for cpu or mps.
+    prefer_cuda_for_vision: bool = True
 
 
 @dataclass

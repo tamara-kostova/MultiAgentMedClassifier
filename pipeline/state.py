@@ -9,7 +9,6 @@ class SegmentationResult(TypedDict):
     mask_path: str  # Path to saved binary mask PNG
     bbox: list  # [x1, y1, x2, y2] bounding box
     guided_image_path: str  # Original image with red bbox overlay (for MedGemma only)
-    dice_estimate: float  # Model's self-estimated Dice (or 0.0 if unavailable)
 
 
 class ClassificationResult(TypedDict):
@@ -51,7 +50,8 @@ class NeuroimagingState(TypedDict):
     classification_result: Optional[ClassificationResult]
     biomedclip_result: Optional[BiomedCLIPResult]
     explainability_result: Optional[dict]  # saliency map paths keyed by method name
-    saliency_sam3_iou: Optional[float]    # IoU between GradCAM++ heatmap and SAM3 mask
+    saliency_sam3_iou: Optional[float]    # IoU between GradCAM++ heatmap and SAM3 mask (None when SAM3 mask is empty)
+    sam3_mask_empty: bool                 # True when SAM3 predicted no lesion pixels
 
     # ── Final output ──────────────────────────────────────────────────────────
     final_report: Optional[str]
@@ -85,6 +85,7 @@ def initial_state(
         biomedclip_result=None,
         explainability_result=None,
         saliency_sam3_iou=None,
+        sam3_mask_empty=False,
         final_report=None,
         final_predicted_class=None,
         final_confidence=0.0,

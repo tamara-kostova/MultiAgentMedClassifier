@@ -18,10 +18,13 @@ from torchvision import models, transforms
 
 from config import (
     BEST_CNN_PER_TASK,
+    CHECKPOINT_SOURCE,
     DEFAULT_CONFIG,
-    TUMOR_12_CLASSES,
+    HF_CHECKPOINT_REPOS,
     ModelConfig,
     PreprocessConfig,
+    download_hf_checkpoint,
+    resolve_torch_device,
 )
 
 NUM_CLASSES = {
@@ -31,9 +34,15 @@ NUM_CLASSES = {
     "stroke": 2,
 }
 
+_CNN_MULTICLASS_CLASSES = [
+    "carcinoma", "germinoma", "glioma", "granuloma", "medulloblastoma",
+    "meningioma", "neurocytoma", "normal", "papilloma", "pituitary_tumor",
+    "schwannoma", "tuberculoma",
+]
+
 CLASS_NAMES = {
     "binary_tumor": ["normal", "tumor"],
-    "multiclass_tumor": TUMOR_12_CLASSES,
+    "multiclass_tumor": _CNN_MULTICLASS_CLASSES,
     "ms": ["normal", "ms"],
     "stroke": ["normal", "stroke"],
 }
@@ -162,7 +171,7 @@ class CNNClassifier:
     ):
         self.model_cfg = model_cfg or DEFAULT_CONFIG.model
         self.preprocess_cfg = preprocess_cfg or DEFAULT_CONFIG.preprocess
-        self.device = torch.device(self.model_cfg.device)
+        self.device = resolve_torch_device(self.model_cfg.device, caller="CNNClassifier")
         self._models: dict[str, nn.Module] = {}
         self._transform = _get_transform(self.preprocess_cfg)
 
@@ -180,6 +189,24 @@ class CNNClassifier:
         if checkpoint_path is not None:
             checkpoint_path = Path(checkpoint_path)
             if not checkpoint_path.exists():
+                if (
+                    CHECKPOINT_SOURCE != "local"
+                    and task in HF_CHECKPOINT_REPOS
+                    and "cnn" in HF_CHECKPOINT_REPOS[task]
+                ):
+                    try:
+                        checkpoint_path = download_hf_checkpoint(
+                            task, "cnn", checkpoint_path, caller="CNNClassifier"
+                        )
+                    except Exception as exc:
+                        print(
+                            f"[CNNClassifier] HF download failed ({exc}); "
+                            "falling back to ImageNet pretrained weights."
+                        )
+                        checkpoint_path = None
+                else:
+                    checkpoint_path = None
+            if checkpoint_path is None or not checkpoint_path.exists():
                 model = _build_model_with_fallback(
                     arch, n_cls, use_imagenet_weights=True
                 )
