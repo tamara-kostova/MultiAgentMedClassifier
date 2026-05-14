@@ -7,11 +7,17 @@ Usage:
     python tests/test_atlas_enrichment.py --image scan.png --dicom scan.dcm
     python tests/test_atlas_enrichment.py --image scan.png --nifti scan.nii.gz
 
+    # For data NOT already in MNI152 space (BraTS/SRI24, raw scanner DICOMs):
+    python tests/test_atlas_enrichment.py --image scan.png --nifti scan.nii.gz --register
+    python tests/test_atlas_enrichment.py --image scan.png --nifti scan.nii.gz --register --registration_type SyN
+
+Results are saved to outputs/siibra_test/ by default.
+
 If --mask is omitted, a synthetic centre-blob mask is generated from the image
 dimensions (simulates a lesion in the left-centre of the brain).
 
 Requires:
-    pip install siibra nibabel pydicom
+    pip install siibra nibabel pydicom antspyx nilearn
 """
 
 import argparse
@@ -50,7 +56,15 @@ def make_synthetic_mask(image_path: str) -> str:
     return tmp.name
 
 
-def run(image_path: str, mask_path: str | None, nifti_path: str | None, dicom_path: str | None, output_path: str | None = None):
+def run(
+    image_path: str,
+    mask_path: str | None,
+    nifti_path: str | None,
+    dicom_path: str | None,
+    output_path: str | None = None,
+    auto_register: bool = False,
+    registration_type: str = "Affine",
+):
     from agents.sibra_tool import SiibraAtlasTool
     from pipeline.nodes import make_atlas_enrichment_node
     from pipeline.state import initial_state
@@ -77,7 +91,11 @@ def run(image_path: str, mask_path: str | None, nifti_path: str | None, dicom_pa
 
     # ── Run tool directly ─────────────────────────────────────────────────────
     print("\n─── SiibraAtlasTool.assign_lesion ───────────────────────────────────")
-    tool = SiibraAtlasTool(fetch_features=False)
+    tool = SiibraAtlasTool(
+        fetch_features=False,
+        auto_register=auto_register,
+        registration_type=registration_type,
+    )
 
     mask_arr = np.array(Image.open(mask_path).convert("L")) > 127
     atlas_result = tool.assign_lesion(
@@ -110,11 +128,13 @@ def run(image_path: str, mask_path: str | None, nifti_path: str | None, dicom_pa
 
     if output_path:
         record = {
-            "image":        image_path,
-            "mask":         mask_path,
-            "mask_synthetic": synthetic_mask,
-            "nifti":        nifti_path,
-            "dicom":        dicom_path,
+            "image":            image_path,
+            "mask":             mask_path,
+            "mask_synthetic":   synthetic_mask,
+            "nifti":            nifti_path,
+            "dicom":            dicom_path,
+            "auto_register":    auto_register,
+            "registration_type": registration_type,
             "atlas_enrichment": enrichment,
         }
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
@@ -132,18 +152,28 @@ def main():
     parser.add_argument("--mask",   default=None,  help="Binary mask PNG (white = lesion). Auto-generated if omitted.")
     parser.add_argument("--nifti",  default=None,  help="NIfTI file for accurate MNI affine")
     parser.add_argument("--dicom",  default=None,  help="DICOM file for scanner-space coords")
-    parser.add_argument("--output", default=None,  help="Save result JSON to this path (e.g. outputs/brats_test/result.json)")
+    parser.add_argument("--output", default=None,  help="Save result JSON to this path (default: outputs/siibra_test/<image_stem>_result.json)")
+    parser.add_argument("--register", action="store_true",
+                        help="Register NIfTI to MNI152 via ANTsPy before siibra lookup. "
+                             "Required for non-MNI152 data (BraTS/SRI24, raw scanner space).")
+    parser.add_argument("--registration_type", default="Affine",
+                        choices=["Affine", "SyN"],
+                        help="ANTsPy registration type: Affine (~5-15s) or SyN (~90s, more accurate). Default: Affine")
     args = parser.parse_args()
 
     if not Path(args.image).exists():
         print(f"ERROR: image not found: {args.image}")
         sys.exit(1)
 
+    stem = Path(args.image).stem
+    output_path = args.output or f"outputs/siibra_test/{stem}/{stem}_result.json"
+
     try:
-        run(args.image, args.mask, args.nifti, args.dicom, args.output)
+        run(args.image, args.mask, args.nifti, args.dicom, output_path,
+            auto_register=args.register, registration_type=args.registration_type)
     except ModuleNotFoundError as e:
         print(f"\nERROR: missing dependency — {e}")
-        print("Run:  pip install siibra nibabel pydicom")
+        print("Run:  pip install siibra nibabel pydicom antspyx nilearn")
         sys.exit(1)
 
 

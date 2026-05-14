@@ -11,6 +11,8 @@ siibra queries the EBRAINS Human Brain Atlas (Julich-Brain parcellation by defau
 to assign a lesion centroid to a named brain region and retrieve multimodal features.
 """
 
+import tempfile
+
 import siibra
 import nibabel as nib
 import numpy as np
@@ -39,17 +41,25 @@ class SiibraAtlasTool:
         parcellation: str = "julich 2.9",        # v2.9 has full STATISTICAL MNI152 coverage
         space: str = "mni152",
         fetch_features: bool = False,             # KG feature queries — requires EBRAINS token
+        auto_register: bool = False,              # register NIfTI → MNI152 before siibra lookup
+        registration_type: str = "Affine",        # "Affine" (fast, ~5-15s) or "SyN" (accurate, ~90s)
     ):
         self.parcellation = siibra.parcellations[parcellation]
         self.space = siibra.spaces[space]
         self.fetch_features = fetch_features
+        self.auto_register = auto_register
+        self.registration_type = registration_type
         # siibra 1.x: assignment is done on a Map, not the parcellation directly
         self._pmap = siibra.get_map(
             parcellation=self.parcellation,
             space=self.space,
             maptype=siibra.MapType.STATISTICAL,
         )
-        print(f"[SiibraAtlasTool] parcellation={self.parcellation.name}, map={self._pmap}")
+        # Lazily populated by _get_mni152_template()
+        self._mni152_template_path: Optional[str] = None
+        # Cache: nifti_path → invtransforms list (avoids re-registering same scan)
+        self._registration_cache: dict[str, list[str]] = {}
+        print(f"[SiibraAtlasTool] parcellation={self.parcellation.name}, map={self._pmap}, auto_register={auto_register}")
 
     # ── Main entry point ──────────────────────────────────────────────────────
 
@@ -90,7 +100,21 @@ class SiibraAtlasTool:
         # Map.assign() returns a DataFrame with columns:
         #   'input structure', 'centroid', 'fragment', 'map value', 'region'
         point = siibra.Point(tuple(float(v) for v in mni_coords), space=self.space)
-        assignments = self._pmap.assign(point)
+        try:
+            assignments = self._pmap.assign(point)
+        except (IndexError, ValueError) as e:
+            # Coordinates outside atlas bounds — most often caused by a NIfTI that is
+            # in native/SRI24 scanner space rather than MNI152. Set auto_register=True
+            # to run ANTsPy registration before siibra lookup.
+            print(f"[SiibraAtlasTool] coords {[round(float(v),1) for v in mni_coords]} "
+                  f"outside atlas bounds ({e}). Use auto_register=True for non-MNI152 data.")
+            return {
+                "mni_coords":        [round(float(v), 2) for v in mni_coords],
+                "assigned_region":   "unassigned",
+                "hemisphere":        "unknown",
+                "assignment_scores": [],
+                "error":             "coordinates_out_of_bounds",
+            }
 
         empty = assignments is None or (hasattr(assignments, "empty") and assignments.empty)
         if empty:
@@ -136,8 +160,8 @@ class SiibraAtlasTool:
             return (h / 2, w / 2)
         return tuple(coords.mean(axis=0))
 
-    @staticmethod
     def _pixel_to_mni(
+        self,
         pixel_centroid: tuple,
         nifti_path: Optional[str],
         voxel_size_mm: float,
@@ -148,7 +172,8 @@ class SiibraAtlasTool:
         Convert 2D pixel centroid to 3D MNI mm coordinates.
 
         Priority:
-          1. NIfTI affine (most accurate — use when scan is registered to MNI152)
+          1. NIfTI affine → native-space coords; if auto_register=True, ANTsPy
+             then maps native → MNI152 via a cached registration transform.
           2. DICOM ImagePositionPatient + PixelSpacing (scanner space, ≈MNI for
              pre-registered datasets such as BraTS)
           3. Normalised pixel fallback (approximate — axial centre slice only)
@@ -164,7 +189,10 @@ class SiibraAtlasTool:
             affine = img.affine
             z_slice = img.shape[2] // 2
             voxel   = np.array([col, row, z_slice, 1.0])
-            return (affine @ voxel)[:3]
+            native_coords = (affine @ voxel)[:3]
+            if self.auto_register:
+                return self._transform_point_to_mni152(native_coords, nifti_path)
+            return native_coords
 
         if dicom_path and Path(dicom_path).exists():
             try:
@@ -184,6 +212,88 @@ class SiibraAtlasTool:
         mni_x = (col / w * 182 - 91) * voxel_size_mm
         mni_y = (row / h * 218 - 109) * voxel_size_mm
         return np.array([mni_x, mni_y, 0.0])
+
+    def _get_mni152_template(self) -> str:
+        """
+        Return a path to the MNI152 1mm template NIfTI, downloading via nilearn
+        on first call and caching for the lifetime of this object.
+        """
+        if self._mni152_template_path and Path(self._mni152_template_path).exists():
+            return self._mni152_template_path
+
+        from nilearn import datasets as nilearn_datasets
+        mni_img = nilearn_datasets.load_mni152_template(resolution=1)
+        tmp = tempfile.NamedTemporaryFile(
+            suffix=".nii.gz", delete=False, prefix="mni152_template_"
+        )
+        tmp.close()
+        nib.save(mni_img, tmp.name)
+        self._mni152_template_path = tmp.name
+        print(f"[SiibraAtlasTool] MNI152 template saved to {tmp.name}")
+        return self._mni152_template_path
+
+    def _transform_point_to_mni152(
+        self,
+        native_coords: np.ndarray,
+        nifti_path: str,
+    ) -> np.ndarray:
+        """
+        Register a NIfTI scan to MNI152 and map a single native-space point
+        through the resulting transform.
+
+        Uses an image-based approach to avoid apply_transforms_to_points
+        convention ambiguity: creates a single-voxel indicator volume at the
+        native centroid, warps it forward to MNI152 via apply_transforms, then
+        reads the peak voxel location in MNI152 mm coordinates.
+
+        Registration (fwdtransforms) is cached per nifti_path.
+        """
+        import ants
+
+        if nifti_path not in self._registration_cache:
+            print(f"[SiibraAtlasTool] Registering {Path(nifti_path).name} → MNI152 "
+                  f"({self.registration_type}) …")
+            template_path = self._get_mni152_template()
+            fixed  = ants.image_read(template_path)
+            moving = ants.image_read(nifti_path)
+            reg = ants.registration(
+                fixed=fixed,
+                moving=moving,
+                type_of_transform=self.registration_type,
+            )
+            self._registration_cache[nifti_path] = reg["fwdtransforms"]
+            print(f"[SiibraAtlasTool] Registration complete.")
+
+        fwd_transforms = self._registration_cache[nifti_path]
+        template_path  = self._get_mni152_template()
+        fixed  = ants.image_read(template_path)
+        moving = ants.image_read(nifti_path)
+
+        # Convert native mm coords → voxel indices in moving space
+        img        = nib.load(nifti_path)
+        inv_affine = np.linalg.inv(img.affine)
+        vox        = np.round((inv_affine @ np.append(native_coords, 1))[:3]).astype(int)
+        vox        = np.clip(vox, 0, np.array(img.shape) - 1)
+
+        # Build a single-voxel indicator volume in moving space and warp it forward
+        indicator = np.zeros(img.shape, dtype=np.float32)
+        indicator[vox[0], vox[1], vox[2]] = 1.0
+        indicator_ants = moving.new_image_like(indicator)
+        warped = ants.apply_transforms(
+            fixed=fixed,
+            moving=indicator_ants,
+            transformlist=fwd_transforms,
+            interpolator="linear",
+        )
+
+        # Peak voxel in MNI152 space → MNI152 mm via template affine
+        warped_data = warped.numpy()
+        if warped_data.max() < 1e-6:
+            print(f"[SiibraAtlasTool] Warped indicator is empty, returning native coords")
+            return native_coords
+        peak_vox  = np.unravel_index(warped_data.argmax(), warped_data.shape)
+        mni_affine = nib.load(template_path).affine
+        return (mni_affine @ np.array([*peak_vox, 1]))[:3]
 
     @staticmethod
     def _hemisphere(region_name: str) -> str:

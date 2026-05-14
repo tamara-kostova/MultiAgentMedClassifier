@@ -4,6 +4,8 @@
   "mask_synthetic": false,
   "nifti": null,
   "dicom": null,
+  "auto_register": false,
+  "registration_type": "Affine",
   "atlas_enrichment": {
     "mni_coords": [
       -20.82,

@@ -1,9 +1,11 @@
 {
-  "image": "outputs/brats_test/volume_100_slice_83_t1ce.png",
-  "mask": "outputs/brats_test/volume_100_slice_83_mask.png",
+  "image": "outputs/siibra_test/volume_100_slice_83_t1ce.png",
+  "mask": "outputs/siibra_test/volume_100_slice_83_mask.png",
   "mask_synthetic": false,
-  "nifti": "outputs/brats_test/volume_100.nii.gz",
+  "nifti": "outputs/siibra_test/volume_100.nii.gz",
   "dicom": null,
+  "auto_register": true,
+  "registration_type": "Affine",
   "atlas_enrichment": {
     "mni_coords": [
       -52.23,
