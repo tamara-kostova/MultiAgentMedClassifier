@@ -41,15 +41,22 @@ def _model_card(repo_id: str, selected: list[str]) -> str:
         if name in selected
     )
     return f"""---
-    license: mit
-    library_name: pytorch
-    tags:
-    - medical-imaging
-    - brain-mri
-    - multiple-sclerosis
-    - binary-classification
-    - pytorch
-    ---
+license: mit
+language:
+- en
+library_name: pytorch
+base_model:
+- microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224
+- torchvision/resnet101
+datasets:
+- ms-flair-mri
+tags:
+- medical-imaging
+- brain-mri
+- multiple-sclerosis
+- binary-classification
+- pytorch
+---
 
     # Multiple Sclerosis Binary Classifier
 

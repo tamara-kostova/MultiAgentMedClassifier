@@ -25,7 +25,13 @@ SAM3_CHECKPOINTS = {
 def _model_card(repo_id: str) -> str:
     return f"""---
 license: mit
+language:
+- en
 library_name: pytorch
+base_model:
+- facebook/sam3
+datasets:
+- BraTS2021
 tags:
 - medical-imaging
 - brain-mri

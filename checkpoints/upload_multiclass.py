@@ -42,15 +42,24 @@ def _model_card(repo_id: str, selected: list[str]) -> str:
         if name in selected
     )
     return f"""---
-    license: mit
-    library_name: pytorch
-    tags:
-    - medical-imaging
-    - brain-mri
-    - tumor-classification
-    - multiclass-classification
-    - pytorch
-    ---
+license: mit
+language:
+- en
+library_name: pytorch
+base_model:
+- microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224
+- torchvision/densenet169
+datasets:
+- figshare-brain-tumor-dataset
+- kaggle-brain-tumor-17-classes
+- kaggle-brain-tumor-44-classes
+tags:
+- medical-imaging
+- brain-mri
+- tumor-classification
+- multiclass-classification
+- pytorch
+---
 
     # Brain Tumor Multiclass Classifier
 

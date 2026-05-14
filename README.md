@@ -148,14 +148,15 @@ The pipeline selects the checkpoint automatically based on `--task`.
 
 ## Downloading Checkpoints from Hugging Face
 
-All four task checkpoints (CNN + BiomedCLIP probe) are published on Hugging Face:
+All task checkpoints (CNN + BiomedCLIP probe + SAM3 segmentation probe) are published on Hugging Face:
 
-| Repo | Task | CNN |
-|------|------|-----|
-| [`tamara-kostova/multiagentmed-binary-tumor`](https://huggingface.co/tamara-kostova/multiagentmed-binary-tumor) | `binary_tumor` | VGG16 |
-| [`tamara-kostova/multiagentmed-multiclass-tumor`](https://huggingface.co/tamara-kostova/multiagentmed-multiclass-tumor) | `multiclass_tumor` | DenseNet169 |
-| [`tamara-kostova/multiagentmed-stroke`](https://huggingface.co/tamara-kostova/multiagentmed-stroke) | `stroke` | DenseNet169 |
-| [`tamara-kostova/multiagentmed-ms`](https://huggingface.co/tamara-kostova/multiagentmed-ms) | `ms` | ResNet101 |
+| Repo | Task | Model |
+|------|------|-------|
+| [`tamara-kostova/multiagentmed-binary-tumor`](https://huggingface.co/tamara-kostova/multiagentmed-binary-tumor) | `binary_tumor` | VGG16 + BiomedCLIP probe |
+| [`tamara-kostova/multiagentmed-multiclass-tumor`](https://huggingface.co/tamara-kostova/multiagentmed-multiclass-tumor) | `multiclass_tumor` | DenseNet169 + BiomedCLIP probe |
+| [`tamara-kostova/multiagentmed-stroke`](https://huggingface.co/tamara-kostova/multiagentmed-stroke) | `stroke` | DenseNet169 + BiomedCLIP probe |
+| [`tamara-kostova/multiagentmed-ms`](https://huggingface.co/tamara-kostova/multiagentmed-ms) | `ms` | ResNet101 + BiomedCLIP probe |
+| [`tamara-kostova/multiagentmed-tumor-segmentation`](https://huggingface.co/tamara-kostova/multiagentmed-tumor-segmentation) | `binary_tumor`, `multiclass_tumor` | SAM3 linear probe (Dice = 0.836) |
 
 ### Option A - Auto-download (default)
 
@@ -172,7 +173,7 @@ Subsequent runs read the local copy.
 
 ### Option B - Pre-download all checkpoints
 
-To download all published checkpoints up-front:
+To download all published checkpoints up-front (CNN + BiomedCLIP probes + SAM3 probe):
 
 ```bash
 python checkpoints/download_checkpoints.py
@@ -187,8 +188,11 @@ python checkpoints/download_checkpoints.py --kinds cnn
 # One task
 python checkpoints/download_checkpoints.py --tasks multiclass_tumor
 
-# Both kinds for both tumor tasks (same as default)
+# Both CNN and BiomedCLIP probe for tumor tasks only
 python checkpoints/download_checkpoints.py --tasks binary_tumor multiclass_tumor --kinds cnn biomedclip
+
+# SAM3 segmentation probe only
+python checkpoints/download_checkpoints.py --tasks tumor_segmentation --kinds sam3
 ```
 
 ### Option C - Local files only
