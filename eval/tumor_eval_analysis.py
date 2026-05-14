@@ -52,6 +52,11 @@ from sklearn.metrics import (
 
 GT_MAP = {"yes": "tumor", "no": "normal"}   # Br35H raw label → binary
 
+LABEL_ALIASES: dict[str, str] = {
+    "pituitary_tumor": "pituitary",
+    "pituitary tumor": "pituitary",
+}
+
 TUMOR_WORDS = {
     "tumor", "glioma", "meningioma", "pituitary", "mass", "granuloma",
     "cyst", "schwannoma", "vestibular schwannoma", "hemorrhagic",
@@ -166,6 +171,10 @@ def _normalize_pred(pred_str, classes: list[str]) -> str:
     if pred_str is None or str(pred_str).lower() in ("null", "none", "nan", ""):
         return "unknown"
     s = str(pred_str).lower().strip()
+    if s in LABEL_ALIASES:
+        aliased = LABEL_ALIASES[s]
+        if aliased in classes:
+            return aliased
     for c in classes:
         if c.lower() == s:
             return c
