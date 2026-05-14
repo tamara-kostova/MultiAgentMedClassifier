@@ -24,7 +24,7 @@ SAM3_CHECKPOINTS = {
 
 def _model_card(repo_id: str) -> str:
     return f"""---
-license: other
+license: mit
 library_name: pytorch
 tags:
 - medical-imaging
