@@ -1,8 +1,44 @@
 # Multi-Agent Neuroimaging Classifier
 
-a LangGraph-based multi-agent pipeline for automated classification of neuroimaging findings (brain tumour, multiple sclerosis, stroke).
+A LangGraph-based multi-agent pipeline for automated classification of neuroimaging findings (brain tumour, multiple sclerosis, stroke).
+
+## Contents
+
+- [Quick Start](#quick-start-gui)
+- [Architecture](#architecture)
+- [Tasks](#tasks)
+- [Setup](#setup)
+- [Checkpoints](#checkpoints)
+- [Usage](#usage)
+- [Report Output](#report-output)
+- [Explainability Methods](#explainability-methods)
+- [Calibration](#calibration)
+- [Prior Work](#prior-work)
+- [Project Structure](#project-structure)
+
+## Quick Start (GUI)
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+# Set your HuggingFace token (see Setup below)
+cp .env.example .env
+# edit .env and paste your HF_TOKEN
+
+# Launch the web interface
+python app.py
+# Open http://localhost:7860 in a browser
+```
+
+Upload a brain scan, choose a task, click **Run Pipeline** — the full agent pipeline runs and
+displays the prediction, clinical report, segmentation overlay, and saliency maps.
+
+![App interface](app_preview.png)
 
 ## Architecture
+
 ![System architecture diagram](system_diagram.png)
 
 **Agents / tools**
@@ -14,7 +50,7 @@ a LangGraph-based multi-agent pipeline for automated classification of neuroimag
 | `SAM3Tool` | SAM3 frozen backbone + linear probe | Lesion segmentation (Dice = 0.836) |
 | `BiomedCLIPTool` | microsoft/BiomedCLIP (ViT-B/16, layer 6) | Zero-shot re-ranking for ambiguous multiclass cases |
 
-**Pipeline flow** (linear - every node runs for every image):
+**Pipeline flow** (linear — every node runs for every image):
 
 ```
 triage (MedGemma)
@@ -39,64 +75,6 @@ SAM3 and BiomedCLIP always run but contribute only when relevant: SAM3 segmentat
 | `stroke` | DenseNet169 | 97.7% |
 | `ms` | ResNet101 | 59.7% |
 
-## Project Structure
-
-```
-MultiAgentMedClassifier/
-├── agents/
-│   ├── medgemma_agent.py   # MedGemma: triage, bbox diagnosis, report
-│   ├── cnn_tool.py         # CNN classifier (VGG16 / DenseNet / ResNet)
-│   ├── sam3_tool.py        # SAM3 segmentation + linear probe head
-│   └── biomedclip_tool.py  # BiomedCLIP zero-shot / linear probe
-├── pipeline/
-│   ├── graph.py            # LangGraph StateGraph assembly
-│   ├── nodes.py            # Node factory functions
-│   ├── state.py            # NeuroimagingState TypedDict
-│   └── fhir_output.py      # FHIR R4 DiagnosticReport serialiser
-├── explainability/
-│   ├── saliency.py         # GradCAM, GradCAM++, Integrated Gradients (used by pipeline)
-│   ├── cnns.py             # Standalone CNN explainability experiment script (not imported by pipeline)
-│   ├── multimodal.py       # Standalone CLIP/BiomedCLIP experiment script (not imported by pipeline)
-│   └── uncertainty.py      # Standalone calibration experiment script (not imported by pipeline)
-├── eval/
-│   ├── evaluate.py         # Metrics: accuracy, F1, ECE, specificity, SAM3-rate, latency
-│   └── tumor_eval.py       # Resumable JSONL eval for single tumor datasets (Figshare / Br35H)
-├── prompts/
-│   ├── system_prompt.txt       # MedGemma radiologist persona + JSON schema
-│   └── system_prompt_bbox.txt  # Same schema, bbox-overlay context
-├── checkpoints/            # PyTorch state dicts: {arch}_{dataset}_final.pt
-├── outputs/
-│   ├── explainability/     # Saliency maps: gradcam_pp_*.png, ig_*.png
-│   ├── fhir/               # FHIR R4 bundles: fhir_<id>.json
-│   └── eval/               # comparison_summary.csv, <task>_tumor_eval.jsonl
-├── app.py                  # Gradio web GUI (python app.py → http://localhost:7860)
-├── config.py               # Central config dataclasses
-├── run_pipeline.py         # CLI entry point
-├── .env.example            # API key template - copy to .env and fill in HF_TOKEN
-└── requirements.txt
-```
-
-## Quick Start (GUI)
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-
-# Set your HuggingFace token (see Setup section below)
-cp .env.example .env
-# edit .env and paste your HF_TOKEN
-
-# Launch the web interface
-python app.py
-# Open http://localhost:7860 in a browser
-```
-
-Upload a brain scan, choose a task, click **Run Pipeline** - the full agent pipeline runs and
-displays the prediction, clinical report, segmentation overlay, and saliency maps.
-
-![App interface](app_preview.png)
-
 ## Setup
 
 ```bash
@@ -105,7 +83,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-**MedGemma** is a gated model - accept the terms of use at [hf.co/google/medgemma-1.5-4b-it](https://huggingface.co/google/medgemma-1.5-4b-it) then authenticate:
+**MedGemma** is a gated model — accept the terms of use at [hf.co/google/medgemma-1.5-4b-it](https://huggingface.co/google/medgemma-1.5-4b-it) then authenticate:
 
 ```bash
 # Option A - .env file (recommended)
@@ -126,29 +104,14 @@ export HF_TOKEN=hf_...
 ModelConfig(use_4bit_quantization=True)
 ```
 
-## CNN Checkpoints
+## Checkpoints
 
-The pretrained checkpoints (~800 MB for the 4 default models) are not stored in the repository.
-Place the following files in `checkpoints/` before running:
+Pretrained checkpoints (~800 MB total) are hosted on Hugging Face and **downloaded automatically** the first time each task runs — no extra steps needed:
 
+```bash
+python run_pipeline.py --image scan.png --task binary_tumor
+# missing checkpoint is fetched to HF cache then copied to checkpoints/
 ```
-checkpoints/
-  vgg16_MRI_tumor_binary_norm_final.pt          # binary_tumor task
-  densenet169_MRI_tumor_multiclass_norm_final.pt # multiclass_tumor task
-  resnet101_MRI_ms_norm_final.pt                # ms task
-  densenet169_CT_stroke_binary_norm_final.pt    # stroke task
-  linear_probe_BiomedCLIP_MRI_tumor_binary_norm_best.pt
-  linear_probe_BiomedCLIP_MRI_tumor_multiclass_norm_best.pt
-  linear_probe_BiomedCLIP_MRI_ms_norm_best.pt
-  linear_probe_BiomedCLIP_CT_stroke_binary_norm_best.pt
-  sam3_probe.pth                                # optional SAM3 segmentation head
-```
-
-The pipeline selects the checkpoint automatically based on `--task`.
-
-## Downloading Checkpoints from Hugging Face
-
-All task checkpoints (CNN + BiomedCLIP probe + SAM3 segmentation probe) are published on Hugging Face:
 
 | Repo | Task | Model |
 |------|------|-------|
@@ -158,22 +121,10 @@ All task checkpoints (CNN + BiomedCLIP probe + SAM3 segmentation probe) are publ
 | [`tamara-kostova/multiagentmed-ms`](https://huggingface.co/tamara-kostova/multiagentmed-ms) | `ms` | ResNet101 + BiomedCLIP probe |
 | [`tamara-kostova/multiagentmed-tumor-segmentation`](https://huggingface.co/tamara-kostova/multiagentmed-tumor-segmentation) | `binary_tumor`, `multiclass_tumor` | SAM3 linear probe (Dice = 0.836) |
 
-### Option A - Auto-download (default)
+<details>
+<summary>Pre-download, manual placement, and local-only mode</summary>
 
-By default (`CHECKPOINT_SOURCE=hf`) the pipeline downloads any missing
-`binary_tumor` or `multiclass_tumor` checkpoint automatically the first time
-it is needed. No extra steps required - just run the pipeline as normal:
-
-```bash
-python run_pipeline.py --image scan.png --task binary_tumor
-```
-
-The file is fetched to the HF Hub cache and then copied to `checkpoints/`.
-Subsequent runs read the local copy.
-
-### Option B - Pre-download all checkpoints
-
-To download all published checkpoints up-front (CNN + BiomedCLIP probes + SAM3 probe):
+**Pre-download all checkpoints up front:**
 
 ```bash
 python checkpoints/download_checkpoints.py
@@ -195,18 +146,30 @@ python checkpoints/download_checkpoints.py --tasks binary_tumor multiclass_tumor
 python checkpoints/download_checkpoints.py --tasks tumor_segmentation --kinds sam3
 ```
 
-### Option C - Local files only
+**Manual placement** — place files directly in `checkpoints/`:
 
-If you have all checkpoints locally and want to disable any network access,
-add this to your `.env`:
+```
+checkpoints/
+  vgg16_MRI_tumor_binary_norm_final.pt
+  densenet169_MRI_tumor_multiclass_norm_final.pt
+  resnet101_MRI_ms_norm_final.pt
+  densenet169_CT_stroke_binary_norm_final.pt
+  linear_probe_BiomedCLIP_MRI_tumor_binary_norm_best.pt
+  linear_probe_BiomedCLIP_MRI_tumor_multiclass_norm_best.pt
+  linear_probe_BiomedCLIP_MRI_ms_norm_best.pt
+  linear_probe_BiomedCLIP_CT_stroke_binary_norm_best.pt
+  sam3_probe.pth
+```
+
+**Local-only mode** — disable all network access by adding to `.env`:
 
 ```bash
 CHECKPOINT_SOURCE=local
 ```
 
-With this set, missing files fall back to ImageNet pretrained weights (CNN) or
-zero-shot mode (BiomedCLIP) instead of attempting a download.
+Missing files fall back to ImageNet pretrained weights (CNN) or zero-shot mode (BiomedCLIP).
 
+</details>
 
 ## Usage
 
@@ -221,6 +184,7 @@ python run_pipeline.py --image scan.png --task binary_tumor
 ```bash
 python run_pipeline.py --image scan.png --task binary_tumor --generate_explainability
 ```
+
 Saliency maps are saved to `outputs/explainability/`.
 
 **Full evaluation across all four datasets:**
@@ -232,6 +196,7 @@ python run_pipeline.py --eval \
   --ms_dir            data/test/ms \
   --stroke_dir        data/test/stroke
 ```
+
 Results (accuracy, F1, ECE, normal specificity, SAM3-rate, latency) are saved to `outputs/eval/comparison_summary.csv`.
 
 **Single-dataset tumor evaluation (resumable, all models, rich JSONL output):**
@@ -252,13 +217,14 @@ python run_pipeline.py --tumor_eval \
 # Optional: cap total images (useful for quick tests or incremental runs)
   --max_samples 100
 ```
-Writes one JSONL record per image to `outputs/eval/<task>_tumor_eval.jsonl` immediately after inference - crash-safe. Re-running the same command resumes from where it left off. Each record captures outputs from every model: MedGemma triage + final diagnosis, CNN class probabilities, SAM3 mask/bbox/dice, BiomedCLIP ranked scores, Grad-CAM++ and IG paths, SAM3/saliency IoU, verification result, and the full MedGemma report.
 
-**With SAM3 segmentation enabled:**
+Writes one JSONL record per image to `outputs/eval/<task>_tumor_eval.jsonl` immediately after inference — crash-safe. Re-running the same command resumes from where it left off. Each record captures outputs from every model: MedGemma triage + final diagnosis, CNN class probabilities, SAM3 mask/bbox/dice, BiomedCLIP ranked scores, Grad-CAM++ and IG paths, SAM3/saliency IoU, verification result, and the full MedGemma report.
+
+**With SAM3 segmentation:**
 
 ```bash
 python run_pipeline.py --image scan.png --task binary_tumor \
-  --sam3_probe   checkpoints/sam3_probe.pth \
+  --sam3_probe    checkpoints/sam3_probe.pth \
   --sam3_bpe_path sam3/sam3/assets/bpe_simple_vocab_16e6.txt.gz
 ```
 
@@ -274,7 +240,8 @@ python run_pipeline.py --image scan.png --task binary_tumor --always_run_sam3
 python run_pipeline.py --image scan.png --task binary_tumor \
   --few_shot --few_shot_data_dir /path/to/data
 ```
-Prepends one real example image + expected JSON per class (tumor, stroke, multiple sclerosis, normal, other abnormalities) as prior conversation turns before the triage query. Examples are drawn from `few_shot_examples.csv`; missing images are skipped gracefully. `--few_shot_data_dir` is the root directory against which the CSV's relative image paths are resolved.
+
+Prepends one real example image + expected JSON per class as prior conversation turns before the triage query. Examples are drawn from `few_shot_examples.csv`; missing images are skipped gracefully.
 
 **Custom checkpoints / thresholds:**
 
@@ -289,10 +256,10 @@ python run_pipeline.py --image scan.png --task stroke \
 
 The final report is a free-text triage summary generated by MedGemma, covering:
 
-1. **Primary finding** - diagnosis name and subtype
-2. **Confidence assessment** - routing confidence and tool agreement
-3. **Recommended next step** - discharge, further imaging, or specialist referral
-4. **Flags / caveats** - low-confidence warnings or human review triggers
+1. **Primary finding** — diagnosis name and subtype
+2. **Confidence assessment** — routing confidence and tool agreement
+3. **Recommended next step** — discharge, further imaging, or specialist referral
+4. **Flags / caveats** — low-confidence warnings or human review triggers
 
 The report is returned in `state["final_report"]` (plain text, ≤150 words). The pipeline also sets:
 
@@ -333,3 +300,40 @@ This pipeline builds on three prior thesis components:
 - CNN benchmarking (VGG16 / DenseNet / ResNet on 4 datasets)
 - BiomedCLIP layer-wise feature analysis (layer 6 of ViT-B/16 optimal across all four tasks)
 - SAM3 linear probe segmentation (Dice = 0.836); SAM3→MedGemma pipeline improves tumour detection 85.1% → 96.3% but reduces specificity 67.1% → 41.3%; the agent routing in this work is designed to recover that specificity
+
+## Project Structure
+
+```
+MultiAgentMedClassifier/
+├── agents/
+│   ├── medgemma_agent.py   # MedGemma: triage, bbox diagnosis, report
+│   ├── cnn_tool.py         # CNN classifier (VGG16 / DenseNet / ResNet)
+│   ├── sam3_tool.py        # SAM3 segmentation + linear probe head
+│   └── biomedclip_tool.py  # BiomedCLIP zero-shot / linear probe
+├── pipeline/
+│   ├── graph.py            # LangGraph StateGraph assembly
+│   ├── nodes.py            # Node factory functions
+│   ├── state.py            # NeuroimagingState TypedDict
+│   └── fhir_output.py      # FHIR R4 DiagnosticReport serialiser
+├── explainability/
+│   ├── saliency.py         # GradCAM, GradCAM++, Integrated Gradients (used by pipeline)
+│   ├── cnns.py             # Standalone CNN explainability experiment script
+│   ├── multimodal.py       # Standalone CLIP/BiomedCLIP experiment script
+│   └── uncertainty.py      # Standalone calibration experiment script
+├── eval/
+│   ├── evaluate.py         # Metrics: accuracy, F1, ECE, specificity, SAM3-rate, latency
+│   └── tumor_eval.py       # Resumable JSONL eval for single tumor datasets (Figshare / Br35H)
+├── prompts/
+│   ├── system_prompt.txt       # MedGemma radiologist persona + JSON schema
+│   └── system_prompt_bbox.txt  # Same schema, bbox-overlay context
+├── checkpoints/            # PyTorch state dicts (auto-downloaded on first run)
+├── outputs/
+│   ├── explainability/     # Saliency maps: gradcam_pp_*.png, ig_*.png
+│   ├── fhir/               # FHIR R4 bundles: fhir_<id>.json
+│   └── eval/               # comparison_summary.csv, <task>_tumor_eval.jsonl
+├── app.py                  # Gradio web GUI (python app.py → http://localhost:7860)
+├── config.py               # Central config dataclasses
+├── run_pipeline.py         # CLI entry point
+├── .env.example            # API key template — copy to .env and fill in HF_TOKEN
+└── requirements.txt
+```
