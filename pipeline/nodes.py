@@ -11,7 +11,6 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-import torchvision.transforms as T
 from PIL import Image
 
 from config import BEST_CNN_PER_TASK, DEFAULT_CONFIG, RoutingConfig
@@ -239,14 +238,6 @@ def make_explainability_node(cnn_tool, output_dir: str = "outputs/explainability
     out_path = Path(output_dir)
     out_path.mkdir(parents=True, exist_ok=True)
 
-    _preprocess = T.Compose(
-        [
-            T.Resize((224, 224)),
-            T.ToTensor(),
-            T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        ]
-    )
-
     def explainability_node(state: NeuroimagingState) -> dict:
         t0 = _log_node_start("explainability", state)
         cnn_result = state.get("classification_result")
@@ -270,9 +261,9 @@ def make_explainability_node(cnn_tool, output_dir: str = "outputs/explainability
             0,
         )
 
-        # Preprocess image (grayscale → 3-channel, same as cnn_tool.classify)
+        # Use the same transform as cnn_tool.classify (grayscale → 3-channel)
         pil_img = Image.open(image_path).convert("L").convert("RGB")
-        img_tensor = _preprocess(pil_img).unsqueeze(0).to(cnn_tool.device)
+        img_tensor = cnn_tool._transform(pil_img).unsqueeze(0).to(cnn_tool.device)
 
         uid = uuid.uuid4().hex[:8]
         paths = {}
