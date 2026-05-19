@@ -48,7 +48,7 @@ displays the prediction, clinical report, segmentation overlay, and saliency map
 | `MedGemmaAgent` | google/medgemma-1.5-4b-it | Triage, bbox-guided diagnosis, verification, final report |
 | `CNNClassifier` | VGG16 / DenseNet169 / ResNet101 | Task-specific classification |
 | `SAM3Tool` | SAM3 frozen backbone + linear probe | Lesion segmentation (Dice = 0.836) |
-| `BiomedCLIPTool` | microsoft/BiomedCLIP (ViT-B/16, layer 6) | Zero-shot re-ranking for ambiguous multiclass cases |
+| `BiomedCLIPTool` | microsoft/BiomedCLIP (ViT-B/16, layer 6) | Linear probe classifier; falls back to zero-shot when no probe checkpoint is available |
 
 **Pipeline flow** (linear — every node runs for every image):
 
@@ -64,7 +64,7 @@ triage (MedGemma)
     → fhir_output
 ```
 
-SAM3 and BiomedCLIP always run but contribute only when relevant: SAM3 segmentation is eligible only for `binary_tumor` and `multiclass_tumor` (the linear probe was trained on BraTS 2021; MS/stroke probes performed poorly). BiomedCLIP re-ranking is most meaningful for multiclass subtype disambiguation.
+SAM3 runs only for `binary_tumor` and `multiclass_tumor` — the linear probe was trained on BraTS 2020 and evaluated on BraTS 2021; MS/stroke probes performed poorly, so those tasks skip segmentation automatically. BiomedCLIP runs on all tasks but is most meaningful for multiclass subtype disambiguation.
 
 ## Tasks
 
@@ -220,15 +220,7 @@ python run_pipeline.py --tumor_eval \
 
 Writes one JSONL record per image to `outputs/eval/<task>_tumor_eval.jsonl` immediately after inference — crash-safe. Re-running the same command resumes from where it left off. Each record captures outputs from every model: MedGemma triage + final diagnosis, CNN class probabilities, SAM3 mask/bbox/dice, BiomedCLIP ranked scores, Grad-CAM++ and IG paths, SAM3/saliency IoU, verification result, and the full MedGemma report.
 
-**With SAM3 segmentation:**
-
-```bash
-python run_pipeline.py --image scan.png --task binary_tumor \
-  --sam3_probe    checkpoints/sam3_probe.pth \
-  --sam3_bpe_path sam3/sam3/assets/bpe_simple_vocab_16e6.txt.gz
-```
-
-**Force SAM3 on every non-normal case:**
+**Force SAM3 routing intent on every non-normal case** (overrides the confidence-based routing decision recorded in state):
 
 ```bash
 python run_pipeline.py --image scan.png --task binary_tumor --always_run_sam3
@@ -247,10 +239,12 @@ Prepends one real example image + expected JSON per class as prior conversation 
 
 ```bash
 python run_pipeline.py --image scan.png --task stroke \
-  --cnn_stroke checkpoints/densenet169_stroke.pt \
+  --cnn_stroke checkpoints/densenet169_CT_stroke_binary_norm_final.pt \
   --sam3_threshold 0.65 \
   --human_threshold 0.40
 ```
+
+Other checkpoint flags: `--cnn_binary_tumor`, `--cnn_multiclass`, `--cnn_ms`.
 
 ## Report Output
 
