@@ -21,7 +21,7 @@ import pandas as pd
 
 from config import DEFAULT_CONFIG, PipelineConfig
 from eval.evaluate import compare_configurations
-from pipeline.graph import assemble_pipeline
+from pipeline.graph import assemble_debate_pipeline, assemble_forest_pipeline, assemble_pipeline
 from research.experiments import EXPERIMENT_FAMILIES, SweepPoint
 
 
@@ -82,7 +82,14 @@ def run_experiment_family(
         point_dir.mkdir(parents=True, exist_ok=True)
 
         cfg = _apply_overrides(base_cfg, point.routing_overrides)
-        app = assemble_pipeline(medgemma, cnn, sam3, clip, cfg)
+        mode = point.pipeline_mode
+        kwargs = point.pipeline_kwargs or {}
+        if mode == "debate":
+            app = assemble_debate_pipeline(medgemma, cnn, sam3, clip, cfg, **kwargs)
+        elif mode == "forest":
+            app = assemble_forest_pipeline(medgemma, cnn, sam3, clip, cfg, **kwargs)
+        else:
+            app = assemble_pipeline(medgemma, cnn, sam3, clip, cfg)
 
         t0 = time.perf_counter()
         summary = compare_configurations(

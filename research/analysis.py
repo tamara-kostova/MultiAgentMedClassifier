@@ -278,6 +278,108 @@ def calibration_per_task(preds_df: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+def forest_voting_analysis(preds_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Agent Forest voting quality analysis.
+
+    Requires 'dissent_rate' and 'vote_fraction' columns in preds_df
+    (written by evaluate.py when forest_consensus is present in state).
+
+    Returns per-(experiment_id, task) breakdown of:
+      - mean_dissent_rate : average fraction of agents that disagreed
+      - unanimous_pct     : % of cases where all agents agreed
+      - accuracy_unanimous: accuracy on unanimous cases
+      - accuracy_split    : accuracy on split-vote cases (≥ 5 samples)
+
+    Use this to show whether agent agreement correlates with correctness
+    (connects to Li et al.: larger forests reduce uncertainty on hard cases).
+    """
+    if "dissent_rate" not in preds_df.columns:
+        return pd.DataFrame()
+
+    rows = []
+    for (exp_id, task), grp in preds_df.groupby(["experiment_id", "task"]):
+        unanimous = grp[grp["dissent_rate"] == 0.0]
+        split = grp[grp["dissent_rate"] > 0.0]
+        correct = grp["true_label"] == grp["predicted_class"]
+
+        rows.append({
+            "experiment_id": exp_id,
+            "task": task,
+            "n": len(grp),
+            "mean_dissent_rate": round(float(grp["dissent_rate"].mean()), 4),
+            "unanimous_pct": round(len(unanimous) / len(grp) * 100, 1) if len(grp) > 0 else float("nan"),
+            "accuracy_unanimous": round(float((grp.loc[unanimous.index, "true_label"] == grp.loc[unanimous.index, "predicted_class"]).mean()), 4) if len(unanimous) > 0 else float("nan"),
+            "accuracy_split": round(float((grp.loc[split.index, "true_label"] == grp.loc[split.index, "predicted_class"]).mean()), 4) if len(split) >= 5 else float("nan"),
+            "accuracy_overall": round(float(correct.mean()), 4),
+        })
+
+    return (
+        pd.DataFrame(rows)
+        .sort_values(["experiment_id", "task"])
+        .reset_index(drop=True)
+    )
+
+
+def debate_round_analysis(preds_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Multi-Agent Debate round analysis.
+
+    Requires 'debate_rounds_completed' and 'debate_round_changed' columns
+    (written by evaluate.py when debate_verdict is present in state).
+
+    Returns per-(experiment_id, task) breakdown of:
+      - pct_verdict_changed : % of cases where round 2+ changed the verdict
+      - ece_changed         : ECE on cases where verdict changed
+      - ece_unchanged       : ECE on cases where verdict held (≥ 5 samples each)
+      - accuracy_changed    : accuracy on verdict-changed cases
+      - accuracy_unchanged  : accuracy on verdict-stable cases
+
+    Use this to test Du et al.'s claim that additional rounds improve reasoning
+    on hard cases and whether verdict instability correlates with miscalibration.
+    """
+    if "debate_rounds_completed" not in preds_df.columns:
+        return pd.DataFrame()
+
+    rows = []
+    for (exp_id, task), grp in preds_df.groupby(["experiment_id", "task"]):
+        multi_round = grp[grp["debate_rounds_completed"] > 1]
+        if len(multi_round) == 0:
+            changed = pd.DataFrame()
+            unchanged = grp
+        else:
+            changed = grp[grp.get("debate_round_changed", pd.Series(False, index=grp.index))]
+            unchanged = grp[~grp.index.isin(changed.index)]
+
+        confs_all = grp["final_confidence"].values
+        correct_all = (grp["true_label"] == grp["predicted_class"]).values.astype(float)
+
+        def _ece_safe(subset):
+            if len(subset) < 5:
+                return float("nan")
+            c = subset["final_confidence"].values
+            ok = (subset["true_label"] == subset["predicted_class"]).values.astype(float)
+            return round(compute_ece(c, ok), 4)
+
+        rows.append({
+            "experiment_id": exp_id,
+            "task": task,
+            "n": len(grp),
+            "pct_verdict_changed": round(len(changed) / len(grp) * 100, 1) if len(grp) > 0 else float("nan"),
+            "accuracy_changed": round(float((changed["true_label"] == changed["predicted_class"]).mean()), 4) if len(changed) >= 5 else float("nan"),
+            "accuracy_unchanged": round(float((unchanged["true_label"] == unchanged["predicted_class"]).mean()), 4) if len(unchanged) >= 5 else float("nan"),
+            "ece_changed": _ece_safe(changed),
+            "ece_unchanged": _ece_safe(unchanged),
+            "ece_overall": round(compute_ece(confs_all, correct_all), 4),
+        })
+
+    return (
+        pd.DataFrame(rows)
+        .sort_values(["experiment_id", "task"])
+        .reset_index(drop=True)
+    )
+
+
 def ablation_summary(summary_df: pd.DataFrame) -> pd.DataFrame:
     """
     Component contribution table: all metrics per (experiment_id, task).

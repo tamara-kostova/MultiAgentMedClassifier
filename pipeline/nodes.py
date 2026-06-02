@@ -427,6 +427,88 @@ def make_verification_node(agent):
     return verification_node
 
 
+def make_forest_triage_node(forest, n_agents: int = 3):
+    """
+    Factory: returns a forest triage node that replaces the single MedGemma triage.
+    Runs n_agents role-specialized MedGemma instances, votes, and writes consensus
+    to state. Downstream nodes (CNN, SAM3, BiomedCLIP, report) run unchanged.
+    """
+    def forest_triage_node(state: NeuroimagingState) -> dict:
+        from agents.medgemma_agent import diagnosis_to_routing
+        t0 = _log_node_start("forest_triage", state)
+        votes = forest.run(state["image_path"], n_agents=n_agents)
+        consensus, winner_dx = forest.vote(votes)
+        routing = diagnosis_to_routing(winner_dx, forest.medgemma.routing_cfg)
+
+        # Strip internal _dx objects before writing to state
+        serializable_votes = [
+            {k: v for k, v in vote.items() if not k.startswith("_")}
+            for vote in votes
+        ]
+        _log_node_done("forest_triage", state, t0)
+        return {
+            "routing_decision": "full_workup",
+            "routing_confidence": consensus["confidence_weighted_confidence"],
+            "routing_reasoning": (
+                f"Forest consensus ({n_agents} agents): {consensus['winner']} "
+                f"({consensus['vote_fraction'] * 100:.0f}% agreement, "
+                f"dissent={consensus['dissent_rate'] * 100:.0f}%)"
+            ),
+            "suspected_pathology": consensus.get("winner_detailed") or consensus["winner"],
+            "medgemma_diagnosis": winner_dx.model_dump(),
+            "forest_votes": serializable_votes,
+            "forest_consensus": consensus,
+            "routing_path": state["routing_path"] + ["forest_triage"],
+        }
+
+    return forest_triage_node
+
+
+def make_debate_node(orchestrator, rounds: int = 1, routing_cfg=None):
+    """
+    Factory: returns a debate node that replaces verification + report.
+    Runs the DebateOrchestrator and resolves final_predicted_class / final_confidence
+    from the judge's verdict.
+    """
+    cfg = routing_cfg or DEFAULT_CONFIG.routing
+
+    def debate_node(state: NeuroimagingState) -> dict:
+        t0 = _log_node_start("debate", state)
+        verdict = orchestrator.run(state, rounds=rounds)
+
+        final_class = verdict.get("winner") or state.get("suspected_pathology", "unknown")
+        final_conf = float(verdict.get("confidence", 0.5))
+
+        # Apply IoU penalty carried from explainability node
+        saliency_iou = state.get("saliency_sam3_iou")
+        requires_review = final_conf < cfg.human_review_threshold
+        if saliency_iou is not None and saliency_iou < cfg.low_iou_penalty_threshold:
+            penalty = saliency_iou / cfg.low_iou_penalty_threshold
+            final_conf = final_conf * penalty
+            requires_review = True
+
+        report_text = (
+            f"Debate verdict ({verdict.get('rounds_completed', 1)} round(s)): "
+            f"{final_class} (confidence {final_conf:.2f}). "
+            f"Reason: {verdict.get('reason', 'N/A')}"
+        )
+
+        _log_node_done("debate", state, t0)
+        return {
+            "debate_arguments": verdict.get("arguments", []),
+            "debate_verdict": {k: v for k, v in verdict.items() if k != "arguments"},
+            "debate_rounds_completed": verdict.get("rounds_completed", 1),
+            "final_predicted_class": final_class,
+            "final_confidence": final_conf,
+            "final_medgemma_diagnosis": None,
+            "final_report": report_text,
+            "requires_human_review": requires_review,
+            "routing_path": state["routing_path"] + ["debate"],
+        }
+
+    return debate_node
+
+
 def make_fhir_node(output_dir: str):
     """Factory: returns a FHIR serialisation node that writes to output_dir/fhir/."""
 

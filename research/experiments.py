@@ -11,14 +11,16 @@ Families:
   biomedclip_threshold — vary biomedclip_rerank_threshold (7 points, 0.50–0.80)
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass
 class SweepPoint:
-    experiment_id: str      # used as subdirectory name and CSV label
+    experiment_id: str       # used as subdirectory name and CSV label
     description: str
     routing_overrides: dict  # fields to override on RoutingConfig
+    pipeline_mode: str = "standard"        # "standard" | "debate" | "forest"
+    pipeline_kwargs: dict = field(default_factory=dict)  # extra args for assembler
 
 
 EXPERIMENT_FAMILIES: dict[str, list[SweepPoint]] = {
@@ -74,5 +76,55 @@ EXPERIMENT_FAMILIES: dict[str, list[SweepPoint]] = {
             routing_overrides={"biomedclip_rerank_threshold": t},
         )
         for t in [0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80]
+    ],
+
+    # ── System C: Agent Forest — vary ensemble size ───────────────────────────
+    "agent_forest": [
+        SweepPoint(
+            experiment_id="forest_n1",
+            description="Agent Forest N=1 (equivalent to single-agent baseline)",
+            routing_overrides={},
+            pipeline_mode="forest",
+            pipeline_kwargs={"n_agents": 1},
+        ),
+        SweepPoint(
+            experiment_id="forest_n3",
+            description="Agent Forest N=3 (radiologist, conservative, emergency)",
+            routing_overrides={},
+            pipeline_mode="forest",
+            pipeline_kwargs={"n_agents": 3},
+        ),
+        SweepPoint(
+            experiment_id="forest_n4",
+            description="Agent Forest N=4 (all four roles)",
+            routing_overrides={},
+            pipeline_mode="forest",
+            pipeline_kwargs={"n_agents": 4},
+        ),
+    ],
+
+    # ── System B: Multi-Agent Debate — vary debate rounds ────────────────────
+    "debate_rounds": [
+        SweepPoint(
+            experiment_id="debate_r1",
+            description="Multi-Agent Debate R=1 (single-round arbitration)",
+            routing_overrides={},
+            pipeline_mode="debate",
+            pipeline_kwargs={"rounds": 1},
+        ),
+        SweepPoint(
+            experiment_id="debate_r2",
+            description="Multi-Agent Debate R=2 (advocates respond to round-1 verdict)",
+            routing_overrides={},
+            pipeline_mode="debate",
+            pipeline_kwargs={"rounds": 2},
+        ),
+        SweepPoint(
+            experiment_id="debate_r3",
+            description="Multi-Agent Debate R=3 (maximum rounds)",
+            routing_overrides={},
+            pipeline_mode="debate",
+            pipeline_kwargs={"rounds": 3},
+        ),
     ],
 }

@@ -51,7 +51,7 @@ from config import (
 )
 from eval.evaluate import compare_configurations, load_test_split, run_single
 from eval.tumor_eval import LABEL_MAPS, run_tumor_eval
-from pipeline.graph import build_pipeline
+from pipeline.graph import build_debate_pipeline, build_forest_pipeline, build_pipeline
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -209,6 +209,31 @@ def parse_args():
         help="Run Grad-CAM++ and Integrated Gradients after CNN classification",
     )
 
+    # Pipeline mode (System B / C)
+    p.add_argument(
+        "--pipeline_mode",
+        type=str,
+        choices=["standard", "debate", "forest"],
+        default="standard",
+        help=(
+            "Pipeline variant: 'standard' (baseline), "
+            "'debate' (System B — multi-agent debate), "
+            "'forest' (System C — agent forest with majority vote)."
+        ),
+    )
+    p.add_argument(
+        "--debate_rounds",
+        type=int,
+        default=1,
+        help="Number of debate rounds for --pipeline_mode debate (1–3, default 1).",
+    )
+    p.add_argument(
+        "--forest_n_agents",
+        type=int,
+        default=3,
+        help="Number of forest agents for --pipeline_mode forest (default 3).",
+    )
+
     # Output
     p.add_argument("--output_dir", type=str, default="outputs")
 
@@ -287,7 +312,13 @@ def main():
     cfg = build_config(args)
     Path(cfg.output_dir).mkdir(parents=True, exist_ok=True)
 
-    app = build_pipeline(cfg)
+    mode = args.pipeline_mode
+    if mode == "debate":
+        app = build_debate_pipeline(cfg, rounds=args.debate_rounds)
+    elif mode == "forest":
+        app = build_forest_pipeline(cfg, n_agents=args.forest_n_agents)
+    else:
+        app = build_pipeline(cfg)
 
     if args.image:
         # ── Single image mode ─────────────────────────────────────────────────

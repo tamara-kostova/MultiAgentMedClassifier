@@ -220,6 +220,44 @@ python run_pipeline.py --tumor_eval \
 
 Writes one JSONL record per image to `outputs/eval/<task>_tumor_eval.jsonl` immediately after inference — crash-safe. Re-running the same command resumes from where it left off. Each record captures outputs from every model: MedGemma triage + final diagnosis, CNN class probabilities, SAM3 mask/bbox/dice, BiomedCLIP ranked scores, Grad-CAM++ and IG paths, SAM3/saliency IoU, verification result, and the full MedGemma report.
 
+**System B — Multi-Agent Debate** (CNN / BiomedCLIP / SAM3 MedGemma advocates + judge):
+
+```bash
+# Single-round arbitration (default)
+python run_pipeline.py --image scan.png --task multiclass_tumor --pipeline_mode debate
+
+# Two debate rounds: advocates respond to the round-1 verdict
+python run_pipeline.py --image scan.png --task multiclass_tumor --pipeline_mode debate --debate_rounds 2
+
+# Research sweep over 1 / 2 / 3 rounds
+python run_research.py --family debate_rounds \
+  --binary_tumor_dir data/test/binary_tumor \
+  --multiclass_dir   data/test/multiclass_tumor \
+  --ms_dir           data/test/ms \
+  --stroke_dir       data/test/stroke
+```
+
+Debate replaces the `verification + report` tail. Three MedGemma instances argue on behalf of CNN, BiomedCLIP, and SAM3 outputs respectively; a fourth MedGemma instance judges. In round 2+, advocates see the prior verdict and the other advocates' arguments before responding. Verdict stored in `state["debate_verdict"]`; per-round arguments in `state["debate_arguments"]`.
+
+**System C — Agent Forest** (N role-specialized MedGemma agents + majority vote):
+
+```bash
+# 3-agent forest (radiologist, conservative, emergency roles)
+python run_pipeline.py --image scan.png --task multiclass_tumor --pipeline_mode forest
+
+# 4-agent forest (adds differential-diagnostician role)
+python run_pipeline.py --image scan.png --task multiclass_tumor --pipeline_mode forest --forest_n_agents 4
+
+# Research sweep over N = 1 / 3 / 4 agents
+python run_research.py --family agent_forest \
+  --binary_tumor_dir data/test/binary_tumor \
+  --multiclass_dir   data/test/multiclass_tumor \
+  --ms_dir           data/test/ms \
+  --stroke_dir       data/test/stroke
+```
+
+Forest replaces the single `triage` node. N role-specialized MedGemma instances (prompts in `prompts/forest_*.txt`) independently diagnose the scan; majority vote + confidence-weighted tiebreaking produces the consensus routing decision. All downstream nodes (CNN, SAM3, BiomedCLIP, report) run unchanged. Votes stored in `state["forest_votes"]`; consensus in `state["forest_consensus"]` (includes `dissent_rate` and `vote_fraction`).
+
 **Force SAM3 routing intent on every non-normal case** (overrides the confidence-based routing decision recorded in state):
 
 ```bash
@@ -300,10 +338,12 @@ This pipeline builds on three prior thesis components:
 ```
 MultiAgentMedClassifier/
 ├── agents/
-│   ├── medgemma_agent.py   # MedGemma: triage, bbox diagnosis, report
+│   ├── medgemma_agent.py   # MedGemma: triage, bbox diagnosis, report, debate judge/advocate, forest role
 │   ├── cnn_tool.py         # CNN classifier (VGG16 / DenseNet / ResNet)
 │   ├── sam3_tool.py        # SAM3 segmentation + linear probe head
-│   └── biomedclip_tool.py  # BiomedCLIP zero-shot / linear probe
+│   ├── biomedclip_tool.py  # BiomedCLIP zero-shot / linear probe
+│   ├── debate.py           # System B: DebateOrchestrator (3 advocates + judge, 1–3 rounds)
+│   └── forest.py           # System C: AgentForest (4 roles, majority vote)
 ├── pipeline/
 │   ├── graph.py            # LangGraph StateGraph assembly
 │   ├── nodes.py            # Node factory functions
@@ -318,8 +358,12 @@ MultiAgentMedClassifier/
 │   ├── evaluate.py         # Metrics: accuracy, F1, ECE, specificity, SAM3-rate, latency
 │   └── tumor_eval.py       # Resumable JSONL eval for single tumor datasets (Figshare / Br35H)
 ├── prompts/
-│   ├── system_prompt.txt       # MedGemma radiologist persona + JSON schema
-│   └── system_prompt_bbox.txt  # Same schema, bbox-overlay context
+│   ├── system_prompt.txt           # MedGemma radiologist persona + JSON schema
+│   ├── system_prompt_bbox.txt      # Same schema, bbox-overlay context
+│   ├── forest_radiologist.txt      # Forest role: visual pattern recognition
+│   ├── forest_conservative.txt     # Forest role: specificity-focused
+│   ├── forest_emergency.txt        # Forest role: sensitivity-focused
+│   └── forest_differential.txt     # Forest role: uncertainty-aware
 ├── checkpoints/            # PyTorch state dicts (auto-downloaded on first run)
 ├── outputs/
 │   ├── explainability/     # Saliency maps: gradcam_pp_*.png, ig_*.png

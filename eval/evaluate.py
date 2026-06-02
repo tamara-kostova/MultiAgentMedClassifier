@@ -223,6 +223,21 @@ class PipelineEvaluator:
                         final_state["medgemma_diagnosis"].get("diagnosis_name")
                         if final_state.get("medgemma_diagnosis") else None
                     ),
+                    # Forest fields (None in standard / debate pipelines)
+                    "dissent_rate": (
+                        final_state["forest_consensus"].get("dissent_rate")
+                        if final_state.get("forest_consensus") else None
+                    ),
+                    "vote_fraction": (
+                        final_state["forest_consensus"].get("vote_fraction")
+                        if final_state.get("forest_consensus") else None
+                    ),
+                    # Debate fields (None in standard / forest pipelines)
+                    "debate_rounds_completed": final_state.get("debate_rounds_completed"),
+                    "debate_round_changed": (
+                        final_state["debate_verdict"].get("round_changed")
+                        if final_state.get("debate_verdict") else None
+                    ),
                 }
                 f.write(json.dumps(row) + "\n")
 

@@ -72,6 +72,19 @@ class NeuroimagingState(TypedDict):
                                          # explainability was not run
     fhir_report: Optional[dict]       # Written by fhir_node; FHIR R4 DiagnosticReport resource dict
 
+    # ── Agent Forest outputs ──────────────────────────────────────────────────
+    # Written by forest_triage_node (System C). None in standard / debate pipelines.
+    forest_votes: Optional[list]     # [{role, diagnosis_name, diagnosis_detailed, diagnosis_confidence}, ...]
+    forest_consensus: Optional[dict] # {winner, winner_detailed, vote_counts, vote_fraction,
+                                     #  confidence_weighted_confidence, dissent_rate, n_agents}
+
+    # ── Multi-Agent Debate outputs ────────────────────────────────────────────
+    # Written by debate_node (System B). None in standard / forest pipelines.
+    debate_arguments: Optional[list]       # [{round, role, argument}, ...]
+    debate_verdict: Optional[dict]         # {winner, winner_detailed, confidence, reason,
+                                           #  round_changed, rounds_completed}
+    debate_rounds_completed: Optional[int]
+
     # ── Diagnostics ───────────────────────────────────────────────────────────
     routing_path: list  # Append-only list; each node appends its own name on entry — used for
                         # evaluation reporting and debugging (never used for control flow)
@@ -105,4 +118,9 @@ def initial_state(
         verification_result=None,
         fhir_report=None,
         routing_path=[],
+        forest_votes=None,
+        forest_consensus=None,
+        debate_arguments=None,
+        debate_verdict=None,
+        debate_rounds_completed=None,
     )

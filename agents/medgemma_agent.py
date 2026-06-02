@@ -547,6 +547,25 @@ class MedGemmaAgent:
             raise json.JSONDecodeError("No JSON object found", text, 0)
         return parsed_objects[-1]
 
+    def diagnose_with_role(self, image_path: str, role_prompt: str) -> MedicalDiagnosis:
+        """
+        Run a role-specific prompt against the image and parse a MedicalDiagnosis.
+        Used by AgentForest to run N role-specialized instances.
+        The role_prompt is a complete prompt (role prefix + JSON schema).
+        """
+        image = Image.open(image_path).convert("RGB")
+        return self._run_diagnostic_prompt(image, role_prompt)
+
+    def generate_for_prompt(
+        self, image_path: str, prompt: str, max_new_tokens: int = 300
+    ) -> str:
+        """
+        Run a free-form prompt against the image and return raw text.
+        Used by DebateOrchestrator for advocate and judge calls.
+        """
+        image = Image.open(image_path).convert("RGB")
+        return self._generate(image, prompt, max_new_tokens=max_new_tokens)
+
     def verify_cnn_prediction(
         self,
         original_image_path: str,
