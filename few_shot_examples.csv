@@ -1,0 +1,21 @@
+class,dataset,subclass,modality,modality_subtype,plane,file_path,original_class
+multiple sclerosis,sclerosis,,MRI,FLAIR,axial,sclerosis/MS/MS Axial_crop/A1 (414).png,
+multiple sclerosis,sclerosis,,MRI,FLAIR,sagittal,sclerosis/MS/MS Saggital_crop/S1 (628).png,
+multiple sclerosis,sclerosis,,MRI,FLAIR,axial,sclerosis/MS/MS Axial_crop/A1 (182).png,
+multiple sclerosis,sclerosis,,MRI,FLAIR,sagittal,sclerosis/MS/MS Saggital_crop/S1 (499).png,
+normal,sclerosis,,MRI,FLAIR,axial,sclerosis/MS/Control Axial_crop/kontrol 18 (11).png,
+normal,stroke,,CT,,axial,stroke/Brain_Stroke_CT_Dataset/Normal/PNG/11578.png,
+normal,images-44c,,MRI,T2,,images-44c/_NORMAL T2/85b1503c56b1cb7b1ef8f2f7ecf25b_big_gallery.jpeg,
+normal,images-17,,MRI,T1,axial,images-17/NORMAL T1/normal (40).jpg,
+other abnormalities,images-17,,MRI,T2,axial,"images-17/Outros Tipos de Lesões (Abscessos, Cistos, Encefalopatias Diversas) T2/outros (1).jpg",
+other abnormalities,images-17,,MRI,T1C+,axial,"images-17/Outros Tipos de Lesões (Abscessos, Cistos, Encefalopatias Diversas) T1C+/outros (18).jpeg",
+other abnormalities,images-17,,MRI,T1,axial,"images-17/Outros Tipos de Lesões (Abscessos, Cistos, Encefalopatias Diversas) T1/outros (48).jpeg",
+other abnormalities,images-17,,MRI,T1,axial,"images-17/Outros Tipos de Lesões (Abscessos, Cistos, Encefalopatias Diversas) T1/outros (27).jpg",
+stroke,aisd,ischemic,CT,,axial,aisd/image/0226143/023.png,blurred acute infarct
+stroke,stroke,hemorrhagic,CT,,axial,stroke/Brain_Stroke_CT_Dataset/Bleeding/PNG/16066.png,Hemorrhagic
+stroke,aisd,ischemic,CT,,axial,aisd/image/0538680/005.png,remote infarct
+stroke,stroke,hemorrhagic,CT,,axial,stroke/Brain_Stroke_CT_Dataset/Bleeding/PNG/13509.png,Hemorrhagic
+tumor,images-17,neurocitoma,MRI,T2,axial,"images-17/Neurocitoma (Central - Intraventricular, Extraventricular) T2/neurocitoma (9).jpeg","Neurocitoma (Central - Intraventricular, Extraventricular) T2"
+tumor,figshare,glioma,MRI,T1C+,,figshare/brainTumorDataPublic_2299-3064_jpg/2/2828.jpg,glioma
+tumor,images-44c,meningioma,MRI,T1,,images-44c/Meningioma T1/db3654f1d5b5574525cc17ea6606fa_big_gallery.jpeg,meningioma
+tumor,images-17,schwannoma,MRI,T2,axial,"images-17/Schwannoma (Acustico, Vestibular - Trigeminal) T2/schwannoma (73).jpeg","Schwannoma (Acustico, Vestibular - Trigeminal) T2"

@@ -417,7 +417,6 @@ def run_single(
         files_lines.append(f"  integrated grads:    {expl['integrated_gradients']}")
 
     fhir = result.get("fhir_report") or {}
-    files_lines = []
 
     fhir_bundle_id = fhir.get("id")
     if fhir_bundle_id:
