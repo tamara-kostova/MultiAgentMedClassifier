@@ -64,7 +64,7 @@ def build_pipeline(cfg: PipelineConfig = None):
     # ── Create node functions via factories ───────────────────────────────────
     triage_fn = make_triage_node(medgemma, cfg.routing)
     cnn_fn = make_cnn_node(cnn)
-    sam3_fn = make_sam3_node(sam3)
+    sam3_fn = make_sam3_node(sam3, cfg.routing)
     biomedclip_fn = make_biomedclip_node(clip, cfg.routing)
     report_fn = make_report_node(medgemma, cfg.routing, skip_report=cfg.skip_report)
     verification_fn = make_verification_node(medgemma)

@@ -79,11 +79,19 @@ def make_cnn_node(cnn_tool):
     return cnn_node
 
 
-def make_sam3_node(sam3_tool):
-    """SAM3 segmentation node. Produces mask + bbox overlay for downstream nodes."""
+def make_sam3_node(sam3_tool, routing_cfg: RoutingConfig = None):
+    """SAM3 segmentation node. Skips automatically for ineligible tasks (ms, stroke)."""
+    cfg = routing_cfg or DEFAULT_CONFIG.routing
 
     def sam3_node(state: NeuroimagingState) -> dict:
         t0 = _log_node_start("sam3_segment", state)
+        if state["task"] not in cfg.sam3_eligible_tasks:
+            print(f"[sam3_segment] task={state['task']} not eligible — skipping")
+            _log_node_done("sam3_segment", state, t0)
+            return {
+                "segmentation_result": {"skipped": True, "mask_path": None, "bbox": None, "guided_image_path": None},
+                "routing_path": state["routing_path"] + ["sam3_segment"],
+            }
         pathology = state.get("suspected_pathology") or "brain lesion"
         result = sam3_tool.segment(state["image_path"], text_prompt=pathology)
         _log_node_done("sam3_segment", state, t0)
