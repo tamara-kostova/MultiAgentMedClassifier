@@ -36,8 +36,8 @@ load_dotenv()
 
 from config import DEFAULT_CONFIG
 from pipeline.graph import load_agents
-from research.experiments import EXPERIMENT_FAMILIES
-from research.graph import ResearchState, build_research_pipeline
+from experiments.experiments import EXPERIMENT_FAMILIES
+from experiments.graph import ResearchState, build_research_pipeline
 
 
 def main():

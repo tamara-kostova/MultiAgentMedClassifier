@@ -22,7 +22,7 @@ import pandas as pd
 from config import DEFAULT_CONFIG, PipelineConfig
 from eval.evaluate import compare_configurations
 from pipeline.graph import assemble_debate_pipeline, assemble_forest_pipeline, assemble_pipeline
-from research.experiments import EXPERIMENT_FAMILIES, SweepPoint
+from experiments.experiments import EXPERIMENT_FAMILIES, SweepPoint
 
 
 def _apply_overrides(base_cfg: PipelineConfig, overrides: dict) -> PipelineConfig:

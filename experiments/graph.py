@@ -26,7 +26,7 @@ from langgraph.graph import END, StateGraph
 from typing_extensions import TypedDict
 
 from eval.evaluate import load_test_split
-from research.analysis import (
+from experiments.analysis import (
     ablation_summary,
     calibration_by_routing_path,
     calibration_per_task,
@@ -36,8 +36,8 @@ from research.analysis import (
     routing_distribution,
     sensitivity_specificity_table,
 )
-from research.experiments import EXPERIMENT_FAMILIES
-from research.runner import run_experiment_family
+from experiments.experiments import EXPERIMENT_FAMILIES
+from experiments.runner import run_experiment_family
 
 
 # ── State ─────────────────────────────────────────────────────────────────────
