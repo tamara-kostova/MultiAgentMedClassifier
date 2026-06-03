@@ -103,41 +103,6 @@ def make_sam3_node(sam3_tool, routing_cfg: RoutingConfig = None):
     return sam3_node
 
 
-def make_cnn_with_mask_node(cnn_tool, agent=None):
-    """
-    CNN node that operates on the SAM3 bbox-guided image.
-    Also runs MedGemma with system_prompt_bbox.txt when SAM3 produced a real
-    overlay image, to get a spatially-informed diagnosis alongside the CNN result.
-    """
-
-    def cnn_with_mask_node(state: NeuroimagingState) -> dict:
-        t0 = _log_node_start("cnn_with_mask", state)
-        seg = state.get("segmentation_result")
-        seg_valid = seg and not seg.get("skipped")
-
-        updates = {
-            "routing_path": state["routing_path"] + ["cnn_with_mask"],
-        }
-
-        if state.get("classification_result") is None:
-            updates["classification_result"] = cnn_tool.classify(
-                state["image_path"], state["task"]
-            )
-
-        # MedGemma gets the red overlay only when SAM3 actually produced one.
-        # If SAM3 is unavailable/skipped, avoid a duplicate MedGemma call on the
-        # original image; the initial triage already covered that view.
-        if agent is not None and seg_valid and seg.get("guided_image_path"):
-            overlay_path = seg["guided_image_path"]
-            bbox_dx = agent.diagnose_with_bbox(overlay_path)
-            updates["medgemma_bbox_diagnosis"] = bbox_dx.model_dump()
-
-        _log_node_done("cnn_with_mask", state, t0)
-        return updates
-
-    return cnn_with_mask_node
-
-
 def make_biomedclip_node(biomedclip_tool, routing_cfg: RoutingConfig = None):
     """
     BiomedCLIP node using layer-18 features (from clip.tex).

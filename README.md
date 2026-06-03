@@ -56,7 +56,6 @@ displays the prediction, clinical report, segmentation overlay, and saliency map
 triage (MedGemma)
     → cnn_classify
     → sam3_segment
-    → cnn_with_mask  (CNN on original + MedGemma on SAM3 overlay)
     → biomedclip
     → explainability  (Grad-CAM++ + Integrated Gradients)
     → verification    (MedGemma checks CNN vs saliency map)

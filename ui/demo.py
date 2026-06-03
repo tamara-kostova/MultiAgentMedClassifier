@@ -70,7 +70,6 @@ _NODE_ORDER = [
     "triage",
     "cnn_classify",
     "sam3_segment",
-    "cnn_with_mask",
     "biomedclip",
     "explainability",
     "verification",
@@ -82,7 +81,6 @@ _NODE_LABELS = {
     "triage": "MedGemma Triage",
     "cnn_classify": "CNN Classify",
     "sam3_segment": "SAM3 Segment",
-    "cnn_with_mask": "CNN + Mask",
     "biomedclip": "BiomedCLIP",
     "explainability": "Explainability",
     "explainability_skipped": "Explainability",
@@ -108,10 +106,6 @@ def _node_detail(node_name: str, update: dict) -> str:
         if seg.get("skipped"):
             return "Skipped (task not eligible for SAM3)"
         return "Mask and bounding-box overlay generated"
-    if node_name == "cnn_with_mask":
-        bbox_dx = update.get("medgemma_bbox_diagnosis") or {}
-        name = bbox_dx.get("diagnosis_name") or ""
-        return f"MedGemma bbox diagnosis: {name}" if name else "CNN re-run on masked image"
     if node_name == "biomedclip":
         br = update.get("biomedclip_result") or {}
         label = br.get("top_label", "—")
@@ -590,7 +584,7 @@ def create_demo() -> gr.Blocks:
                             """
                         )
                         report_out = gr.HTML(_REPORT_PLACEHOLDER_HTML, elem_id="report-out")
-                    with gr.Column(scale=7, min_width=280):
+                    with gr.Column(scale=10, min_width=280):
                         gr.HTML(
                             """
                             <div class="section-head">
@@ -602,7 +596,7 @@ def create_demo() -> gr.Blocks:
                         gallery_out = gr.Gallery(
                             show_label=False,
                             columns=2,
-                            height=320,
+                            height=520,
                             object_fit="contain",
                             elem_id="gallery-out",
                         )
