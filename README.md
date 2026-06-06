@@ -330,3 +330,4 @@ MultiAgentMedClassifier/
 ├── .env.example            # API key template — copy to .env and fill in HF_TOKEN
 └── requirements.txt
 ```
+![Repo Card](https://githubcard.com/tamara-kostova/MultiAgentMedClassifier.svg?d=NzYN0S3U)
