@@ -47,7 +47,7 @@ def make_triage_node(agent, routing_cfg: RoutingConfig = None):
     """
     def triage_node(state: NeuroimagingState) -> dict:
         t0 = _log_node_start("triage", state)
-        dx, routing = agent.diagnose(state["image_path"])
+        dx, routing = agent.diagnose(state["image_path"], task=state["task"])
         _log_node_done("triage", state, t0)
 
         return {

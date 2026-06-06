@@ -50,7 +50,7 @@ from config import (
     resolve_torch_device,
 )
 from eval.evaluate import compare_configurations, load_test_split, run_single
-from eval.tumor_eval import LABEL_MAPS, run_tumor_eval
+from eval.tumor_eval import LABEL_MAPS, TASK_DEFAULT_LABEL_MAP, run_dataset_eval
 from pipeline.graph import build_pipeline
 from dotenv import load_dotenv
 
@@ -72,6 +72,14 @@ def parse_args():
             "outputs from every model. Resumes from partial runs automatically."
         ),
     )
+    mode.add_argument(
+        "--dataset_eval",
+        action="store_true",
+        help=(
+            "Run resumable rich JSONL evaluation on any single class-folder "
+            "dataset, including MS and stroke."
+        ),
+    )
 
     # Single image
     p.add_argument(
@@ -87,7 +95,7 @@ def parse_args():
     p.add_argument("--ms_dir", type=str, default=None)
     p.add_argument("--stroke_dir", type=str, default=None)
 
-    # Tumor-eval mode
+    # Resumable single-dataset eval mode
     p.add_argument(
         "--tumor_eval_dir",
         type=str,
@@ -101,20 +109,34 @@ def parse_args():
         help="Output JSONL path for --tumor_eval (default: outputs/eval/<task>_tumor_eval.jsonl)",
     )
     p.add_argument(
+        "--dataset_eval_dir",
+        type=str,
+        default=None,
+        help="Dataset root for --dataset_eval: <dir>/<class>/<image.*>",
+    )
+    p.add_argument(
+        "--dataset_eval_output",
+        type=str,
+        default=None,
+        help="Output JSONL path for --dataset_eval",
+    )
+    p.add_argument(
         "--max_samples",
         type=int,
         default=None,
-        help="For --tumor_eval: stop after this many images total across all runs.",
+        help="For resumable eval: stop after this many images total across all runs.",
     )
     p.add_argument(
         "--label_map",
         type=str,
-        default="figshare3",
-        choices=["figshare3", "br35h", "none"],
+        default="auto",
+        choices=["auto", *LABEL_MAPS.keys(), "none"],
         help=(
-            "For --tumor_eval: label mapping preset. "
-            "'figshare3' maps 1/2/3 → meningioma/glioma/pituitary (default). "
+            "For resumable eval: label mapping preset. "
+            "'auto' selects a default from --task. "
+            "'figshare3' maps 1/2/3 → meningioma/glioma/pituitary. "
             "'br35h' maps yes/no → brain tumor MRI/normal brain MRI. "
+            "'ms_binary' and 'stroke_binary' map common binary folders. "
             "'none' uses raw folder names as labels."
         ),
     )
@@ -282,6 +304,21 @@ def build_config(args) -> PipelineConfig:
     )
 
 
+def _resolve_label_map(label_map_name: str, task: str) -> dict[str, str]:
+    if label_map_name == "none":
+        return {}
+    if label_map_name == "auto":
+        default_name = TASK_DEFAULT_LABEL_MAP.get(task)
+        return LABEL_MAPS.get(default_name, {})
+    return LABEL_MAPS[label_map_name]
+
+
+def _default_resumable_eval_output(args, cfg: PipelineConfig, task: str) -> Path:
+    suffix = "tumor_eval" if args.tumor_eval else "dataset_eval"
+    shot = "_few_shot" if args.few_shot else ""
+    return Path(f"{cfg.output_dir}/eval/{task}{shot}_{suffix}.jsonl")
+
+
 def main():
     args = parse_args()
     cfg = build_config(args)
@@ -303,20 +340,29 @@ def main():
             save_output=True,
         )
 
-    elif args.tumor_eval:
-        # ── Tumor dataset eval mode (JSONL, resumable, all models) ───────────
-        if not args.tumor_eval_dir:
-            print("Error: --tumor_eval requires --tumor_eval_dir")
+    elif args.tumor_eval or args.dataset_eval:
+        # ── Single dataset eval mode (JSONL, resumable, all models) ──────────
+        data_dir = args.dataset_eval_dir or args.tumor_eval_dir
+        if not data_dir:
+            flag = "--dataset_eval_dir" if args.dataset_eval else "--tumor_eval_dir"
+            print(f"Error: {flag} is required")
             return
+
+        task = args.task or ("multiclass_tumor" if args.tumor_eval else None)
+        if task is None:
+            print("Error: --task is required with --dataset_eval")
+            return
+
         output_file = Path(
-            args.tumor_eval_output
-            or f"{cfg.output_dir}/eval/{args.task or 'multiclass_tumor'}_tumor_eval.jsonl"
+            args.dataset_eval_output
+            or args.tumor_eval_output
+            or _default_resumable_eval_output(args, cfg, task)
         )
-        label_map = LABEL_MAPS.get(args.label_map) if args.label_map != "none" else None
-        run_tumor_eval(
+        label_map = _resolve_label_map(args.label_map, task)
+        run_dataset_eval(
             app=app,
-            data_dir=args.tumor_eval_dir,
-            task=args.task or "multiclass_tumor",
+            data_dir=data_dir,
+            task=task,
             output_file=output_file,
             label_map=label_map,
             max_samples=args.max_samples,

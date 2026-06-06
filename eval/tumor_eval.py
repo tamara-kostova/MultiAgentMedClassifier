@@ -1,15 +1,23 @@
 """
-Resumable full-pipeline evaluation on a single tumor dataset.
+Resumable full-pipeline evaluation on a single class-folder dataset.
 
 Supported datasets
 ------------------
-Figshare 3-class (data/processed)          --label_map figshare3  [default]
+Figshare 3-class (data/processed)          --label_map figshare3
   Folders: 1/ = meningioma, 2/ = glioma, 3/ = pituitary
   Task:    multiclass_tumor
 
 Br35H binary (data/Br35H)                  --label_map br35h
   Folders: yes/ = brain tumor MRI, no/ = normal brain MRI
   Task:    binary_tumor
+
+MS binary                                  --label_map ms_binary
+  Common folders: MS/ = ms, Control/Normal/ = normal
+  Task:           ms
+
+Stroke binary                              --label_map stroke_binary
+  Common folders: Stroke/Bleeding/Ischemic = stroke, Normal = normal
+  Task:           stroke
 
 Any other <dataset_dir>/<class>/<image.*>  --label_map none
   Raw folder names used as labels.
@@ -48,7 +56,7 @@ from pipeline.state import NeuroimagingState, initial_state
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 
 # Numeric label → class name for the Figshare 3-class tumor dataset.
-# Override by passing label_map= to run_tumor_eval().
+# Override by passing label_map= to run_tumor_eval()/run_dataset_eval().
 FIGSHARE_3CLASS_MAP: dict[str, str] = {
     "1": "meningioma",
     "2": "glioma",
@@ -61,14 +69,58 @@ BR35H_LABEL_MAP: dict[str, str] = {
     "no": "normal brain MRI",
 }
 
+MS_BINARY_LABEL_MAP: dict[str, str] = {
+    "MS": "ms",
+    "ms": "ms",
+    "Multiple Sclerosis": "ms",
+    "multiple sclerosis": "ms",
+    "MS Saggital_crop": "ms",
+    "MS Axial_crop": "ms",
+    "Control": "normal",
+    "control": "normal",
+    "Normal": "normal",
+    "normal": "normal",
+    "Control Saggital_crop": "normal",
+    "Control Axial_crop": "normal",
+}
+
+STROKE_BINARY_LABEL_MAP: dict[str, str] = {
+    "Stroke": "stroke",
+    "stroke": "stroke",
+    "Ischemia": "stroke",
+    "Ischemic": "stroke",
+    "ischemic": "stroke",
+    "ischemia": "stroke",
+    "Hemorrhagic": "stroke",
+    "hemorrhagic": "stroke",
+    "Bleeding": "stroke",
+    "bleeding": "stroke",
+    "Infarct": "stroke",
+    "infarct": "stroke",
+    "Normal": "normal",
+    "normal": "normal",
+    "Control": "normal",
+    "control": "normal",
+}
+
 LABEL_MAPS: dict[str, dict[str, str]] = {
     "figshare3": FIGSHARE_3CLASS_MAP,
     "br35h": BR35H_LABEL_MAP,
+    "ms_binary": MS_BINARY_LABEL_MAP,
+    "stroke_binary": STROKE_BINARY_LABEL_MAP,
+}
+
+TASK_DEFAULT_LABEL_MAP: dict[str, str] = {
+    "binary_tumor": "br35h",
+    "multiclass_tumor": "figshare3",
+    "ms": "ms_binary",
+    "stroke": "stroke_binary",
 }
 
 # Directory names that are never class folders (annotations, predictions, etc.)
 _DEFAULT_EXCLUDE_DIRS: frozenset[str] = frozenset({
     "pred", "Br35H-Mask-RCNN", "annotations", "__pycache__", ".DS_Store",
+    "External_Test",
 })
 
 
@@ -77,7 +129,7 @@ def load_dataset(
     task: str,
     exclude_dirs: set[str] | None = None,
 ) -> list[dict]:
-    """Scan <data_dir>/<class>/<image.*> (case-insensitive extensions).
+    """Scan <data_dir>/<class>/**/<image.*> (case-insensitive extensions).
 
     Automatically skips directories whose names end with '_mask' or appear
     in exclude_dirs (defaults to _DEFAULT_EXCLUDE_DIRS).
@@ -90,7 +142,7 @@ def load_dataset(
             continue
         if class_dir.name.endswith("_mask") or class_dir.name in excluded:
             continue
-        for img_file in sorted(class_dir.iterdir()):
+        for img_file in sorted(class_dir.rglob("*")):
             if img_file.suffix.lower() in IMAGE_EXTENSIONS:
                 samples.append(
                     {
@@ -122,6 +174,70 @@ def _class_counts(samples: list[dict]) -> dict[str, int]:
     for sample in samples:
         counts[sample["label"]] = counts.get(sample["label"], 0) + 1
     return counts
+
+
+_TUMOR_SUBTYPES = (
+    "carcinoma",
+    "germinoma",
+    "glioma",
+    "granuloma",
+    "medulloblastoma",
+    "meningioma",
+    "neurocytoma",
+    "papilloma",
+    "schwannoma",
+    "tuberculoma",
+)
+
+
+def canonical_label(value: object, task: str | None = None) -> str:
+    """Normalize labels/predictions so metrics survive wording differences."""
+    text = str(value or "").strip().lower()
+    if not text:
+        return ""
+
+    normalized = (
+        text.replace("_", " ")
+        .replace("-", " ")
+        .replace("/", " ")
+        .replace("tumour", "tumor")
+    )
+
+    if "normal" in normalized or "control" in normalized:
+        return "normal"
+    if (
+        normalized == "ms"
+        or normalized.startswith("ms ")
+        or " multiple sclerosis" in f" {normalized}"
+    ):
+        return "ms"
+    if any(
+        token in normalized
+        for token in ("stroke", "ischemic", "ischemia", "hemorrhagic", "bleeding", "infarct")
+    ):
+        return "stroke"
+
+    tumor_subtype = next(
+        (subtype for subtype in _TUMOR_SUBTYPES if subtype in normalized),
+        None,
+    )
+    tumorish = (
+        tumor_subtype is not None
+        or "pituitary" in normalized
+        or "brain tumor" in normalized
+        or normalized == "tumor"
+        or " tumor" in normalized
+    )
+    if task == "binary_tumor" and tumorish:
+        return "tumor"
+    if "pituitary" in normalized:
+        return "pituitary_tumor"
+    if tumor_subtype is not None:
+        return tumor_subtype
+    if tumorish:
+        return "tumor"
+
+    return text
 
 
 def load_processed_paths(jsonl_path: Path) -> set[str]:
@@ -160,16 +276,20 @@ def extract_row(
 
     raw_label = sample["label"]
     label_name = (label_map or {}).get(raw_label, raw_label)
+    predicted_class = final_state.get("final_predicted_class")
+    cnn_predicted_class = cnn.get("predicted_class")
 
     return {
         # ── Identity ──────────────────────────────────────────────────────────
         "image_path": sample["image_path"],
         "true_label": raw_label,
         "true_label_name": label_name,
+        "true_label_canonical": canonical_label(label_name, sample["task"]),
         "task": sample["task"],
         "timestamp": datetime.now(timezone.utc).isoformat(),
         # ── Final prediction ──────────────────────────────────────────────────
-        "predicted_class": final_state.get("final_predicted_class"),
+        "predicted_class": predicted_class,
+        "predicted_class_canonical": canonical_label(predicted_class, sample["task"]),
         "final_confidence": final_state.get("final_confidence", 0.0),
         "requires_human_review": final_state.get("requires_human_review", False),
         # ── Routing ───────────────────────────────────────────────────────────
@@ -183,7 +303,10 @@ def extract_row(
         "medgemma_bbox_diagnosis": final_state.get("medgemma_bbox_diagnosis"),
         "final_medgemma_diagnosis": final_state.get("final_medgemma_diagnosis"),
         # ── CNN ───────────────────────────────────────────────────────────────
-        "cnn_predicted_class": cnn.get("predicted_class"),
+        "cnn_predicted_class": cnn_predicted_class,
+        "cnn_predicted_class_canonical": canonical_label(
+            cnn_predicted_class, sample["task"]
+        ),
         "cnn_confidence": cnn.get("confidence"),
         "cnn_all_probs": cnn.get("all_probs"),
         # ── SAM3 ──────────────────────────────────────────────────────────────
@@ -242,29 +365,34 @@ def print_summary(rows: list[dict]) -> None:
             print(f"  First error: {err[0]['error']}")
         return
 
-    y_true = [r.get("true_label_name") or r["true_label"] for r in ok]
-    y_pred_raw = [r.get("predicted_class") or "" for r in ok]
-
-    classes = sorted(set(y_true))
-    y_pred = []
-    for p in y_pred_raw:
-        matched = next((c for c in classes if c.lower() in p.lower()), p)
-        y_pred.append(matched)
+    y_true = [
+        r.get("true_label_canonical")
+        or canonical_label(r.get("true_label_name") or r["true_label"], r.get("task"))
+        for r in ok
+    ]
+    y_pred = [
+        r.get("predicted_class_canonical")
+        or canonical_label(r.get("predicted_class"), r.get("task"))
+        for r in ok
+    ]
+    y_cnn = [
+        r.get("cnn_predicted_class_canonical")
+        or canonical_label(r.get("cnn_predicted_class"), r.get("task"))
+        for r in ok
+    ]
 
     acc = accuracy_score(y_true, y_pred)
     f1 = f1_score(y_true, y_pred, average="macro", zero_division=0)
-    cnn_acc = accuracy_score(
-        y_true,
-        [
-            next((c for c in classes if c.lower() in (r.get("cnn_predicted_class") or "").lower()), "?")
-            for r in ok
-        ],
-    )
+    cnn_acc = accuracy_score(y_true, y_cnn)
 
     sam3_rate = sum(1 for r in ok if r.get("sam3_mask_path")) / len(ok)
     clip_rate = sum(1 for r in ok if r.get("biomedclip_top_label")) / len(ok)
     expl_rate = sum(1 for r in ok if r.get("gradcam_pp_path")) / len(ok)
-    iou_vals = [r["saliency_sam3_iou"] for r in ok if r.get("saliency_sam3_iou") is not None]
+    iou_vals = [
+        r["saliency_sam3_iou"]
+        for r in ok
+        if r.get("saliency_sam3_iou") is not None
+    ]
     review_rate = sum(1 for r in ok if r.get("requires_human_review")) / len(ok)
     mean_lat = sum(r["latency_s"] for r in ok) / len(ok)
 
@@ -299,9 +427,10 @@ def run_tumor_eval(
     a prior resumed run).
 
     max_samples caps the total number of images processed across all runs combined.
+    label_map=None uses the task default; label_map={} uses raw folder names.
     """
     if label_map is None:
-        label_map = FIGSHARE_3CLASS_MAP
+        label_map = LABEL_MAPS.get(TASK_DEFAULT_LABEL_MAP.get(task, ""), {})
 
     output_file = Path(output_file)
     output_file.parent.mkdir(parents=True, exist_ok=True)
@@ -360,3 +489,6 @@ def run_tumor_eval(
     print_summary(rows_this_run)
     print(f"\nResults written to: {output_file}")
     return rows_this_run
+
+
+run_dataset_eval = run_tumor_eval

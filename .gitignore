@@ -227,3 +227,9 @@ papers/
 outputs/
 # Keep the env template (not the actual secrets)
 !.env.example
+*.tex
+*.bib
+*.db
+*.sty
+*.bst
+*.zip

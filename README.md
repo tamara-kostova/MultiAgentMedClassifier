@@ -219,6 +219,25 @@ python run_pipeline.py --tumor_eval \
 
 Writes one JSONL record per image to `outputs/eval/<task>_tumor_eval.jsonl` immediately after inference — crash-safe. Re-running the same command resumes from where it left off. Each record captures outputs from every model: MedGemma triage + final diagnosis, CNN class probabilities, SAM3 mask/bbox/dice, BiomedCLIP ranked scores, Grad-CAM++ and IG paths, SAM3/saliency IoU, verification result, and the full MedGemma report.
 
+**Single-dataset MS/stroke evaluation (resumable, 1000 images):**
+
+```bash
+python run_pipeline.py --dataset_eval \
+  --dataset_eval_dir data/stroke/Brain_Stroke_CT_Dataset \
+  --task stroke \
+  --label_map stroke_binary \
+  --max_samples 1000
+
+python run_pipeline.py --dataset_eval \
+  --dataset_eval_dir data/sclerosis/MS \
+  --task ms \
+  --label_map ms_binary \
+  --max_samples 1000
+```
+
+The generic dataset evaluator scans `<dataset>/<class>/**/<image>` and writes to
+`outputs/eval/<task>_dataset_eval.jsonl` by default.
+
 **Force SAM3 routing intent on every non-normal case** (overrides the confidence-based routing decision recorded in state):
 
 ```bash
@@ -232,7 +251,31 @@ python run_pipeline.py --image scan.png --task binary_tumor \
   --few_shot --few_shot_data_dir /path/to/data
 ```
 
-Prepends one real example image + expected JSON per class as prior conversation turns before the triage query. Examples are drawn from `few_shot_examples.csv`; missing images are skipped gracefully.
+Prepends task-relevant real example images + expected JSON as prior conversation turns before the triage query. Examples are drawn from `few_shot_examples.csv`; missing images are skipped gracefully.
+
+Few-shot evaluation uses separate default output files so it does not resume from
+zero-shot runs:
+
+```bash
+python run_pipeline.py --dataset_eval \
+  --dataset_eval_dir data/stroke/Brain_Stroke_CT_Dataset \
+  --task stroke \
+  --label_map stroke_binary \
+  --max_samples 1000 \
+  --few_shot --few_shot_data_dir data
+
+python run_pipeline.py --dataset_eval \
+  --dataset_eval_dir data/sclerosis/MS \
+  --task ms \
+  --label_map ms_binary \
+  --max_samples 1000 \
+  --few_shot --few_shot_data_dir data
+```
+
+Defaults: `outputs/eval/<task>_few_shot_dataset_eval.jsonl` for `--dataset_eval`
+and `outputs/eval/<task>_few_shot_tumor_eval.jsonl` for `--tumor_eval`.
+For tumor few-shot, rerun the same `--tumor_eval` commands and add
+`--few_shot --few_shot_data_dir data`.
 
 **Custom checkpoints / thresholds:**
 
@@ -315,7 +358,7 @@ MultiAgentMedClassifier/
 │   └── uncertainty.py      # Standalone calibration experiment script
 ├── eval/
 │   ├── evaluate.py         # Metrics: accuracy, F1, ECE, specificity, SAM3-rate, latency
-│   └── tumor_eval.py       # Resumable JSONL eval for single tumor datasets (Figshare / Br35H)
+│   └── tumor_eval.py       # Resumable JSONL eval for single class-folder datasets
 ├── prompts/
 │   ├── system_prompt.txt       # MedGemma radiologist persona + JSON schema
 │   └── system_prompt_bbox.txt  # Same schema, bbox-overlay context
@@ -323,7 +366,7 @@ MultiAgentMedClassifier/
 ├── outputs/
 │   ├── explainability/     # Saliency maps: gradcam_pp_*.png, ig_*.png
 │   ├── fhir/               # FHIR R4 bundles: fhir_<id>.json
-│   └── eval/               # comparison_summary.csv, <task>_tumor_eval.jsonl
+│   └── eval/               # comparison_summary.csv, <task>_tumor_eval.jsonl, <task>_dataset_eval.jsonl
 ├── app.py                  # Gradio web GUI (python app.py → http://localhost:7860)
 ├── config.py               # Central config dataclasses
 ├── run_pipeline.py         # CLI entry point

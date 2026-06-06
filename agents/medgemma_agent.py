@@ -301,14 +301,9 @@ class MedGemmaAgent:
         self.model.eval()
         print("[MedGemmaAgent] Model loaded.")
 
+        self._few_shot_examples_by_task: dict[str, list[tuple[Image.Image, str]]] = {}
         if self.model_cfg.use_few_shot:
-            from agents.few_shot_loader import load_few_shot_examples
-            self._few_shot_examples = load_few_shot_examples(
-                data_dir=self.model_cfg.few_shot_data_dir,
-            )
-            print(f"[MedGemmaAgent] Loaded {len(self._few_shot_examples)} few-shot examples.")
-        else:
-            self._few_shot_examples = None
+            print("[MedGemmaAgent] Few-shot triage enabled.")
 
     @staticmethod
     def _resolve_device(device_name: str) -> torch.device:
@@ -343,13 +338,20 @@ class MedGemmaAgent:
 
     # ── Primary triage (raw image) ────────────────────────────────────────────
 
-    def diagnose(self, image_path: str) -> tuple[MedicalDiagnosis, RoutingDecision]:
+    def diagnose(
+        self, image_path: str, task: str | None = None
+    ) -> tuple[MedicalDiagnosis, RoutingDecision]:
         """
         Run system_prompt.txt on the raw image.
         Returns (structured diagnosis, derived routing decision).
         """
         image = Image.open(image_path).convert("RGB")
-        dx = self._run_diagnostic_prompt(image, SYSTEM_PROMPT)
+        prompt = SYSTEM_PROMPT_FEW_SHOT if self.model_cfg.use_few_shot else SYSTEM_PROMPT
+        dx = self._run_diagnostic_prompt(
+            image,
+            prompt,
+            few_shot=self._get_few_shot_examples(task),
+        )
         routing = diagnosis_to_routing(dx, self.routing_cfg)
         return dx, routing
 
@@ -425,10 +427,13 @@ class MedGemmaAgent:
     # ── Internal helpers ──────────────────────────────────────────────────────
 
     def _run_diagnostic_prompt(
-        self, image: Image.Image, prompt: str
+        self,
+        image: Image.Image,
+        prompt: str,
+        few_shot: list[tuple[Image.Image, str]] | None = None,
     ) -> MedicalDiagnosis:
         """Run a diagnostic prompt and parse the JSON output with retries."""
-        raw = self._generate(image, prompt, few_shot=self._few_shot_examples)
+        raw = self._generate(image, prompt, few_shot=few_shot)
         for attempt in range(self.routing_cfg.max_parse_retries):
             try:
                 return self._parse_diagnosis(raw)
@@ -438,7 +443,7 @@ class MedGemmaAgent:
                         f"Your previous output was not valid JSON: {raw[:200]}\n"
                         f"Error: {e}\nOutput ONLY valid JSON matching the schema."
                     )
-                    raw = self._generate(image, prompt + "\n" + fix, few_shot=self._few_shot_examples)
+                    raw = self._generate(image, prompt + "\n" + fix, few_shot=few_shot)
                 else:
                     print(
                         f"[MedGemmaAgent] JSON parse failed after {self.routing_cfg.max_parse_retries} attempts. \n Raw output: {raw}\n Error: {e}\n Returning default diagnosis with low confidence."
@@ -454,6 +459,27 @@ class MedGemmaAgent:
                         diagnosis_confidence=0.5,
                         severity_confidence=None,
                     )
+
+    def _get_few_shot_examples(
+        self, task: str | None
+    ) -> list[tuple[Image.Image, str]] | None:
+        if not self.model_cfg.use_few_shot:
+            return None
+
+        cache_key = task or "__all__"
+        if cache_key not in self._few_shot_examples_by_task:
+            from agents.few_shot_loader import load_few_shot_examples
+
+            examples = load_few_shot_examples(
+                data_dir=self.model_cfg.few_shot_data_dir,
+                task=task,
+            )
+            self._few_shot_examples_by_task[cache_key] = examples
+            print(
+                f"[MedGemmaAgent] Loaded {len(examples)} few-shot examples "
+                f"for task={task or 'all'}."
+            )
+        return self._few_shot_examples_by_task[cache_key]
 
     def _generate(
         self,
