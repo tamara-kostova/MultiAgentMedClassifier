@@ -16,6 +16,7 @@ import tempfile
 import threading
 from html import escape
 from pathlib import Path
+from typing import Generator
 
 import gradio as gr
 from dotenv import load_dotenv
@@ -61,6 +62,116 @@ _TASK_LABELS = {
 }
 _TASK_KEYS = list(_TASK_LABELS.keys())
 _TASK_DISPLAY = [_TASK_LABELS[k] for k in _TASK_KEYS]
+
+
+# ── Pipeline stage metadata ───────────────────────────────────────────────────
+
+_NODE_ORDER = [
+    "triage",
+    "cnn_classify",
+    "sam3_segment",
+    "biomedclip",
+    "explainability",
+    "verification",
+    "report",
+    "fhir_output",
+]
+
+_NODE_LABELS = {
+    "triage": "MedGemma Triage",
+    "cnn_classify": "CNN Classify",
+    "sam3_segment": "SAM3 Segment",
+    "biomedclip": "BiomedCLIP",
+    "explainability": "Explainability",
+    "explainability_skipped": "Explainability",
+    "verification": "Verification",
+    "report": "Report",
+    "fhir_output": "FHIR Export",
+}
+
+
+def _node_detail(node_name: str, update: dict) -> str:
+    """Return a one-line human-readable summary of a node's state update."""
+    if node_name == "triage":
+        pathology = update.get("suspected_pathology") or ""
+        conf = update.get("routing_confidence", 0.0)
+        return f"Suspected: {pathology or '—'}  ·  Routing confidence {conf:.0%}"
+    if node_name == "cnn_classify":
+        cr = update.get("classification_result") or {}
+        cls = cr.get("predicted_class", "—")
+        conf = cr.get("confidence", 0.0)
+        return f"Predicted: {cls}  ·  Confidence {conf:.0%}"
+    if node_name == "sam3_segment":
+        seg = update.get("segmentation_result") or {}
+        if seg.get("skipped"):
+            return "Skipped (task not eligible for SAM3)"
+        return "Mask and bounding-box overlay generated"
+    if node_name == "biomedclip":
+        br = update.get("biomedclip_result") or {}
+        label = br.get("top_label", "—")
+        score = br.get("top_score", 0.0)
+        return f"Top label: {label}  ·  Score {score:.2f}"
+    if node_name in ("explainability", "explainability_skipped"):
+        iou = update.get("saliency_sam3_iou")
+        empty = update.get("sam3_mask_empty", False)
+        if node_name == "explainability_skipped":
+            return "Skipped (eval mode)"
+        if iou is not None:
+            return f"Grad-CAM++ + IG generated  ·  GradCAM/SAM3 IoU {iou:.3f}"
+        if empty:
+            return "Grad-CAM++ + IG generated  ·  SAM3 mask empty (IoU skipped)"
+        return "Grad-CAM++ and Integrated Gradients generated"
+    if node_name == "verification":
+        vr = update.get("verification_result") or {}
+        agreement = vr.get("agreement")
+        if agreement is None:
+            return "No saliency map — skipped"
+        return "MedGemma agrees with CNN" if agreement else "MedGemma disagrees — confidence capped"
+    if node_name == "report":
+        cls = update.get("final_predicted_class") or "—"
+        conf = update.get("final_confidence", 0.0)
+        review = update.get("requires_human_review", False)
+        tag = "  ·  ⚠ Human review required" if review else ""
+        return f"Final: {cls}  ·  Confidence {conf:.0%}{tag}"
+    if node_name == "fhir_output":
+        return "Diagnostic Report written"
+    return ""
+
+
+def _build_progress_html(completed: list[str], current: str | None) -> str:
+    """Render the pipeline stepper and last-node detail card."""
+    completed_set = set(completed)
+
+    steps_html = []
+    for key in _NODE_ORDER:
+        label = _NODE_LABELS.get(key, key)
+        norm_current = (
+            "explainability" if current in ("explainability", "explainability_skipped") else current
+        )
+        norm_key = "explainability" if key == "explainability_skipped" else key
+
+        if norm_key in {("explainability" if c in ("explainability", "explainability_skipped") else c) for c in completed_set}:
+            state_cls = "step-done"
+            dot = "✓"
+        elif norm_key == norm_current:
+            state_cls = "step-active"
+            dot = '<span class="step-pulse"></span>'
+        else:
+            state_cls = "step-pending"
+            dot = ""
+
+        steps_html.append(
+            f'<div class="pipeline-step {state_cls}">'
+            f'<span class="step-dot">{dot}</span>'
+            f'<span class="step-label">{escape(label)}</span>'
+            f"</div>"
+        )
+
+    steps = "\n".join(steps_html)
+    return f'<div class="pipeline-track">{steps}</div>'
+
+
+_PROGRESS_PLACEHOLDER = '<div class="pipeline-track pipeline-track-idle"><span class="step-label">Run the pipeline to see live stage progress.</span></div>'
 
 
 # ── UI copy helpers ──────────────────────────────────────────────────────────
@@ -212,19 +323,27 @@ def _build_report_html(report: str | None) -> str:
 
 # ── Core inference function ───────────────────────────────────────────────────
 
-def run_pipeline(image_path: str | None, task_display: str) -> tuple:
-    """Called by Gradio on button click. Returns (summary_html, report_html, images, fhir_html)."""
+def run_pipeline(
+    image_path: str | None, task_display: str
+) -> Generator[tuple, None, None]:
+    """Streaming generator called by Gradio on button click.
 
+    Yields (progress_html, summary_html, report_html, images, fhir_html) after
+    each pipeline node so the UI updates in real time.
+    """
     if image_path is None:
-        return (
+        yield (
+            _PROGRESS_PLACEHOLDER,
             _build_notice_html("Please upload a brain scan image first."),
             _REPORT_PLACEHOLDER_HTML,
             [],
             "",
         )
+        return
 
     if not _pipeline_ready.wait(timeout=600):
-        return (
+        yield (
+            _PROGRESS_PLACEHOLDER,
             _build_notice_html(
                 "Models are still loading. Please wait a moment and try again.",
                 tone="neutral",
@@ -233,22 +352,27 @@ def run_pipeline(image_path: str | None, task_display: str) -> tuple:
             [],
             "",
         )
+        return
 
     if _pipeline_error:
-        return (
+        yield (
+            _PROGRESS_PLACEHOLDER,
             _build_notice_html("Pipeline failed to load.", tone="error", detail=_pipeline_error),
             _REPORT_PLACEHOLDER_HTML,
             [],
             "",
         )
+        return
 
     if not _pipeline:
-        return (
+        yield (
+            _PROGRESS_PLACEHOLDER,
             _build_notice_html("Pipeline not available.", tone="error"),
             _REPORT_PLACEHOLDER_HTML,
             [],
             "",
         )
+        return
 
     task = _TASK_KEYS[_TASK_DISPLAY.index(task_display)]
 
@@ -259,26 +383,60 @@ def run_pipeline(image_path: str | None, task_display: str) -> tuple:
         shutil.copy(image_path, tmp.name)
         tmp_path = tmp.name
 
+    completed_nodes: list[str] = []
+    accumulated: dict = {}
+
     try:
         state = initial_state(tmp_path, task)
-        result = _pipeline.invoke(state)
+        accumulated = dict(state)
+
+        for chunk in _pipeline.stream(state):
+            for node_name, update in chunk.items():
+                accumulated.update(update)
+                completed_nodes.append(node_name)
+
+                detail = _node_detail(node_name, update)
+                label = _NODE_LABELS.get(node_name, node_name)
+                detail_html = (
+                    f'<div class="node-detail">'
+                    f'<span class="node-detail-label">{escape(label)}</span>'
+                    f'<span class="node-detail-text">{escape(detail)}</span>'
+                    f"</div>"
+                    if detail
+                    else ""
+                )
+                progress_html = (
+                    _build_progress_html(completed_nodes[:-1], node_name) + detail_html
+                )
+
+                yield (
+                    progress_html,
+                    _SUMMARY_PLACEHOLDER,
+                    _REPORT_PLACEHOLDER_HTML,
+                    [],
+                    "",
+                )
+
     except Exception as exc:
-        return (
+        yield (
+            _PROGRESS_PLACEHOLDER,
             _build_notice_html("Inference error.", tone="error", detail=str(exc)),
             _REPORT_PLACEHOLDER_HTML,
             [],
             "",
         )
+        return
     finally:
         try:
             os.unlink(tmp_path)
         except OSError:
             pass
 
+    result = accumulated
     prediction = result.get("final_predicted_class") or "unknown"
     confidence = result.get("final_confidence", 0.0)
     review = result.get("requires_human_review", False)
-    route = " -> ".join(result.get("routing_path", []))
+    route = " → ".join(result.get("routing_path", []))
     report = result.get("final_report") or "No report generated."
     report_html = _build_report_html(report)
     iou = result.get("saliency_sam3_iou")
@@ -306,7 +464,8 @@ def run_pipeline(image_path: str | None, task_display: str) -> tuple:
             break
 
     fhir_html = _build_fhir_html(fhir_status)
-    return summary_html, report_html, images, fhir_html
+    final_progress = _build_progress_html(completed_nodes, None)
+    yield final_progress, summary_html, report_html, images, fhir_html
 
 
 def get_model_status() -> str:
@@ -350,11 +509,7 @@ _theme = gr.themes.Base(
 
 
 def create_demo() -> gr.Blocks:
-    with gr.Blocks(
-        title="Multi-Agent Neuroimaging Classifier",
-        theme=_theme,
-        css=_load_css(),
-    ) as app:
+    with gr.Blocks(title="Multi-Agent Neuroimaging Classifier") as app:
         gr.HTML(_HERO_HTML)
 
         model_status = gr.HTML(get_model_status(), elem_id="status-box")
@@ -415,6 +570,7 @@ def create_demo() -> gr.Blocks:
                     </p>
                     """
                 )
+                progress_out = gr.HTML(_PROGRESS_PLACEHOLDER, elem_id="progress-out")
                 summary_out = gr.HTML(_SUMMARY_PLACEHOLDER, elem_id="summary-out")
                 fhir_out = gr.HTML("", elem_id="fhir-out")
                 with gr.Row(equal_height=False, elem_classes=["output-grid"]):
@@ -428,7 +584,7 @@ def create_demo() -> gr.Blocks:
                             """
                         )
                         report_out = gr.HTML(_REPORT_PLACEHOLDER_HTML, elem_id="report-out")
-                    with gr.Column(scale=7, min_width=280):
+                    with gr.Column(scale=10, min_width=280):
                         gr.HTML(
                             """
                             <div class="section-head">
@@ -440,7 +596,7 @@ def create_demo() -> gr.Blocks:
                         gallery_out = gr.Gallery(
                             show_label=False,
                             columns=2,
-                            height=320,
+                            height=520,
                             object_fit="contain",
                             elem_id="gallery-out",
                         )
@@ -448,7 +604,7 @@ def create_demo() -> gr.Blocks:
         run_btn.click(
             fn=run_pipeline,
             inputs=[image_input, task_input],
-            outputs=[summary_out, report_out, gallery_out, fhir_out],
+            outputs=[progress_out, summary_out, report_out, gallery_out, fhir_out],
         )
 
         app.load(fn=get_model_status, outputs=model_status)
@@ -460,4 +616,10 @@ demo = create_demo()
 
 
 def launch() -> None:
-    demo.launch(server_name="0.0.0.0", server_port=7860, share=False)
+    demo.launch(
+        server_name="0.0.0.0",
+        server_port=7860,
+        share=False,
+        theme=_theme,
+        css=_load_css(),
+    )
