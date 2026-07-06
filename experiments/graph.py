@@ -30,6 +30,8 @@ from experiments.analysis import (
     ablation_summary,
     calibration_by_routing_path,
     calibration_per_task,
+    debate_round_analysis,
+    forest_voting_analysis,
     load_sweep_predictions,
     medgemma_agreement_analysis,
     per_class_failure_breakdown,
@@ -120,6 +122,10 @@ def analyze_results(state: ResearchState) -> dict:
         analysis["medgemma_agreement"] = medgemma_agreement_analysis(preds_df)
         analysis["calibration_per_task"] = calibration_per_task(preds_df)
         analysis["per_class_failures"] = per_class_failure_breakdown(preds_df)
+        # System C / System B analyses — return empty DataFrames (skipped in the
+        # report) unless the sweep's predictions carry forest / debate columns.
+        analysis["forest_voting"] = forest_voting_analysis(preds_df)
+        analysis["debate_rounds"] = debate_round_analysis(preds_df)
 
     return {"analysis": analysis}
 
@@ -150,6 +156,8 @@ def write_report(state: ResearchState) -> dict:
         ("medgemma_agreement",      "## MedGemma–CNN Agreement Analysis"),
         ("calibration_per_task",    "## Calibration per Task"),
         ("per_class_failures",      "## Per-Class Failure Breakdown"),
+        ("forest_voting",           "## Agent Forest — Voting Quality (dissent vs. accuracy)"),
+        ("debate_rounds",           "## Multi-Agent Debate — Round Analysis (verdict stability vs. ECE)"),
     ]
 
     for key, heading in _TABLE_ORDER:
