@@ -51,10 +51,40 @@ class ResearchState(TypedDict):
     output_base: str
     base_cfg: Any                   # PipelineConfig
     preloaded_agents: Any           # tuple from load_agents()
+    max_samples: Optional[int]      # cap per task (class-balanced); None = all
+    point_ids: Optional[list]       # run only these experiment_ids; None = whole family
     results_dir: str
     sweep_summary: Optional[Any]    # pd.DataFrame
     analysis: dict                  # {name: pd.DataFrame}
     report_md: str
+
+
+def _cap_samples_balanced(samples: list, max_samples: Optional[int]) -> list:
+    """
+    Cap a sample list to at most max_samples, round-robin across class labels so
+    the subset keeps class balance (load_test_split returns samples grouped by
+    class, so a naive samples[:N] would only cover the first class).
+    """
+    if max_samples is None or len(samples) <= max_samples:
+        return samples
+    by_label: dict[str, list] = {}
+    for s in samples:
+        by_label.setdefault(s["label"], []).append(s)
+    label_lists = list(by_label.values())
+    capped: list = []
+    idx = 0
+    while len(capped) < max_samples:
+        progressed = False
+        for lst in label_lists:
+            if idx < len(lst):
+                capped.append(lst[idx])
+                progressed = True
+                if len(capped) >= max_samples:
+                    break
+        if not progressed:
+            break
+        idx += 1
+    return capped
 
 
 # ── Node functions ─────────────────────────────────────────────────────────────
@@ -73,10 +103,23 @@ def plan_experiments(state: ResearchState) -> dict:
     results_dir = f"{state['output_base']}/{family}_{timestamp}"
 
     points = EXPERIMENT_FAMILIES[family]
+    point_ids = state.get("point_ids")
+    if point_ids:
+        wanted = set(point_ids)
+        points = [p for p in points if p.experiment_id in wanted]
+        if not points:
+            available = [p.experiment_id for p in EXPERIMENT_FAMILIES[family]]
+            raise ValueError(
+                f"No sweep points in family '{family}' match {sorted(wanted)}. "
+                f"Available: {available}"
+            )
+
+    max_samples = state.get("max_samples")
     lines = [
         f"\n{'#'*60}",
         f"# Research plan: {family}",
         f"#   Sweep points : {len(points)}",
+        f"#   Max samples  : {max_samples if max_samples is not None else 'all'}",
         f"#   Output dir   : {results_dir}",
         f"#   Datasets     : {sorted(state['dataset_dirs'].keys())}",
         f"#   Points:",
@@ -91,16 +134,19 @@ def plan_experiments(state: ResearchState) -> dict:
 
 def run_experiments(state: ResearchState) -> dict:
     """Load test samples and run all sweep points via runner.run_experiment_family."""
-    test_datasets = {
-        task: load_test_split(d, task)
-        for task, d in state["dataset_dirs"].items()
-    }
+    max_samples = state.get("max_samples")
+    test_datasets = {}
+    for task, d in state["dataset_dirs"].items():
+        samples = _cap_samples_balanced(load_test_split(d, task), max_samples)
+        test_datasets[task] = samples
+        print(f"[run_experiments] task={task}: {len(samples)} samples")
     sweep_summary = run_experiment_family(
         family_name=state["experiment_family"],
         test_datasets=test_datasets,
         output_dir=state["results_dir"],
         preloaded_agents=state["preloaded_agents"],
         base_cfg=state["base_cfg"],
+        only_points=state.get("point_ids"),
     )
     return {"sweep_summary": sweep_summary}
 

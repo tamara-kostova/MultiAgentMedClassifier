@@ -374,6 +374,70 @@ def section_latency(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def section_forest_voting(df: pd.DataFrame, task: str) -> pd.DataFrame:
+    """
+    Agent Forest voting quality — dissent rate vs. accuracy.
+
+    Empty unless the JSONL carries a `dissent_rate` column (i.e. it was produced by
+    `--pipeline_mode forest`). Shows whether agent disagreement flags harder cases:
+    accuracy on unanimous vs. split votes.
+    """
+    if "dissent_rate" not in df.columns or df["dissent_rate"].isna().all():
+        return pd.DataFrame()
+    sub = df[df["dissent_rate"].notna()].copy()
+    gt = [prep(str(v or ""), task) for v in sub["true_label_canonical"].fillna("")]
+    pr = [prep(str(v or ""), task) for v in sub["predicted_class_canonical"].fillna("")]
+    correct = np.array([int(t == p) for t, p in zip(gt, pr)], dtype=float)
+    dissent = sub["dissent_rate"].astype(float).values
+    unan, split = dissent == 0.0, dissent > 0.0
+
+    def _acc(mask, min_n=1):
+        return round(float(correct[mask].mean()), 4) if mask.sum() >= min_n else float("nan")
+
+    return pd.DataFrame([{
+        "n": len(sub),
+        "mean_dissent_rate": round(float(dissent.mean()), 4),
+        "unanimous_pct": round(float(unan.mean()) * 100, 1),
+        "accuracy_unanimous": _acc(unan),
+        "accuracy_split": _acc(split, min_n=5),
+        "accuracy_overall": round(float(correct.mean()), 4),
+    }])
+
+
+def section_debate_rounds(df: pd.DataFrame, task: str) -> pd.DataFrame:
+    """
+    Multi-Agent Debate — verdict stability vs. accuracy/ECE.
+
+    Empty unless the JSONL carries a `debate_rounds_completed` column (i.e. it was
+    produced by `--pipeline_mode debate`). Shows whether cases whose verdict flipped
+    across rounds are less accurate / worse calibrated than stable ones.
+    """
+    if "debate_rounds_completed" not in df.columns or df["debate_rounds_completed"].isna().all():
+        return pd.DataFrame()
+    sub = df[df["debate_rounds_completed"].notna()].copy()
+    gt = [prep(str(v or ""), task) for v in sub["true_label_canonical"].fillna("")]
+    pr = [prep(str(v or ""), task) for v in sub["predicted_class_canonical"].fillna("")]
+    correct = np.array([int(t == p) for t, p in zip(gt, pr)], dtype=float)
+    confs = np.clip(sub["final_confidence"].astype(float).fillna(0.0).values, 0, 1)
+    changed = sub["debate_round_changed"].fillna(False).astype(bool).values
+
+    def _acc(mask):
+        return round(float(correct[mask].mean()), 4) if mask.sum() >= 5 else float("nan")
+
+    def _ece(mask):
+        return round(compute_ece(confs[mask], correct[mask]), 4) if mask.sum() >= 5 else float("nan")
+
+    return pd.DataFrame([{
+        "n": len(sub),
+        "pct_verdict_changed": round(float(changed.mean()) * 100, 1),
+        "accuracy_changed": _acc(changed),
+        "accuracy_unchanged": _acc(~changed),
+        "ece_changed": _ece(changed),
+        "ece_unchanged": _ece(~changed),
+        "ece_overall": round(compute_ece(confs, correct), 4),
+    }])
+
+
 # ── plot helpers ───────────────────────────────────────────────────────────────
 
 def _save(fig: plt.Figure, path: Path) -> None:
@@ -740,12 +804,26 @@ def main() -> None:
     lat_df = section_latency(df)
     print(lat_df.to_string(index=False))
 
+    forest_df = section_forest_voting(df, task)
+    if not forest_df.empty:
+        print("\n══ Agent Forest — voting quality (dissent vs. accuracy) ══")
+        print(forest_df.to_string(index=False))
+
+    debate_df = section_debate_rounds(df, task)
+    if not debate_df.empty:
+        print("\n══ Multi-Agent Debate — round analysis (verdict stability vs. ECE) ══")
+        print(debate_df.to_string(index=False))
+
     # ── save CSVs ──────────────────────────────────────────────────────────────
     print("\nSaving CSVs...")
     accuracy_df.to_csv(out / "model_accuracy_summary.csv", index=False)
     shift_df.to_csv(out / "medgemma_shift_analysis.csv",   index=False)
     calib_df.to_csv(out / "confidence_calibration_summary.csv", index=False)
     lat_df.to_csv(out / "latency_stats.csv", index=False)
+    if not forest_df.empty:
+        forest_df.to_csv(out / "forest_voting_quality.csv", index=False)
+    if not debate_df.empty:
+        debate_df.to_csv(out / "debate_round_analysis.csv", index=False)
     for name, bins in bins_dict.items():
         bins.to_csv(out / f"calibration_bins_{name}.csv", index=False)
     for name, cm_df in cm_dict.items():

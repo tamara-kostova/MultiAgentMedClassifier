@@ -33,7 +33,22 @@ from sklearn.metrics import (
 )
 
 from config import DEFAULT_CONFIG, TASKS
+from eval.tumor_eval import LABEL_MAPS, TASK_DEFAULT_LABEL_MAP, canonical_label
 from pipeline.state import NeuroimagingState, initial_state
+
+
+def _canonical_true_label(raw_label: str, task: str) -> str:
+    """
+    Map a raw dataset folder name to its canonical evaluation label, mirroring
+    the rich-JSONL path in eval/tumor_eval.py: apply the task's default label
+    map (e.g. figshare "1"→meningioma, Br35H "yes"→brain tumor) first, then
+    canonicalize (collapses wording/case, folds subtypes to "tumor" for the
+    binary task, etc.). Without this, metrics compare model outputs like
+    "meningioma" against raw folder names like "1" and score near-zero.
+    """
+    label_map = LABEL_MAPS.get(TASK_DEFAULT_LABEL_MAP.get(task, ""), {})
+    mapped = label_map.get(raw_label, raw_label)
+    return canonical_label(mapped, task)
 
 ConfigName = Literal["baseline_cnn", "static_sam3_cnn", "agent_pipeline"]
 
@@ -203,12 +218,20 @@ class PipelineEvaluator:
                 final_state: NeuroimagingState = self.app.invoke(state)
                 latency = time.perf_counter() - t0
 
+                predicted_class = final_state.get("final_predicted_class", "unknown")
                 row = {
                     "image_path": sample["image_path"],
                     "true_label": sample["label"],
                     "task": sample["task"],
-                    "predicted_class": final_state.get(
-                        "final_predicted_class", "unknown"
+                    "predicted_class": predicted_class,
+                    # Canonical labels so metrics survive folder-name vs model-output
+                    # wording differences (see _canonical_true_label). compute_metrics
+                    # and the sweep analysis functions prefer these when present.
+                    "true_label_canonical": _canonical_true_label(
+                        sample["label"], sample["task"]
+                    ),
+                    "predicted_class_canonical": canonical_label(
+                        predicted_class, sample["task"]
                     ),
                     "final_confidence": final_state.get("final_confidence", 0.0),
                     "routing_decision": final_state.get("routing_decision", "unknown"),
@@ -251,9 +274,15 @@ class PipelineEvaluator:
 def compute_metrics(df: pd.DataFrame) -> dict:
     """
     Compute standard and agent-specific metrics from a results DataFrame.
+
+    Uses the canonical label columns when present (written by PipelineEvaluator.run)
+    so accuracy/F1/specificity are computed on normalized labels rather than raw
+    dataset folder names. Falls back to the raw columns for older result files.
     """
-    y_true = df["true_label"].tolist()
-    y_pred = df["predicted_class"].tolist()
+    true_col = "true_label_canonical" if "true_label_canonical" in df.columns else "true_label"
+    pred_col = "predicted_class_canonical" if "predicted_class_canonical" in df.columns else "predicted_class"
+    y_true = df[true_col].tolist()
+    y_pred = df[pred_col].tolist()
 
     # Handle case where predicted class contains text descriptions (BiomedCLIP zero-shot)
     # Map back to short class names via substring matching
@@ -282,7 +311,7 @@ def compute_metrics(df: pd.DataFrame) -> dict:
         y_scores = [
             (
                 row["final_confidence"]
-                if row["predicted_class"] == positive_class
+                if row[pred_col] == positive_class
                 else 1 - row["final_confidence"]
             )
             for _, row in df.iterrows()
@@ -296,10 +325,10 @@ def compute_metrics(df: pd.DataFrame) -> dict:
     # ── Agent-specific metrics ────────────────────────────────────────────────
 
     # Specificity on normal scans (key metric — fixes specificity collapse from sam3_pipeline.tex)
-    normal_mask = df["true_label"] == "normal"
+    normal_mask = df[true_col] == "normal"
     if normal_mask.any():
-        normal_correct = df.loc[normal_mask, "predicted_class"].apply(
-            lambda x: "normal" in x.lower()
+        normal_correct = df.loc[normal_mask, pred_col].apply(
+            lambda x: "normal" in str(x).lower()
         )
         metrics["normal_specificity"] = normal_correct.mean()
 
@@ -317,7 +346,7 @@ def compute_metrics(df: pd.DataFrame) -> dict:
 
     # Calibration: proper ECE with equal-width bins
     confidences = df["final_confidence"].values
-    correct = (df["true_label"] == df["predicted_class"]).values.astype(float)
+    correct = (df[true_col] == df[pred_col]).values.astype(float)
     metrics["mean_confidence"] = float(confidences.mean())
     metrics["mean_accuracy"] = float(correct.mean())
     metrics["ece"] = compute_ece(confidences, correct, n_bins=10)

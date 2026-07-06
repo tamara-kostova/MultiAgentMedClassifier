@@ -37,6 +37,7 @@ def run_experiment_family(
     output_dir: str,
     preloaded_agents: tuple,
     base_cfg: PipelineConfig = None,
+    only_points: list[str] = None,
 ) -> pd.DataFrame:
     """
     Run every SweepPoint in a family and return a merged summary DataFrame.
@@ -47,6 +48,8 @@ def run_experiment_family(
         output_dir:        Root directory for this family's results.
         preloaded_agents:  (medgemma, cnn, sam3, clip) from load_agents().
         base_cfg:          Base PipelineConfig; defaults to DEFAULT_CONFIG.
+        only_points:       If given, run only the sweep points whose experiment_id
+                           is in this list (e.g. ["debate_r2"] for a single config).
 
     Returns:
         DataFrame with one row per (experiment_id, task), columns from
@@ -54,6 +57,16 @@ def run_experiment_family(
     """
     base_cfg = base_cfg or DEFAULT_CONFIG
     sweep_points: list[SweepPoint] = EXPERIMENT_FAMILIES[family_name]
+
+    if only_points:
+        wanted = set(only_points)
+        sweep_points = [pt for pt in sweep_points if pt.experiment_id in wanted]
+        if not sweep_points:
+            available = [pt.experiment_id for pt in EXPERIMENT_FAMILIES[family_name]]
+            raise ValueError(
+                f"No sweep points in family '{family_name}' match {sorted(wanted)}. "
+                f"Available: {available}"
+            )
 
     family_dir = Path(output_dir)
     results_dir = family_dir / "results"

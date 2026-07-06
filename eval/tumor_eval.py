@@ -330,6 +330,14 @@ def extract_row(
         "verification_agreement": verif.get("agreement"),
         "verification_alternative_dx": verif.get("alternative_diagnosis"),
         "verification_reasoning": verif.get("reasoning"),
+        # ── Agent Forest (System C) — None outside --pipeline_mode forest ─────
+        "dissent_rate": (final_state.get("forest_consensus") or {}).get("dissent_rate"),
+        "vote_fraction": (final_state.get("forest_consensus") or {}).get("vote_fraction"),
+        "forest_votes": final_state.get("forest_votes"),
+        # ── Multi-Agent Debate (System B) — None outside --pipeline_mode debate ─
+        "debate_rounds_completed": final_state.get("debate_rounds_completed"),
+        "debate_round_changed": (final_state.get("debate_verdict") or {}).get("round_changed"),
+        "debate_winner": (final_state.get("debate_verdict") or {}).get("winner"),
         # ── Full MedGemma report ──────────────────────────────────────────────
         "final_report": final_state.get("final_report"),
         # ── FHIR ──────────────────────────────────────────────────────────────
