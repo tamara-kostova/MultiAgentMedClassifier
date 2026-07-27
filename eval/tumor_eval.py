@@ -120,7 +120,7 @@ TASK_DEFAULT_LABEL_MAP: dict[str, str] = {
 # Directory names that are never class folders (annotations, predictions, etc.)
 _DEFAULT_EXCLUDE_DIRS: frozenset[str] = frozenset({
     "pred", "Br35H-Mask-RCNN", "annotations", "__pycache__", ".DS_Store",
-    "External_Test",
+    "External_Test", "OVERLAY", "DICOM", "MASKS",
 })
 
 
@@ -132,7 +132,10 @@ def load_dataset(
     """Scan <data_dir>/<class>/**/<image.*> (case-insensitive extensions).
 
     Automatically skips directories whose names end with '_mask' or appear
-    in exclude_dirs (defaults to _DEFAULT_EXCLUDE_DIRS).
+    in exclude_dirs (defaults to _DEFAULT_EXCLUDE_DIRS), at any nesting level
+    under the class folder — e.g. a sibling `OVERLAY/` (annotated duplicates
+    of `PNG/`) or `DICOM/` folder inside a class dir is skipped, not just
+    excluded top-level class names.
     """
     excluded = _DEFAULT_EXCLUDE_DIRS | (exclude_dirs or set())
     root = Path(data_dir)
@@ -143,14 +146,17 @@ def load_dataset(
         if class_dir.name.endswith("_mask") or class_dir.name in excluded:
             continue
         for img_file in sorted(class_dir.rglob("*")):
-            if img_file.suffix.lower() in IMAGE_EXTENSIONS:
-                samples.append(
-                    {
-                        "image_path": str(img_file),
-                        "label": class_dir.name,
-                        "task": task,
-                    }
-                )
+            if img_file.suffix.lower() not in IMAGE_EXTENSIONS:
+                continue
+            if excluded.intersection(img_file.relative_to(class_dir).parts[:-1]):
+                continue
+            samples.append(
+                {
+                    "image_path": str(img_file),
+                    "label": class_dir.name,
+                    "task": task,
+                }
+            )
     return samples
 
 
