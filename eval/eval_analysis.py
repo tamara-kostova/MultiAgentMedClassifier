@@ -18,6 +18,9 @@ CSVs:
   confidence_calibration_summary.csv
   calibration_bins_<model>.csv
   latency_stats.csv
+  forest_voting_quality.csv       (forest runs only)
+  forest_agent_accuracy.csv       (forest runs only)
+  debate_round_analysis.csv       (debate runs only)
 Plots:
   model_accuracy.png
   confusion_matrices.png
@@ -25,6 +28,7 @@ Plots:
   calibration_plot.png
   confidence_by_correctness.png
   latency.png
+  forest_agent_accuracy.png       (forest runs only)
 """
 
 import argparse
@@ -404,6 +408,49 @@ def section_forest_voting(df: pd.DataFrame, task: str) -> pd.DataFrame:
     }])
 
 
+def section_forest_agent_accuracy(df: pd.DataFrame, task: str) -> pd.DataFrame:
+    """
+    Agent Forest — per-role accuracy breakdown.
+
+    Empty unless the JSONL carries a `forest_votes` column (i.e. it was produced by
+    `--pipeline_mode forest`). Each role's own vote is scored against ground truth
+    the same way medgemma_initial/medgemma_final are scored (binary_metrics_row /
+    multiclass_metrics_row), so roles are directly comparable to the rest of the
+    model_accuracy table.
+    """
+    if "forest_votes" not in df.columns:
+        return pd.DataFrame()
+    sub = df[df["forest_votes"].apply(lambda v: isinstance(v, list) and len(v) > 0)]
+    if sub.empty:
+        return pd.DataFrame()
+
+    multi = is_multiclass(task)
+    pos = pos_class(task)
+    field = "diagnosis_detailed" if multi else "diagnosis_name"
+
+    gt_list = [prep(str(v or ""), task) for v in sub["true_label_canonical"].fillna("")]
+    votes_list = sub["forest_votes"].tolist()
+    roles = sorted({v.get("role") for votes in votes_list for v in votes if v.get("role")})
+
+    rows = []
+    for role in roles:
+        preds, confs = [], []
+        for votes in votes_list:
+            v = next((x for x in votes if x.get("role") == role), None)
+            raw = (v.get(field) if v else None) or ""
+            preds.append(prep(canonical_label(str(raw), task), task))
+            confs.append(v.get("diagnosis_confidence") if v else None)
+        row = (multiclass_metrics_row(gt_list, preds, role) if multi
+               else binary_metrics_row(gt_list, preds, pos, role))
+        if row:
+            valid_confs = [c for c in confs if c is not None]
+            row["mean_conf"] = (
+                round(sum(valid_confs) / len(valid_confs), 4) if valid_confs else float("nan")
+            )
+            rows.append(row)
+    return pd.DataFrame(rows)
+
+
 def section_debate_rounds(df: pd.DataFrame, task: str) -> pd.DataFrame:
     """
     Multi-Agent Debate — verdict stability vs. accuracy/ECE.
@@ -482,6 +529,52 @@ def plot_model_accuracy(accuracy_df: pd.DataFrame, task: str, out: Path) -> None
     ax.grid(axis="y", alpha=0.3)
     plt.tight_layout()
     _save(fig, out / "model_accuracy.png")
+
+
+def plot_forest_agent_accuracy(
+    forest_agent_df: pd.DataFrame, accuracy_df: pd.DataFrame, task: str, out: Path
+) -> None:
+    """Per-role forest agent metrics, grouped bars, with the majority-vote
+    (pipeline_final) accuracy overlaid as a reference line."""
+    if forest_agent_df.empty:
+        return
+    multi   = is_multiclass(task)
+    metrics = (["accuracy", "f1_macro", "f1_weighted"]
+               if multi else ["accuracy", "sensitivity", "specificity", "f1_macro"])
+    roles   = forest_agent_df["model"].tolist()
+    x       = np.arange(len(roles))
+    width   = 0.8 / len(metrics)
+    colors  = ["#2196F3", "#4CAF50", "#FF9800", "#9C27B0"]
+
+    fig, ax = plt.subplots(figsize=(max(9, len(roles) * 2.2), 6))
+    for i, (metric, color) in enumerate(zip(metrics, colors)):
+        if metric not in forest_agent_df.columns:
+            continue
+        vals = forest_agent_df[metric].astype(float).tolist()
+        bars = ax.bar(x + i * width, vals, width, label=metric, color=color, alpha=0.82)
+        for bar, v in zip(bars, vals):
+            if not np.isnan(v):
+                ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.008,
+                        f"{v:.3f}", ha="center", va="bottom", fontsize=7.5, rotation=30)
+
+    offset = width * (len(metrics) - 1) / 2
+    ax.set_xticks(x + offset)
+    ax.set_xticklabels([r.replace("_", "\n") for r in roles], fontsize=9)
+    ax.set_ylim(0, 1.2)
+    ax.set_ylabel("Score")
+    ax.set_title(f"Agent Forest — per-role vs. majority-vote accuracy ({task} task)")
+
+    final_row = accuracy_df[accuracy_df["model"] == "pipeline_final"]
+    if not final_row.empty and not np.isnan(final_row["accuracy"].iloc[0]):
+        final_acc = float(final_row["accuracy"].iloc[0])
+        ax.axhline(final_acc, color="#333333", linestyle="--", linewidth=1.4, alpha=0.85,
+                   label=f"majority vote (pipeline_final) = {final_acc:.3f}")
+
+    ax.axhline(0.5, color="gray", linestyle=":", linewidth=0.7, alpha=0.4)
+    ax.legend(loc="upper right", fontsize=9)
+    ax.grid(axis="y", alpha=0.3)
+    plt.tight_layout()
+    _save(fig, out / "forest_agent_accuracy.png")
 
 
 def plot_confusion_matrices(cm_dict: dict, task: str, out: Path) -> None:
@@ -809,6 +902,11 @@ def main() -> None:
         print("\n══ Agent Forest — voting quality (dissent vs. accuracy) ══")
         print(forest_df.to_string(index=False))
 
+    forest_agent_df = section_forest_agent_accuracy(df, task)
+    if not forest_agent_df.empty:
+        print("\n══ Agent Forest — per-role accuracy ══")
+        print(forest_agent_df.to_string(index=False))
+
     debate_df = section_debate_rounds(df, task)
     if not debate_df.empty:
         print("\n══ Multi-Agent Debate — round analysis (verdict stability vs. ECE) ══")
@@ -822,6 +920,8 @@ def main() -> None:
     lat_df.to_csv(out / "latency_stats.csv", index=False)
     if not forest_df.empty:
         forest_df.to_csv(out / "forest_voting_quality.csv", index=False)
+    if not forest_agent_df.empty:
+        forest_agent_df.to_csv(out / "forest_agent_accuracy.csv", index=False)
     if not debate_df.empty:
         debate_df.to_csv(out / "debate_round_analysis.csv", index=False)
     for name, bins in bins_dict.items():
@@ -839,6 +939,7 @@ def main() -> None:
     plot_calibration(bins_dict, task, out)
     plot_confidence_by_correctness(df, task, out)
     plot_latency(df, task, out)
+    plot_forest_agent_accuracy(forest_agent_df, accuracy_df, task, out)
 
     print(f"\nAll outputs saved to {out}/")
     for f in sorted(out.iterdir()):
