@@ -4,8 +4,8 @@
 
 ## Why this exists
 
-Martina (faculty, FCSE) will run the remaining Forest / Debate experiments on the faculty
-GPU servers **from her own account**. Her requirements, from her email:
+To run the remaining Forest / Debate experiments on
+GPU servers **from an account**. Requirements, from email:
 
 1. Send the code as **`.py` scripts** plus the **data**; she launches them.
 2. If execution is multi-step, send **exactly what to run and in what order**.
@@ -81,6 +81,22 @@ architectures):
   `tamara-kostova/multiagentmed-tumor-segmentation`
   (`tumor_segmentation/sam3/sam3_linear_probe_tumor_segmentation_best.pt`).
 
+**⚠ `pycocotools` is mandatory too** — `sam3/sam3/visualization_utils.py` and
+`sam3/sam3/train/*` import `pycocotools.mask`, and `sam3.model_builder` pulls them in, but
+upstream SAM3's `pyproject.toml` does **not** declare it. Same silent-failure mode as the
+setuptools issue. Pinned `pycocotools==2.0.11`. Also absent from this machine's `.venv`.
+Verified in a clean container build: with `setuptools<81` + `pycocotools`,
+`agents.sam3_tool._SAM_AVAILABLE == True`.
+
+**⚠ `setuptools<81` is mandatory** — upstream `sam3/sam3/model_builder.py:8` does
+`import pkg_resources`, which setuptools **removed in 81**. `agents/sam3_tool.py` catches the
+`ModuleNotFoundError` silently and just reports `_SAM_AVAILABLE=False`, so a newer setuptools
+means segmentation is skipped with no error anywhere except preflight's SAM3 line. Pinned in
+both `container.def` (the pip bootstrap) and `requirements-server.txt`.
+**This also affects this machine**: `.venv` has setuptools 82.0.1, so SAM3 cannot currently
+load locally either — run `pip install "setuptools<81"` in `.venv` to restore it. (The
+finished Forest tumour runs predate that upgrade, which is why they have masks.)
+
 **SAM3 source** — `agents/sam3_tool.py` puts `<repo>/sam3` on `sys.path` when it exists, so
 vendoring a clone of `https://github.com/facebookresearch/sam3` at `./sam3` is enough; no
 pip install, no network at build time. Asset `sam3/assets/bpe_simple_vocab_16e6.txt.gz`
@@ -94,8 +110,8 @@ typing_extensions, numpy<2) are already in the container.
 not N model copies — plus SAM3 (~3.5 GB) and CNN/BiomedCLIP (~1 GB). So: one run per
 ≥16 GB GPU; two per 40/80 GB GPU. If the server GPU is smaller, `--load_4bit`.
 
-**Data layout on the server** — Tamara ships data in the layout recorded in the existing
-JSONL `image_path` fields (confirmed by her mid-task):
+**Data layout on the server** — Ship data in the layout recorded in the existing
+JSONL `image_path` fields (confirmed):
 
 | Task | dir | class folders |
 |---|---|---|
@@ -125,13 +141,13 @@ re-run baselines in this campaign — so **the stroke baseline must be re-run (o
 flagged/dropped) before the stroke forest/debate comparison goes in the paper.**
 
 **Total transfer** ≈ 14.5 GB (hf_cache 12.5 + data 1.2 + checkpoints 0.8 + code). Pack as
-two tarballs so Martina can build the container while the big one copies.
+two tarballs so the container can be built while the big one copies.
 
 ## Code changes applied
 
 1. **`run_pipeline.py`** — added `--load_4bit`, also honouring `MEDGEMMA_4BIT=1`, wired into
    `ModelConfig(use_4bit_quantization=...)` in `build_config()`. Needed because the server
-   GPU is unknown and Martina cannot edit `config.py` mid-run.
+   GPU is unknown and `config.py` cannot be edited mid-run.
 
 2. **`pipeline/nodes.py:debate_node`** — on `multiclass_tumor`, `final_predicted_class` now
    prefers `verdict["winner_detailed"]` over `verdict["winner"]`. The judge schema
@@ -182,7 +198,7 @@ All written. Verification status noted per file.
       queue per GPU, preflight once first
 - [x] `90_export_results.sh` + `scripts/export_results.py` — JSONL → per-image TSV + summary
       TSV + combined `all_runs_summary.tsv`, and `eval/eval_analysis.py` per JSONL for the CSV
-      metric tables. Runs after **every** step, so partial results are always in Martina's
+      metric tables. Runs after **every** step, so partial results are always in the
       preferred format. Ends by tarring `outputs/` + `logs/` into `results_<host>_<date>.tar.gz`.
       **Tested on the two finished Forest JSONLs.**
 - [x] `scripts/prepack_models.py` — hardlink-seed `hf_cache/hub` from `~/.cache/huggingface/hub`,
@@ -192,9 +208,8 @@ All written. Verification status noted per file.
       files, stage + rename data into the server layout while excluding
       `OVERLAY`/`DICOM`/`MASKS`/`*_mask`/`External_Test`, emit `maclf-code-data.tar.gz` +
       `maclf-models.tar` + `SHA256SUMS.txt`. **Not yet run.**
-- [x] `README_SERVER.md` — for Martina, Macedonian + English
-- [x] `SEND_CHECKLIST.md` — for Tamara: prepack → pack → transfer → what comes back, plus a
-      Macedonian draft reply
+- [x] `README_SERVER.md` — Macedonian + English
+- [x] `SEND_CHECKLIST.md` — prepack → pack → transfer → what comes back
 
 ## Verification done on this machine
 
@@ -221,13 +236,27 @@ All written. Verification status noted per file.
 Still untested: the actual `singularity build` (only the equivalent docker build was run) and
 the offline `hf_cache` (needs `prepack_models.py` to run first).
 
-## Remaining steps to ship
+## Ship status (2026-07-29)
 
-1. `python server_bundle/scripts/prepack_models.py` → must print `PREPACK OK`
-2. `bash server_bundle/scripts/pack_bundle.sh` → check the printed image counts
-3. Transfer ~14.5 GB + `SHA256SUMS.txt`; reply to Martina using the draft in
-   `SEND_CHECKLIST.md`
-4. Optional but valuable: ask Martina to paste back the preflight output — it reveals the
+- [x] `prepack_models.py` → `PREPACK OK`. `hf_cache/` = **12 GB** after both trims; all five
+      offline checks pass; `checkpoints/sam3_probe.pth` fetched (3.9 KB).
+- [x] `pack_bundle.sh` → `~/Documents/bundle_out/`:
+      `maclf-code-data.tar.gz` **1.9 GB** (gzip barely helps — the payload is JPEG/PNG),
+      `maclf-models.tar` **12 GB**, `SHA256SUMS.txt`. Staged tree 2.0 GB.
+      Audited: no `.env`, all 9 checkpoints, image counts 1500/1500 · 708/1426/930 ·
+      1002/1014/650/761 · 1093/1130/4427 (`PNG/` only), SAM3 BPE asset present and no
+      `sam3/.git`, and **52 symlink entries preserved** in the models tar with big blobs as
+      real files (MedGemma 4.6 + 3.4 GB, SAM3 3.2 GB, BiomedCLIP 0.7 GB) — the property a
+      zip would have destroyed.
+      Caught during packing: a 6.8 GB `archive(1).zip` in the repo root inflated the first
+      code archive to 8.7 GB; `*.zip`/`papers`/`*.jsonl`/`*.sif` excludes plus a >50 MB
+      stray-file guard now prevent it. `SKIP_MODELS=1` reuses the model tar.
+- [ ] Transfer ~14 GB + `SHA256SUMS.txt`; reply using the draft in `SEND_CHECKLIST.md`.
+- [ ] Delete `~/Documents/bundle_stage/` (2 GB) once the transfer is confirmed.
+
+## Remaining steps to ship
+3. Transfer ~14.5 GB + `SHA256SUMS.txt`; 
+4. Optional but valuable: ask for the preflight output — it reveals the
    GPU model and count, which decides `LOAD_4BIT` and whether `run_parallel.sh` is worth it.
 
 ## Run set (the 6 commands, in execution order)
@@ -257,14 +286,12 @@ Already done, not re-run: Forest N=4 `binary_tumor` (n=500) and `multiclass_tumo
 ## Open items / risks
 
 - **Server GPU model and count are unknown.** Affects bf16 vs `--load_4bit` and whether
-  steps can run in parallel. Ask Martina, or let preflight print it and have her paste the
-  output back. `run_parallel.sh` covers the multi-GPU case without another round trip.
+  steps can run in parallel. Preflight print it and have the outputs pasted back. `run_parallel.sh` covers the multi-GPU case without another round trip.
 - **Gated weights leave Tamara's control** once `hf_cache/` is shipped (MedGemma + SAM3
-  under their respective terms). Accepted deliberately; note it in the reply to Martina so
+  under their respective terms). Accepted deliberately; note it in the reply so
   the cache is not redistributed further.
 - **`sam3/` clone is not on this machine yet** — `pack_bundle.sh` clones it (needs network at
   packing time, not at build/run time).
-- **Container build needs internet** (pip + base image) — fine on the sylabs remote builder,
-  which is what Martina uses.
+- **Container build needs internet** (pip + base image) — fine on the sylabs remote builder.
 - Local `.venv` is Python 3.12.3 and healthy; the *system* python has a broken numpy/scipy
   pair. Always `source .venv/bin/activate` before running anything locally.

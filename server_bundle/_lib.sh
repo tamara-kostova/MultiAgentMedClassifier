@@ -44,27 +44,56 @@ if [ "${LOAD_4BIT:-0}" = "1" ]; then
     EXTRA_FLAGS="--load_4bit"
 fi
 
+# Environment the container needs: offline HF cache, local checkpoints, dataset
+# paths for preflight, and unbuffered output so the logs update live.
+CONTAINER_ENV=(
+    "HF_HOME=$PROJECT_ROOT/$HF_CACHE_DIR"
+    "HF_HUB_OFFLINE=1"
+    "TRANSFORMERS_OFFLINE=1"
+    "HF_HUB_DISABLE_TELEMETRY=1"
+    "CHECKPOINT_SOURCE=local"
+    "PYTHONPATH=$PROJECT_ROOT"
+    "DATA_BR35H=$DATA_BR35H"
+    "DATA_FIGSHARE=$DATA_FIGSHARE"
+    "DATA_MS=$DATA_MS"
+    "DATA_STROKE=$DATA_STROKE"
+    "PREFLIGHT_MAX_SAMPLES=$MAX_SAMPLES"
+    "MEDGEMMA_4BIT=${LOAD_4BIT:-0}"
+    "PYTHONUNBUFFERED=1"
+    "TOKENIZERS_PARALLELISM=false"
+    "PYTORCH_ALLOC_CONF=expandable_segments:True"
+    "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}"
+)
+
+# `exec --env` only exists in Singularity >= 3.6. On older installs the equivalent
+# is the SINGULARITYENV_ / APPTAINERENV_ prefix on host variables, which every
+# version understands — so detect once and use whichever this install supports.
+if "$SINGULARITY_BIN" exec --help 2>&1 | grep -q -- '--env'; then
+    USE_ENV_FLAG=1
+else
+    USE_ENV_FLAG=0
+    echo "[note] $SINGULARITY_BIN has no 'exec --env' (pre-3.6); using SINGULARITYENV_* instead."
+    for kv in "${CONTAINER_ENV[@]}"; do
+        export "SINGULARITYENV_${kv%%=*}=${kv#*=}"
+        export "APPTAINERENV_${kv%%=*}=${kv#*=}"
+    done
+fi
+
 # Run a python script inside the container, from the project root, fully offline.
 pyrun() {
+    local env_args=()
+    if [ "$USE_ENV_FLAG" = "1" ]; then
+        local kv
+        for kv in "${CONTAINER_ENV[@]}"; do
+            env_args+=(--env "$kv")
+        done
+    fi
+    # ${a[@]+"${a[@]}"} expands to nothing when the array is empty without tripping
+    # `set -u` on bash < 4.4 (CentOS 7 ships 4.2).
     "$SINGULARITY_BIN" exec --nv \
         --pwd "$PROJECT_ROOT" \
         --bind "$PROJECT_ROOT":"$PROJECT_ROOT" \
-        --env HF_HOME="$PROJECT_ROOT/$HF_CACHE_DIR" \
-        --env HF_HUB_OFFLINE=1 \
-        --env TRANSFORMERS_OFFLINE=1 \
-        --env HF_HUB_DISABLE_TELEMETRY=1 \
-        --env CHECKPOINT_SOURCE=local \
-        --env PYTHONPATH="$PROJECT_ROOT" \
-        --env DATA_BR35H="$DATA_BR35H" \
-        --env DATA_FIGSHARE="$DATA_FIGSHARE" \
-        --env DATA_MS="$DATA_MS" \
-        --env DATA_STROKE="$DATA_STROKE" \
-        --env PREFLIGHT_MAX_SAMPLES="$MAX_SAMPLES" \
-        --env MEDGEMMA_4BIT="${LOAD_4BIT:-0}" \
-        --env PYTHONUNBUFFERED=1 \
-        --env TOKENIZERS_PARALLELISM=false \
-        --env PYTORCH_ALLOC_CONF=expandable_segments:True \
-        --env CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" \
+        ${env_args[@]+"${env_args[@]}"} \
         "$SIF_PATH" /opt/venv/bin/python "$@"
 }
 

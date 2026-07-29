@@ -23,7 +23,7 @@ Python код.
 |---|---|
 | GPU | една GPU со ≥ 16 GB VRAM за еден процес (види *Проблеми* ако е помалку) |
 | CUDA | 12.6 (сликата е базирана на `nvidia/cuda:12.6.3`) |
-| Диск | ~20 GB (модели 12.5 GB + податоци 1.2 GB + резултати) |
+| Диск | ~30 GB при отпакување (архиви 14 GB + отпакувано 14 GB); ~15 GB потоа, кога архивите ќе се избришат |
 | Софтвер | Singularity или Apptainer |
 | Интернет | потребен **само** при градење на сликата, не при извршување |
 
@@ -197,7 +197,7 @@ to be edited.
 |---|---|
 | GPU | one GPU with ≥ 16 GB VRAM per process (see *Troubleshooting* for less) |
 | CUDA | 12.6 (image is based on `nvidia/cuda:12.6.3`) |
-| Disk | ~20 GB (models 12.5 GB + data 1.2 GB + results) |
+| Disk | ~30 GB while unpacking (14 GB archives + 14 GB extracted); ~15 GB afterwards, once the archives are deleted |
 | Software | Singularity or Apptainer |
 | Internet | needed **only** to build the image, never at run time |
 

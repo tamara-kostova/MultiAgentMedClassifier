@@ -5,12 +5,14 @@
 #
 # Produces, in ../bundle_out/ by default:
 #
-#   maclf-code-data.tar.gz   code + the 4 datasets + the 9 needed checkpoints  (~2 GB)
-#   maclf-models.tar.gz      hf_cache/ — MedGemma, SAM3, BiomedCLIP weights    (~12.5 GB)
+#   maclf-code-data.tar.gz   code + the 4 datasets + the 9 needed checkpoints  (~1.9 GB;
+#                            gzip barely helps — the payload is already-compressed JPEG/PNG)
+#   maclf-models.tar         hf_cache/ — MedGemma, SAM3, BiomedCLIP weights    (~12 GB,
+#                            stored uncompressed: the weights do not compress)
 #   SHA256SUMS.txt
 #
-# Two archives on purpose: Martina can extract the small one and start building the
-# container while the big one is still copying.
+# Two archives on purpose: the small one can be extracted and the container built
+# while the big one is still copying.
 #
 # Prerequisite: python server_bundle/scripts/prepack_models.py has been run.
 set -euo pipefail
