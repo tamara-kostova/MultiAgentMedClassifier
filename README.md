@@ -286,12 +286,14 @@ Forest replaces the single `triage` node. N role-specialized MedGemma instances 
 
 ### Guide — reproducing paper-comparable Forest / Debate results
 
-These runs use the **resumable rich-JSONL eval path** — the same path (and same dataset
-directories) the paper's tables came from. It is crash-safe (re-run the exact command to
-continue), applies label canonicalization, samples class-balanced up to `--max_samples`,
-and honours `--pipeline_mode`. The four dataset directories and label maps below match the
-existing baseline JSONLs in `outputs/eval/` (`--max_samples 1000` reproduces the paper's
-1000-image splits: binary 500/500, multiclass 334/333/333, MS 250×4, stroke 334/333/333).
+These runs use the **resumable rich-JSONL eval path** — the same path the paper's tables
+came from. It is crash-safe (re-run the exact command to continue), applies label
+canonicalization, samples class-balanced up to `--max_samples`, and honours
+`--pipeline_mode`. The dataset directories below reflect the actual local `data/` layout
+(some of the paths used for the original baseline JSONLs, e.g. `data/figshare`, no longer
+exist on disk — use `data/processed`, `data/MS`, `data/Brain_Stroke_CT_Dataset` instead).
+`--max_samples 500` samples class-balanced up to that cap (binary 250/250, multiclass
+167/167/166, MS 125×4, stroke 167/167/166).
 
 **0. Smoke test** — 2 images, multiclass tumour, both systems (confirms end-to-end):
 
@@ -307,51 +309,51 @@ python run_pipeline.py --tumor_eval --task multiclass_tumor --label_map figshare
   --tumor_eval_output outputs/eval/smoke_multiclass_debate_r2.jsonl
 ```
 
-**1. Forest N=4 — all four tasks, 1000 images each:**
+**1. Forest N=4 — all four tasks, 500 images each:**
 
 ```bash
 python run_pipeline.py --tumor_eval   --task binary_tumor     --label_map br35h \
-  --tumor_eval_dir   data/Br35H                        --max_samples 1000 \
+  --tumor_eval_dir   data/Br35H                        --max_samples 500 \
   --pipeline_mode forest --forest_n_agents 4 \
   --tumor_eval_output   outputs/eval/binary_forest_n4.jsonl
 
 python run_pipeline.py --tumor_eval   --task multiclass_tumor --label_map figshare3 \
-  --tumor_eval_dir   data/figshare                     --max_samples 1000 \
+  --tumor_eval_dir   data/figshare                     --max_samples 500 \
   --pipeline_mode forest --forest_n_agents 4 \
   --tumor_eval_output   outputs/eval/multiclass_forest_n4.jsonl
 
 python run_pipeline.py --dataset_eval --task ms     --label_map ms_binary \
-  --dataset_eval_dir data/sclerosis/MS                 --max_samples 1000 \
+  --dataset_eval_dir data/sclerosis/MS                 --max_samples 500 \
   --pipeline_mode forest --forest_n_agents 4 \
   --dataset_eval_output outputs/eval/ms_forest_n4.jsonl
 
 python run_pipeline.py --dataset_eval --task stroke --label_map stroke_binary \
-  --dataset_eval_dir data/stroke/Brain_Stroke_CT_Dataset --max_samples 1000 \
+  --dataset_eval_dir data/stroke/Brain_Stroke_CT_Dataset --max_samples 500 \
   --pipeline_mode forest --forest_n_agents 4 \
   --dataset_eval_output outputs/eval/stroke_forest_n4.jsonl
 ```
 
-**2. Debate R=2 — all four tasks, 1000 images each:** identical to step 1 with
+**2. Debate R=2 — all four tasks, 500 images each:** identical to step 1 with
 `--pipeline_mode debate --debate_rounds 2` and `*_debate_r2.jsonl` output names, e.g.:
 
 ```bash
 python run_pipeline.py --tumor_eval   --task binary_tumor     --label_map br35h \
-  --tumor_eval_dir   data/Br35H                        --max_samples 1000 \
+  --tumor_eval_dir   data/Br35H                        --max_samples 500 \
   --pipeline_mode debate --debate_rounds 2 \
   --tumor_eval_output   outputs/eval/binary_debate_r2.jsonl
 
 python run_pipeline.py --tumor_eval   --task multiclass_tumor --label_map figshare3 \
-  --tumor_eval_dir   data/figshare                     --max_samples 1000 \
+  --tumor_eval_dir   data/figshare                     --max_samples 500 \
   --pipeline_mode debate --debate_rounds 2 \
   --tumor_eval_output   outputs/eval/multiclass_debate_r2.jsonl
 
 python run_pipeline.py --dataset_eval --task ms     --label_map ms_binary \
-  --dataset_eval_dir data/sclerosis/MS                 --max_samples 1000 \
+  --dataset_eval_dir data/sclerosis/MS                 --max_samples 500 \
   --pipeline_mode debate --debate_rounds 2 \
   --dataset_eval_output outputs/eval/ms_debate_r2.jsonl
 
 python run_pipeline.py --dataset_eval --task stroke --label_map stroke_binary \
-  --dataset_eval_dir data/stroke/Brain_Stroke_CT_Dataset --max_samples 1000 \
+  --dataset_eval_dir data/stroke/Brain_Stroke_CT_Dataset --max_samples 500 \
   --pipeline_mode debate --debate_rounds 2 \
   --dataset_eval_output outputs/eval/stroke_debate_r2.jsonl
 ```
@@ -372,14 +374,16 @@ JSONLs. No separate run is needed for those.
 **Notes**
 
 - **Resumable & crash-safe** — Forest N=4 and Debate R=2 add several MedGemma calls per
-  image, so each 1000-image task is multi-hour and all eight together are a multi-day
+  image, so each 500-image task is multi-hour and all eight together are a multi-day
   campaign. Re-run any command to continue from where it stopped.
 - **Use the distinct `--*_output` names above — never the defaults.** Resume keys on the
   output file, and the default names (`multiclass_tumor_tumor_eval.jsonl`, etc.) already
   hold the **standard-pipeline baseline** results; reusing them would append forest/debate
   rows into (and corrupt) the paper's baseline files.
-- **`--max_samples 1000` reproduces the paper's splits** on these directories (the loader
-  samples class-balanced). Drop it to run the full datasets.
+- **`--max_samples 500` samples class-balanced** on these directories. Drop it to run the
+  full datasets. Note the existing baseline JSONLs in `outputs/eval/` were run at
+  `--max_samples 1000` on the old dataset paths — the forest/debate splits above are not
+  the same images, just the same class-balanced sampling method at a smaller cap.
 - **Do not add `--skip_report` for forest** — the report node produces the forest's final
   prediction. (Debate replaces the report node, so it doesn't apply there.)
 - **SAM3** contributes only to the tumour tasks, and only if `checkpoints/sam3_probe.pth`
