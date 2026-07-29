@@ -289,27 +289,80 @@ Forest replaces the single `triage` node. N role-specialized MedGemma instances 
 These runs use the **resumable rich-JSONL eval path** — the same path the paper's tables
 came from. It is crash-safe (re-run the exact command to continue), applies label
 canonicalization, samples class-balanced up to `--max_samples`, and honours
-`--pipeline_mode`. The dataset directories below reflect the actual local `data/` layout
-(some of the paths used for the original baseline JSONLs, e.g. `data/figshare`, no longer
-exist on disk — use `data/processed`, `data/MS`, `data/Brain_Stroke_CT_Dataset` instead).
+`--pipeline_mode`.
+
+The dataset directories below are the ones actually recorded in the `image_path` field of
+the completed runs in `outputs/eval/`, so they are the paths the results were produced
+from:
+
+| Task | `--*_eval_dir` | Class folders |
+|---|---|---|
+| `binary_tumor` | `data/Br35H` | `yes`, `no` |
+| `multiclass_tumor` | `data/figshare` | `1`, `2`, `3` |
+| `ms` | `data/sclerosis/MS` | `MS Axial_crop`, `MS Saggital_crop`, `Control Axial_crop`, `Control Saggital_crop` |
+| `stroke` | `data/stroke/Brain_Stroke_CT_Dataset` | `Bleeding/OVERLAY`, `Ischemia/OVERLAY`, `Normal/PNG` |
+
+Note that `data/processed` is a *separate* copy of the figshare data that no paper run
+used — point `multiclass_tumor` at `data/figshare` to stay comparable to the existing
+JSONLs. Stroke images sit one level below the class folder, which is fine here because
+`run_dataset_eval` globs recursively; `load_test_split` (used by `run_research.py`) does
+not, so the sweep path needs a directory whose class folders hold images directly.
+
 `--max_samples 500` samples class-balanced up to that cap (binary 250/250, multiclass
 167/167/166, MS 125×4, stroke 167/167/166).
 
-**0. Smoke test** — 2 images, multiclass tumour, both systems (confirms end-to-end):
+**Campaign status and run order.** Forest N=4 on both tumour tasks is done; the six runs
+below are the remaining work, in execution order. Debate R=2 costs roughly 1.5–2× a Forest
+N=4 run on the same task (9 image-conditioned MedGemma calls vs 7), so the debate runs are
+the ones at risk of not fitting a single overnight slot.
+
+| # | Run | Status | Est. wall clock (500 imgs) |
+|---|---|---|---|
+| — | Forest N=4, `binary_tumor` | **done** (n=500) | 8.9 h measured |
+| — | Forest N=4, `multiclass_tumor` | **done** (n=465) | 9.6 h measured |
+| 1 | Forest N=4, `stroke` | — | ~8 h |
+| 2 | Forest N=4, `ms` | — | ~8 h |
+| 3 | Debate R=2, `binary_tumor` | — | ~13–16 h |
+| 4 | Debate R=2, `stroke` | — | ~12–16 h |
+| 5 | Debate R=2, `ms` | — | ~12–16 h |
+| 6 | Debate R=2, `multiclass_tumor` | — | ~14–16 h |
+
+Step 6 is last deliberately: the multiclass CNN checkpoint has a 12-class head evaluated on
+3-class figshare (accuracy 0.140, and 0.271–0.314 even after masking the softmax to the
+three figshare classes) and BiomedCLIP scores 0.163, so both tool advocates the judge
+arbitrates between are at or below chance on that task. Drop step 6 first if time runs short.
+
+**0. Prove the debate path** — 10 images, MS, capped. The debate graph has never run at
+scale, so spend 15 minutes confirming it before committing a night. Because resume keys on
+the output file, re-running step 5's command later continues from image 11 rather than
+restarting, so this costs nothing:
 
 ```bash
-python run_pipeline.py --tumor_eval --task multiclass_tumor --label_map figshare3 \
-  --tumor_eval_dir data/figshare --max_samples 2 \
-  --pipeline_mode forest --forest_n_agents 4 \
-  --tumor_eval_output outputs/eval/smoke_multiclass_forest_n4.jsonl
-
-python run_pipeline.py --tumor_eval --task multiclass_tumor --label_map figshare3 \
-  --tumor_eval_dir data/figshare --max_samples 2 \
+python run_pipeline.py --dataset_eval --task ms     --label_map ms_binary \
+  --dataset_eval_dir data/sclerosis/MS                 --max_samples 10 \
   --pipeline_mode debate --debate_rounds 2 \
-  --tumor_eval_output outputs/eval/smoke_multiclass_debate_r2.jsonl
+  --dataset_eval_output outputs/eval/ms_debate_r2.jsonl
 ```
 
-**1. Forest N=4 — all four tasks, 500 images each:**
+Check `error` is null and that `debate_rounds_completed`, `debate_round_changed` and
+`debate_winner` are populated, then read the median `latency_s` to project the full run. If
+it exceeds ~100 s/image, drop the debate runs to `--max_samples 300` so each fits one night.
+
+**1–2. Forest N=4 — `stroke` then `ms`:**
+
+```bash
+python run_pipeline.py --dataset_eval --task stroke --label_map stroke_binary \
+  --dataset_eval_dir data/stroke/Brain_Stroke_CT_Dataset --max_samples 500 \
+  --pipeline_mode forest --forest_n_agents 4 \
+  --dataset_eval_output outputs/eval/stroke_forest_n4.jsonl
+
+python run_pipeline.py --dataset_eval --task ms     --label_map ms_binary \
+  --dataset_eval_dir data/sclerosis/MS                 --max_samples 500 \
+  --pipeline_mode forest --forest_n_agents 4 \
+  --dataset_eval_output outputs/eval/ms_forest_n4.jsonl
+```
+
+For reference, the two completed Forest runs were produced by:
 
 ```bash
 python run_pipeline.py --tumor_eval   --task binary_tumor     --label_map br35h \
@@ -321,20 +374,11 @@ python run_pipeline.py --tumor_eval   --task multiclass_tumor --label_map figsha
   --tumor_eval_dir   data/figshare                     --max_samples 500 \
   --pipeline_mode forest --forest_n_agents 4 \
   --tumor_eval_output   outputs/eval/multiclass_forest_n4.jsonl
-
-python run_pipeline.py --dataset_eval --task ms     --label_map ms_binary \
-  --dataset_eval_dir data/sclerosis/MS                 --max_samples 500 \
-  --pipeline_mode forest --forest_n_agents 4 \
-  --dataset_eval_output outputs/eval/ms_forest_n4.jsonl
-
-python run_pipeline.py --dataset_eval --task stroke --label_map stroke_binary \
-  --dataset_eval_dir data/stroke/Brain_Stroke_CT_Dataset --max_samples 500 \
-  --pipeline_mode forest --forest_n_agents 4 \
-  --dataset_eval_output outputs/eval/stroke_forest_n4.jsonl
 ```
 
-**2. Debate R=2 — all four tasks, 500 images each:** identical to step 1 with
-`--pipeline_mode debate --debate_rounds 2` and `*_debate_r2.jsonl` output names, e.g.:
+**3–6. Debate R=2 — `binary_tumor`, `stroke`, `ms`, `multiclass_tumor`:** identical to the
+Forest commands with `--pipeline_mode debate --debate_rounds 2` and `*_debate_r2.jsonl`
+output names:
 
 ```bash
 python run_pipeline.py --tumor_eval   --task binary_tumor     --label_map br35h \
@@ -342,20 +386,20 @@ python run_pipeline.py --tumor_eval   --task binary_tumor     --label_map br35h 
   --pipeline_mode debate --debate_rounds 2 \
   --tumor_eval_output   outputs/eval/binary_debate_r2.jsonl
 
-python run_pipeline.py --tumor_eval   --task multiclass_tumor --label_map figshare3 \
-  --tumor_eval_dir   data/figshare                     --max_samples 500 \
+python run_pipeline.py --dataset_eval --task stroke --label_map stroke_binary \
+  --dataset_eval_dir data/stroke/Brain_Stroke_CT_Dataset --max_samples 500 \
   --pipeline_mode debate --debate_rounds 2 \
-  --tumor_eval_output   outputs/eval/multiclass_debate_r2.jsonl
+  --dataset_eval_output outputs/eval/stroke_debate_r2.jsonl
 
 python run_pipeline.py --dataset_eval --task ms     --label_map ms_binary \
   --dataset_eval_dir data/sclerosis/MS                 --max_samples 500 \
   --pipeline_mode debate --debate_rounds 2 \
   --dataset_eval_output outputs/eval/ms_debate_r2.jsonl
 
-python run_pipeline.py --dataset_eval --task stroke --label_map stroke_binary \
-  --dataset_eval_dir data/stroke/Brain_Stroke_CT_Dataset --max_samples 500 \
+python run_pipeline.py --tumor_eval   --task multiclass_tumor --label_map figshare3 \
+  --tumor_eval_dir   data/figshare                     --max_samples 500 \
   --pipeline_mode debate --debate_rounds 2 \
-  --dataset_eval_output outputs/eval/stroke_debate_r2.jsonl
+  --tumor_eval_output   outputs/eval/multiclass_debate_r2.jsonl
 ```
 
 **Then build the metric tables** (Acc / F1 / Sens / Spec) from each JSONL, exactly as for
@@ -364,6 +408,24 @@ the paper — compare each against the matching baseline JSONL already in `outpu
 ```bash
 python eval/eval_analysis.py --jsonl outputs/eval/multiclass_forest_n4.jsonl
 python eval/eval_analysis.py --jsonl outputs/eval/multiclass_tumor_tumor_eval.jsonl  # baseline
+```
+
+**Scoring convention.** On binary tasks, `--scoring` selects how a prediction naming a
+*different* pathology is counted, and the choice moves the numbers substantially, so state
+it alongside any reported result. `strict` (the default) answers the task's own question —
+"is this stroke?" — so naming another pathology is an assertion that the target pathology is
+absent and scores as a negative. `abnormal` answers "is this scan not-normal?", counting any
+pathology label as positive, which inflates sensitivity and deflates specificity whenever
+the model names an off-task pathology. This matters here because MedGemma frequently does:
+23.5% of MS scans are labelled `glioma` and 13.7% of stroke CTs are labelled with a tumour
+subtype. Both conventions are written to `model_accuracy_summary.csv` (columns
+`accuracy`/`sensitivity`/`specificity` for the selected mode, plus `*_abnormal` for the
+other) together with `n_abstained`, so a reader can see how much of a number is the scoring
+choice rather than model behaviour. Multiclass tumour is unaffected — it is always scored on
+the canonical subtype.
+
+```bash
+python eval/eval_analysis.py --jsonl outputs/eval/ms_debate_r2.jsonl --scoring abnormal
 ```
 
 The forest/debate JSONLs also carry the per-sample voting/verdict fields, so the **same**

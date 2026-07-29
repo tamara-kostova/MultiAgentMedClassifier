@@ -32,8 +32,11 @@ class NeuroimagingState(TypedDict):
 
     # ── Routing ───────────────────────────────────────────────────────────────
     # All four fields written by: triage_node
-    routing_decision: Optional[str]  # "full_workup" (pipeline is currently linear; conditional
-                                     # routing is not yet implemented via LangGraph edges)
+    routing_decision: Optional[str]  # Always the literal "full_workup" — hardcoded by both
+                                     # triage nodes. All graphs are linear, so this gates
+                                     # nothing; its only reader is the unwired legacy helper
+                                     # route_from_triage(). Informational / for eval grouping
+                                     # only. See that docstring in pipeline/nodes.py.
     routing_confidence: float        # MedGemma's self-reported confidence in its routing decision
     routing_reasoning: str           # Short human-readable explanation from MedGemma
     suspected_pathology: str         # MedGemma's initial pathology label before specialist tools run

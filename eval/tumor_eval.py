@@ -197,9 +197,14 @@ _TUMOR_SUBTYPES = (
 
 
 def canonical_label(value: object, task: str | None = None) -> str:
-    """Normalize labels/predictions so metrics survive wording differences."""
+    """Normalize labels/predictions so metrics survive wording differences.
+
+    The prompt schema uses the literal string "null" as the sentinel for an
+    indeterminable field, so it must normalize to "" (absent) rather than being
+    treated as a class name. Kept in sync with eval_analysis.canonical_label.
+    """
     text = str(value or "").strip().lower()
-    if not text:
+    if not text or text in ("none", "null", "nan"):
         return ""
 
     normalized = (

@@ -55,7 +55,12 @@ _TUMOR_SUBTYPES = (
     "carcinoma", "germinoma", "glioma", "granuloma", "medulloblastoma",
     "meningioma", "neurocytoma", "papilloma", "schwannoma", "tuberculoma",
 )
-_STROKE_TOKENS = ("stroke", "ischemic", "ischemia", "hemorrhagic", "bleeding", "infarct")
+_STROKE_TOKENS = ("stroke", "ischemic", "ischemia", "hemorrhag", "bleeding", "infarct")
+# MedGemma names MS lesions descriptively rather than using the disease name, e.g.
+# "demyelinating plaque", "periventricular white matter lesion". On a FLAIR MS
+# benchmark these are MS assertions, so they must canonicalize to "ms" or strict
+# scoring counts them as negatives.
+_MS_TOKENS = ("multiple sclerosis", "demyelinat", "white matter lesion", "white matter plaque")
 
 
 def canonical_label(value: object, task: str | None = None) -> str:
@@ -66,7 +71,7 @@ def canonical_label(value: object, task: str | None = None) -> str:
               .replace("/", " ").replace("tumour", "tumor"))
     if "normal" in n or "control" in n:
         return "normal"
-    if n == "ms" or n.startswith("ms ") or "multiple sclerosis" in n:
+    if n == "ms" or n.startswith("ms ") or any(tok in n for tok in _MS_TOKENS):
         return "ms"
     if any(tok in n for tok in _STROKE_TOKENS):
         return "stroke"
@@ -92,18 +97,46 @@ def pos_class(task: str) -> str:
     return {"ms": "ms", "stroke": "stroke"}.get(task, "tumor")
 
 
-def prep(label: str, task: str) -> str:
-    """Normalize for comparison. Multiclass: keep subtype. Binary: collapse to (pos|normal|unknown)."""
+# Binary scoring convention. Both are defensible but they measure different things,
+# so the choice must be stated explicitly alongside any reported number.
+#   "strict"   — the task's own question ("is this stroke?"). A prediction naming a
+#                *different* pathology is an assertion that the target pathology is
+#                absent, so it scores as a negative. This is what "MS detection" and
+#                "stroke detection" mean, and it is the primary convention.
+#   "abnormal" — abnormality screening ("is this scan not-normal?"). Any pathology
+#                label counts as positive. Inflates sensitivity and deflates
+#                specificity whenever the model names an off-task pathology.
+SCORING_MODES = ("strict", "abnormal")
+SCORING = "strict"
+
+
+def set_scoring(mode: str) -> None:
+    if mode not in SCORING_MODES:
+        raise ValueError(f"scoring must be one of {SCORING_MODES}, got {mode!r}")
+    global SCORING
+    SCORING = mode
+
+
+def prep(label: str, task: str, scoring: str | None = None) -> str:
+    """Normalize for comparison. Multiclass: keep subtype. Binary: collapse to (pos|normal|unknown).
+
+    "unknown" marks an abstention (empty label / parse failure / "null" sentinel) and
+    is excluded from binary metrics rather than being scored as a prediction.
+    """
     if is_multiclass(task):
         cl = canonical_label(label, task)
         return cl if cl else "unknown"
-    # Binary: any non-empty non-normal → positive class
     cl = canonical_label(label, task)
     if not cl:
         return "unknown"
     if cl == "normal":
         return "normal"
-    return pos_class(task)
+    pos = pos_class(task)
+    if (scoring or SCORING) == "abnormal":
+        return pos
+    # strict: only the task's own pathology counts as positive; naming another
+    # pathology asserts the target pathology is absent.
+    return pos if cl == pos else "normal"
 
 
 def mg_diag_pred(diag: object, task: str) -> str:
@@ -233,14 +266,16 @@ def calibration_bins_df(confs: np.ndarray, correct: np.ndarray, n_bins: int = 10
 
 # ── prediction builder ─────────────────────────────────────────────────────────
 
-def build_model_preds(df: pd.DataFrame, task: str) -> dict[str, tuple[list, list]]:
+def build_model_preds(
+    df: pd.DataFrame, task: str, scoring: str | None = None
+) -> dict[str, tuple[list, list]]:
     """Return {model_name: ([prep'd predictions], [confidences])}.
 
     Binary tasks: predictions are binarized to (pos | normal | unknown).
     Multiclass:   predictions are canonical subtype labels.
     """
     def _prep_col(col: str) -> list:
-        return [prep(str(v or ""), task) for v in df[col].fillna("")]
+        return [prep(str(v or ""), task, scoring) for v in df[col].fillna("")]
 
     return {
         "cnn": (
@@ -248,16 +283,16 @@ def build_model_preds(df: pd.DataFrame, task: str) -> dict[str, tuple[list, list
             df["cnn_confidence"].fillna(0.5).tolist(),
         ),
         "biomedclip": (
-            [prep(canonical_label(str(v or ""), task), task)
+            [prep(canonical_label(str(v or ""), task), task, scoring)
              for v in df["biomedclip_top_label"].fillna("")],
             df["biomedclip_top_score"].fillna(0.5).tolist(),
         ),
         "medgemma_initial": (
-            [prep(mg_diag_pred(d, task), task) for d in df["medgemma_diagnosis"]],
+            [prep(mg_diag_pred(d, task), task, scoring) for d in df["medgemma_diagnosis"]],
             [mg_conf(d) for d in df["medgemma_diagnosis"]],
         ),
         "medgemma_final": (
-            [prep(mg_diag_pred(d, task), task) for d in df["final_medgemma_diagnosis"]],
+            [prep(mg_diag_pred(d, task), task, scoring) for d in df["final_medgemma_diagnosis"]],
             [mg_conf(d) for d in df["final_medgemma_diagnosis"]],
         ),
         "pipeline_final": (
@@ -275,11 +310,31 @@ def section_model_accuracy(df: pd.DataFrame, task: str) -> pd.DataFrame:
     multi = is_multiclass(task)
     pos   = pos_class(task)
 
+    # Same predictions scored under the alternate binary convention, so a reader can
+    # see how much of any number is the scoring choice rather than model behaviour.
+    alt = next(m for m in SCORING_MODES if m != SCORING) if not multi else None
+    alt_preds = (
+        {n: p for n, (p, _) in build_model_preds(df, task, scoring=alt).items()}
+        if alt else {}
+    )
+    alt_gt = [prep(str(v or ""), task, scoring=alt) for v in
+              df["true_label_canonical"].fillna("")] if alt else []
+
     for name, (preds, _) in build_model_preds(df, task).items():
         row = (multiclass_metrics_row(gt, preds, name)
                if multi else binary_metrics_row(gt, preds, pos, name))
-        if row:
-            rows.append(row)
+        if not row:
+            continue
+        row["scoring"] = "multiclass" if multi else SCORING
+        row["n_abstained"] = int(sum(p == "unknown" for p in preds))
+        if alt:
+            alt_row = binary_metrics_row(alt_gt, alt_preds[name], pos, name)
+            if alt_row:
+                row[f"accuracy_{alt}"]    = alt_row["accuracy"]
+                row[f"sensitivity_{alt}"] = alt_row["sensitivity"]
+                row[f"specificity_{alt}"] = alt_row["specificity"]
+                row[f"n_{alt}"]           = alt_row["n"]
+        rows.append(row)
     return pd.DataFrame(rows)
 
 
@@ -845,7 +900,16 @@ def main() -> None:
     parser.add_argument("--jsonl",      required=True, help="Path to eval JSONL file")
     parser.add_argument("--output_dir", default=None,
                         help="Output directory (default: outputs/analysis/<jsonl-stem>)")
+    parser.add_argument("--scoring", default="strict", choices=list(SCORING_MODES),
+                        help=(
+                            "Binary scoring convention. 'strict' (default): only the "
+                            "task's own pathology counts as positive; naming another "
+                            "pathology scores as negative. 'abnormal': any pathology "
+                            "label counts as positive (abnormality screening). "
+                            "Both are written to model_accuracy_summary.csv."
+                        ))
     args = parser.parse_args()
+    set_scoring(args.scoring)
 
     df   = load(args.jsonl)
     task = str(df["task"].iloc[0]) if "task" in df.columns and len(df) else "unknown"
@@ -855,7 +919,8 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
 
     multi = is_multiclass(task)
-    print(f"\nTask: {task}  |  {'multiclass' if multi else f'positive class: {pos}'}  |  n={len(df)}")
+    print(f"\nTask: {task}  |  {'multiclass' if multi else f'positive class: {pos}'}  |  n={len(df)}"
+          f"{'' if multi else f'  |  scoring: {SCORING}'}")
     print(f"Output: {out}/\n")
 
     # ── compute ────────────────────────────────────────────────────────────────

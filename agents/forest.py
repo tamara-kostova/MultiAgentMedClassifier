@@ -89,28 +89,62 @@ class AgentForest:
             })
         return votes
 
-    def vote(self, votes: list[dict]) -> tuple[dict, MedicalDiagnosis]:
+    @staticmethod
+    def vote_field(task: str | None) -> str:
+        """Which diagnosis field carries the discriminative label for `task`.
+
+        For multiclass_tumor the schema always emits diagnosis_name="tumor" and puts
+        the subtype in diagnosis_detailed, so voting on diagnosis_name is degenerate
+        (every agent trivially agrees). Mirrors eval_analysis.mg_diag_pred().
+        """
+        return "diagnosis_detailed" if task == "multiclass_tumor" else "diagnosis_name"
+
+    def vote(
+        self, votes: list[dict], task: str | None = None
+    ) -> tuple[dict, MedicalDiagnosis]:
         """
         Majority vote with confidence-weighted tiebreaking.
+
+        The vote is taken over the field that actually discriminates the task's
+        classes (see vote_field): diagnosis_detailed for multiclass tumor subtyping,
+        diagnosis_name otherwise. Agents whose vote field is empty fall back to
+        diagnosis_name so a missing subtype never silently drops a ballot.
 
         Returns:
             consensus: serializable dict with winner, vote_counts, dissent_rate, etc.
             winner_dx: MedicalDiagnosis object for the first winning agent
                        (used for downstream routing decision derivation).
         """
-        labels = [v["diagnosis_name"] for v in votes]
+        field = self.vote_field(task)
+
+        def ballot(v: dict) -> str:
+            return v.get(field) or v.get("diagnosis_name") or "unknown"
+
+        labels = [ballot(v) for v in votes]
         counts = Counter(labels)
         majority_label, majority_count = counts.most_common(1)[0]
 
-        winner_votes = [v for v in votes if v["diagnosis_name"] == majority_label]
+        winner_votes = [v for v in votes if ballot(v) == majority_label]
         conf_weighted = sum(v["diagnosis_confidence"] for v in winner_votes) / len(winner_votes)
 
-        detailed_labels = [v["diagnosis_detailed"] for v in winner_votes if v["diagnosis_detailed"]]
-        winner_detailed = Counter(detailed_labels).most_common(1)[0][0] if detailed_labels else None
+        if field == "diagnosis_detailed":
+            # The subtype is the winner; report the coarse label of its supporters.
+            winner_detailed = majority_label
+            coarse = [v["diagnosis_name"] for v in winner_votes if v.get("diagnosis_name")]
+            winner_label = Counter(coarse).most_common(1)[0][0] if coarse else majority_label
+        else:
+            winner_label = majority_label
+            detailed_labels = [
+                v["diagnosis_detailed"] for v in winner_votes if v["diagnosis_detailed"]
+            ]
+            winner_detailed = (
+                Counter(detailed_labels).most_common(1)[0][0] if detailed_labels else None
+            )
 
         consensus = {
-            "winner": majority_label,
+            "winner": winner_label,
             "winner_detailed": winner_detailed,
+            "vote_field": field,
             "vote_counts": dict(counts),
             "vote_fraction": round(majority_count / len(votes), 4),
             "confidence_weighted_confidence": round(conf_weighted, 4),

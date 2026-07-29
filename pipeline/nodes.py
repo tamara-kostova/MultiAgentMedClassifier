@@ -154,11 +154,25 @@ def make_report_node(agent, routing_cfg: RoutingConfig = None, skip_report: bool
         # Determine final prediction from MedGemma's fused diagnosis when available.
         cnn = state.get("classification_result")
         clip = state.get("biomedclip_result")
-        if final_dx and final_dx.diagnosis_detailed:
-            final_class = final_dx.diagnosis_detailed
-            final_conf = final_dx.diagnosis_confidence
-        elif final_dx and final_dx.diagnosis_name:
-            final_class = final_dx.diagnosis_name
+        # Only multiclass tumor subtyping carries its label in diagnosis_detailed;
+        # for every other task diagnosis_name is the class and diagnosis_detailed is
+        # a free-text elaboration. Preferring detailed unconditionally corrupted
+        # normal-class predictions (the "null" sentinel was read as a class name).
+        # Mirrors eval_analysis.mg_diag_pred() so pipeline and scoring agree.
+        dx_fields = (
+            ("diagnosis_detailed", "diagnosis_name")
+            if state["task"] == "multiclass_tumor"
+            else ("diagnosis_name", "diagnosis_detailed")
+        )
+        dx_label = None
+        if final_dx:
+            for field in dx_fields:
+                value = getattr(final_dx, field, None)
+                if value and str(value).strip().lower() not in ("none", "null", "nan"):
+                    dx_label = value
+                    break
+        if dx_label:
+            final_class = dx_label
             final_conf = final_dx.diagnosis_confidence
         elif cnn:
             final_class = cnn["predicted_class"]
@@ -402,7 +416,7 @@ def make_forest_triage_node(forest, n_agents: int = 3):
         from agents.medgemma_agent import diagnosis_to_routing
         t0 = _log_node_start("forest_triage", state)
         votes = forest.run(state["image_path"], n_agents=n_agents)
-        consensus, winner_dx = forest.vote(votes)
+        consensus, winner_dx = forest.vote(votes, task=state.get("task"))
         routing = diagnosis_to_routing(winner_dx, forest.medgemma.routing_cfg)
 
         # Strip internal _dx objects before writing to state
@@ -493,5 +507,19 @@ def make_fhir_node(output_dir: str):
 
 
 def route_from_triage(state: NeuroimagingState) -> str:
-    """Legacy helper retained for compatibility with older experiments."""
+    """Legacy helper retained for compatibility with older experiments.
+
+    NOT WIRED INTO ANY GRAPH. This is the only reader of `routing_decision`, and no
+    pipeline in graph.py calls add_conditional_edges — all three graphs (standard,
+    debate, forest) are linear, so every node runs for every image.
+
+    Consequently `routing_decision` gates nothing: both make_triage_node and
+    make_forest_triage_node hardcode it to "full_workup" and discard the
+    diagnosis_to_routing() result. The routing thresholds in RoutingConfig
+    (sam3_threshold, human_review_threshold, biomedclip_rerank_threshold) influence
+    *flags and confidence penalties* — segmentation_result["skipped"],
+    requires_human_review, the BiomedCLIP override — never which nodes execute.
+    Keep this in mind when interpreting the threshold_sweep / human_review_sweep
+    experiment families: they move flags and scores, not execution paths.
+    """
     return state["routing_decision"]
