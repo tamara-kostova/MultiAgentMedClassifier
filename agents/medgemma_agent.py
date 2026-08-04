@@ -39,6 +39,15 @@ from config import DEFAULT_CONFIG, ModelConfig, RoutingConfig, resolve_torch_dev
 # ── Load prompts from files ───────────────────────────────────────────────────
 _PROMPTS_DIR = Path(__file__).parent.parent / "prompts"
 
+
+def _none_if_null_str(v):
+    """The system prompts instruct MedGemma to emit the literal string "null"
+    (not JSON null) for indeterminable optional fields. Normalize it to None
+    so downstream truthy checks (`if dx.diagnosis_detailed:`) behave correctly."""
+    if isinstance(v, str) and v.strip().lower() == "null":
+        return None
+    return v
+
 SYSTEM_PROMPT = (_PROMPTS_DIR / "system_prompt.txt").read_text()
 SYSTEM_PROMPT_FEW_SHOT = (_PROMPTS_DIR / "system_prompt_few_shot.txt").read_text()
 SYSTEM_PROMPT_BBOX = (_PROMPTS_DIR / "system_prompt_bbox.txt").read_text()
@@ -61,10 +70,19 @@ class MedicalDiagnosis(BaseModel):
     severity_confidence: Optional[float]
 
     @field_validator(
+        "modality", "specialized_sequence", "plane", "diagnosis_name",
+        "diagnosis_detailed", "icd10_code", mode="before",
+    )
+    @classmethod
+    def normalize_null_string(cls, v):
+        return _none_if_null_str(v)
+
+    @field_validator(
         "diagnosis_confidence", "severity_score", "severity_confidence", mode="before"
     )
     @classmethod
     def clamp_float(cls, v):
+        v = _none_if_null_str(v)
         if v is None:
             return v
         return max(0.0, min(1.0, float(v)))
@@ -96,6 +114,11 @@ class VerificationResult(BaseModel):
     alternative_diagnosis: Optional[str]
     verification_confidence: float
     reasoning: str
+
+    @field_validator("alternative_diagnosis", mode="before")
+    @classmethod
+    def normalize_null_string(cls, v):
+        return _none_if_null_str(v)
 
     @field_validator("verification_confidence", mode="before")
     @classmethod
@@ -572,6 +595,25 @@ class MedGemmaAgent:
         if not parsed_objects:
             raise json.JSONDecodeError("No JSON object found", text, 0)
         return parsed_objects[-1]
+
+    def diagnose_with_role(self, image_path: str, role_prompt: str) -> MedicalDiagnosis:
+        """
+        Run a role-specific prompt against the image and parse a MedicalDiagnosis.
+        Used by AgentForest to run N role-specialized instances.
+        The role_prompt is a complete prompt (role prefix + JSON schema).
+        """
+        image = Image.open(image_path).convert("RGB")
+        return self._run_diagnostic_prompt(image, role_prompt)
+
+    def generate_for_prompt(
+        self, image_path: str, prompt: str, max_new_tokens: int = 300
+    ) -> str:
+        """
+        Run a free-form prompt against the image and return raw text.
+        Used by DebateOrchestrator for advocate and judge calls.
+        """
+        image = Image.open(image_path).convert("RGB")
+        return self._generate(image, prompt, max_new_tokens=max_new_tokens)
 
     def verify_cnn_prediction(
         self,

@@ -18,6 +18,9 @@ CSVs:
   confidence_calibration_summary.csv
   calibration_bins_<model>.csv
   latency_stats.csv
+  forest_voting_quality.csv       (forest runs only)
+  forest_agent_accuracy.csv       (forest runs only)
+  debate_round_analysis.csv       (debate runs only)
 Plots:
   model_accuracy.png
   confusion_matrices.png
@@ -25,6 +28,7 @@ Plots:
   calibration_plot.png
   confidence_by_correctness.png
   latency.png
+  forest_agent_accuracy.png       (forest runs only)
 """
 
 import argparse
@@ -51,7 +55,12 @@ _TUMOR_SUBTYPES = (
     "carcinoma", "germinoma", "glioma", "granuloma", "medulloblastoma",
     "meningioma", "neurocytoma", "papilloma", "schwannoma", "tuberculoma",
 )
-_STROKE_TOKENS = ("stroke", "ischemic", "ischemia", "hemorrhagic", "bleeding", "infarct")
+_STROKE_TOKENS = ("stroke", "ischemic", "ischemia", "hemorrhag", "bleeding", "infarct")
+# MedGemma names MS lesions descriptively rather than using the disease name, e.g.
+# "demyelinating plaque", "periventricular white matter lesion". On a FLAIR MS
+# benchmark these are MS assertions, so they must canonicalize to "ms" or strict
+# scoring counts them as negatives.
+_MS_TOKENS = ("multiple sclerosis", "demyelinat", "white matter lesion", "white matter plaque")
 
 
 def canonical_label(value: object, task: str | None = None) -> str:
@@ -60,9 +69,14 @@ def canonical_label(value: object, task: str | None = None) -> str:
         return ""
     n = (text.replace("_", " ").replace("-", " ")
               .replace("/", " ").replace("tumour", "tumor"))
+    # "abnormal" / "other abnormalities" contains the substring "normal" — catch it
+    # first, or an abnormality assertion is scored as a normal read. Kept in sync
+    # with eval.tumor_eval.canonical_label.
+    if "abnormal" in n:
+        return "abnormal"
     if "normal" in n or "control" in n:
         return "normal"
-    if n == "ms" or n.startswith("ms ") or "multiple sclerosis" in n:
+    if n == "ms" or n.startswith("ms ") or any(tok in n for tok in _MS_TOKENS):
         return "ms"
     if any(tok in n for tok in _STROKE_TOKENS):
         return "stroke"
@@ -88,18 +102,46 @@ def pos_class(task: str) -> str:
     return {"ms": "ms", "stroke": "stroke"}.get(task, "tumor")
 
 
-def prep(label: str, task: str) -> str:
-    """Normalize for comparison. Multiclass: keep subtype. Binary: collapse to (pos|normal|unknown)."""
+# Binary scoring convention. Both are defensible but they measure different things,
+# so the choice must be stated explicitly alongside any reported number.
+#   "strict"   — the task's own question ("is this stroke?"). A prediction naming a
+#                *different* pathology is an assertion that the target pathology is
+#                absent, so it scores as a negative. This is what "MS detection" and
+#                "stroke detection" mean, and it is the primary convention.
+#   "abnormal" — abnormality screening ("is this scan not-normal?"). Any pathology
+#                label counts as positive. Inflates sensitivity and deflates
+#                specificity whenever the model names an off-task pathology.
+SCORING_MODES = ("strict", "abnormal")
+SCORING = "strict"
+
+
+def set_scoring(mode: str) -> None:
+    if mode not in SCORING_MODES:
+        raise ValueError(f"scoring must be one of {SCORING_MODES}, got {mode!r}")
+    global SCORING
+    SCORING = mode
+
+
+def prep(label: str, task: str, scoring: str | None = None) -> str:
+    """Normalize for comparison. Multiclass: keep subtype. Binary: collapse to (pos|normal|unknown).
+
+    "unknown" marks an abstention (empty label / parse failure / "null" sentinel) and
+    is excluded from binary metrics rather than being scored as a prediction.
+    """
     if is_multiclass(task):
         cl = canonical_label(label, task)
         return cl if cl else "unknown"
-    # Binary: any non-empty non-normal → positive class
     cl = canonical_label(label, task)
     if not cl:
         return "unknown"
     if cl == "normal":
         return "normal"
-    return pos_class(task)
+    pos = pos_class(task)
+    if (scoring or SCORING) == "abnormal":
+        return pos
+    # strict: only the task's own pathology counts as positive; naming another
+    # pathology asserts the target pathology is absent.
+    return pos if cl == pos else "normal"
 
 
 def mg_diag_pred(diag: object, task: str) -> str:
@@ -229,14 +271,16 @@ def calibration_bins_df(confs: np.ndarray, correct: np.ndarray, n_bins: int = 10
 
 # ── prediction builder ─────────────────────────────────────────────────────────
 
-def build_model_preds(df: pd.DataFrame, task: str) -> dict[str, tuple[list, list]]:
+def build_model_preds(
+    df: pd.DataFrame, task: str, scoring: str | None = None
+) -> dict[str, tuple[list, list]]:
     """Return {model_name: ([prep'd predictions], [confidences])}.
 
     Binary tasks: predictions are binarized to (pos | normal | unknown).
     Multiclass:   predictions are canonical subtype labels.
     """
     def _prep_col(col: str) -> list:
-        return [prep(str(v or ""), task) for v in df[col].fillna("")]
+        return [prep(str(v or ""), task, scoring) for v in df[col].fillna("")]
 
     return {
         "cnn": (
@@ -244,16 +288,16 @@ def build_model_preds(df: pd.DataFrame, task: str) -> dict[str, tuple[list, list
             df["cnn_confidence"].fillna(0.5).tolist(),
         ),
         "biomedclip": (
-            [prep(canonical_label(str(v or ""), task), task)
+            [prep(canonical_label(str(v or ""), task), task, scoring)
              for v in df["biomedclip_top_label"].fillna("")],
             df["biomedclip_top_score"].fillna(0.5).tolist(),
         ),
         "medgemma_initial": (
-            [prep(mg_diag_pred(d, task), task) for d in df["medgemma_diagnosis"]],
+            [prep(mg_diag_pred(d, task), task, scoring) for d in df["medgemma_diagnosis"]],
             [mg_conf(d) for d in df["medgemma_diagnosis"]],
         ),
         "medgemma_final": (
-            [prep(mg_diag_pred(d, task), task) for d in df["final_medgemma_diagnosis"]],
+            [prep(mg_diag_pred(d, task), task, scoring) for d in df["final_medgemma_diagnosis"]],
             [mg_conf(d) for d in df["final_medgemma_diagnosis"]],
         ),
         "pipeline_final": (
@@ -271,11 +315,31 @@ def section_model_accuracy(df: pd.DataFrame, task: str) -> pd.DataFrame:
     multi = is_multiclass(task)
     pos   = pos_class(task)
 
+    # Same predictions scored under the alternate binary convention, so a reader can
+    # see how much of any number is the scoring choice rather than model behaviour.
+    alt = next(m for m in SCORING_MODES if m != SCORING) if not multi else None
+    alt_preds = (
+        {n: p for n, (p, _) in build_model_preds(df, task, scoring=alt).items()}
+        if alt else {}
+    )
+    alt_gt = [prep(str(v or ""), task, scoring=alt) for v in
+              df["true_label_canonical"].fillna("")] if alt else []
+
     for name, (preds, _) in build_model_preds(df, task).items():
         row = (multiclass_metrics_row(gt, preds, name)
                if multi else binary_metrics_row(gt, preds, pos, name))
-        if row:
-            rows.append(row)
+        if not row:
+            continue
+        row["scoring"] = "multiclass" if multi else SCORING
+        row["n_abstained"] = int(sum(p == "unknown" for p in preds))
+        if alt:
+            alt_row = binary_metrics_row(alt_gt, alt_preds[name], pos, name)
+            if alt_row:
+                row[f"accuracy_{alt}"]    = alt_row["accuracy"]
+                row[f"sensitivity_{alt}"] = alt_row["sensitivity"]
+                row[f"specificity_{alt}"] = alt_row["specificity"]
+                row[f"n_{alt}"]           = alt_row["n"]
+        rows.append(row)
     return pd.DataFrame(rows)
 
 
@@ -374,6 +438,113 @@ def section_latency(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def section_forest_voting(df: pd.DataFrame, task: str) -> pd.DataFrame:
+    """
+    Agent Forest voting quality — dissent rate vs. accuracy.
+
+    Empty unless the JSONL carries a `dissent_rate` column (i.e. it was produced by
+    `--pipeline_mode forest`). Shows whether agent disagreement flags harder cases:
+    accuracy on unanimous vs. split votes.
+    """
+    if "dissent_rate" not in df.columns or df["dissent_rate"].isna().all():
+        return pd.DataFrame()
+    sub = df[df["dissent_rate"].notna()].copy()
+    gt = [prep(str(v or ""), task) for v in sub["true_label_canonical"].fillna("")]
+    pr = [prep(str(v or ""), task) for v in sub["predicted_class_canonical"].fillna("")]
+    correct = np.array([int(t == p) for t, p in zip(gt, pr)], dtype=float)
+    dissent = sub["dissent_rate"].astype(float).values
+    unan, split = dissent == 0.0, dissent > 0.0
+
+    def _acc(mask, min_n=1):
+        return round(float(correct[mask].mean()), 4) if mask.sum() >= min_n else float("nan")
+
+    return pd.DataFrame([{
+        "n": len(sub),
+        "mean_dissent_rate": round(float(dissent.mean()), 4),
+        "unanimous_pct": round(float(unan.mean()) * 100, 1),
+        "accuracy_unanimous": _acc(unan),
+        "accuracy_split": _acc(split, min_n=5),
+        "accuracy_overall": round(float(correct.mean()), 4),
+    }])
+
+
+def section_forest_agent_accuracy(df: pd.DataFrame, task: str) -> pd.DataFrame:
+    """
+    Agent Forest — per-role accuracy breakdown.
+
+    Empty unless the JSONL carries a `forest_votes` column (i.e. it was produced by
+    `--pipeline_mode forest`). Each role's own vote is scored against ground truth
+    the same way medgemma_initial/medgemma_final are scored (binary_metrics_row /
+    multiclass_metrics_row), so roles are directly comparable to the rest of the
+    model_accuracy table.
+    """
+    if "forest_votes" not in df.columns:
+        return pd.DataFrame()
+    sub = df[df["forest_votes"].apply(lambda v: isinstance(v, list) and len(v) > 0)]
+    if sub.empty:
+        return pd.DataFrame()
+
+    multi = is_multiclass(task)
+    pos = pos_class(task)
+    field = "diagnosis_detailed" if multi else "diagnosis_name"
+
+    gt_list = [prep(str(v or ""), task) for v in sub["true_label_canonical"].fillna("")]
+    votes_list = sub["forest_votes"].tolist()
+    roles = sorted({v.get("role") for votes in votes_list for v in votes if v.get("role")})
+
+    rows = []
+    for role in roles:
+        preds, confs = [], []
+        for votes in votes_list:
+            v = next((x for x in votes if x.get("role") == role), None)
+            raw = (v.get(field) if v else None) or ""
+            preds.append(prep(canonical_label(str(raw), task), task))
+            confs.append(v.get("diagnosis_confidence") if v else None)
+        row = (multiclass_metrics_row(gt_list, preds, role) if multi
+               else binary_metrics_row(gt_list, preds, pos, role))
+        if row:
+            valid_confs = [c for c in confs if c is not None]
+            row["mean_conf"] = (
+                round(sum(valid_confs) / len(valid_confs), 4) if valid_confs else float("nan")
+            )
+            rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def section_debate_rounds(df: pd.DataFrame, task: str) -> pd.DataFrame:
+    """
+    Multi-Agent Debate — verdict stability vs. accuracy/ECE.
+
+    Empty unless the JSONL carries a `debate_rounds_completed` column (i.e. it was
+    produced by `--pipeline_mode debate`). Shows whether cases whose verdict flipped
+    across rounds are less accurate / worse calibrated than stable ones.
+    """
+    if "debate_rounds_completed" not in df.columns or df["debate_rounds_completed"].isna().all():
+        return pd.DataFrame()
+    sub = df[df["debate_rounds_completed"].notna()].copy()
+    gt = [prep(str(v or ""), task) for v in sub["true_label_canonical"].fillna("")]
+    pr = [prep(str(v or ""), task) for v in sub["predicted_class_canonical"].fillna("")]
+    correct = np.array([int(t == p) for t, p in zip(gt, pr)], dtype=float)
+    confs = np.clip(sub["final_confidence"].astype(float).fillna(0.0).values, 0, 1)
+    changed = sub["debate_round_changed"].fillna(False).astype(bool).values
+
+    def _acc(mask):
+        return round(float(correct[mask].mean()), 4) if mask.sum() >= 5 else float("nan")
+
+    def _ece(mask):
+        return round(compute_ece(confs[mask], correct[mask]), 4) if mask.sum() >= 5 else float("nan")
+
+    return pd.DataFrame([{
+        "n": len(sub),
+        "pct_verdict_changed": round(float(changed.mean()) * 100, 1),
+        "accuracy_changed": _acc(changed),
+        "accuracy_unchanged": _acc(~changed),
+        "ece_changed": _ece(changed),
+        "ece_unchanged": _ece(~changed),
+        "ece_overall": round(compute_ece(confs, correct), 4),
+    }])
+
+
 # ── plot helpers ───────────────────────────────────────────────────────────────
 
 def _save(fig: plt.Figure, path: Path) -> None:
@@ -418,6 +589,52 @@ def plot_model_accuracy(accuracy_df: pd.DataFrame, task: str, out: Path) -> None
     ax.grid(axis="y", alpha=0.3)
     plt.tight_layout()
     _save(fig, out / "model_accuracy.png")
+
+
+def plot_forest_agent_accuracy(
+    forest_agent_df: pd.DataFrame, accuracy_df: pd.DataFrame, task: str, out: Path
+) -> None:
+    """Per-role forest agent metrics, grouped bars, with the majority-vote
+    (pipeline_final) accuracy overlaid as a reference line."""
+    if forest_agent_df.empty:
+        return
+    multi   = is_multiclass(task)
+    metrics = (["accuracy", "f1_macro", "f1_weighted"]
+               if multi else ["accuracy", "sensitivity", "specificity", "f1_macro"])
+    roles   = forest_agent_df["model"].tolist()
+    x       = np.arange(len(roles))
+    width   = 0.8 / len(metrics)
+    colors  = ["#2196F3", "#4CAF50", "#FF9800", "#9C27B0"]
+
+    fig, ax = plt.subplots(figsize=(max(9, len(roles) * 2.2), 6))
+    for i, (metric, color) in enumerate(zip(metrics, colors)):
+        if metric not in forest_agent_df.columns:
+            continue
+        vals = forest_agent_df[metric].astype(float).tolist()
+        bars = ax.bar(x + i * width, vals, width, label=metric, color=color, alpha=0.82)
+        for bar, v in zip(bars, vals):
+            if not np.isnan(v):
+                ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.008,
+                        f"{v:.3f}", ha="center", va="bottom", fontsize=7.5, rotation=30)
+
+    offset = width * (len(metrics) - 1) / 2
+    ax.set_xticks(x + offset)
+    ax.set_xticklabels([r.replace("_", "\n") for r in roles], fontsize=9)
+    ax.set_ylim(0, 1.2)
+    ax.set_ylabel("Score")
+    ax.set_title(f"Agent Forest — per-role vs. majority-vote accuracy ({task} task)")
+
+    final_row = accuracy_df[accuracy_df["model"] == "pipeline_final"]
+    if not final_row.empty and not np.isnan(final_row["accuracy"].iloc[0]):
+        final_acc = float(final_row["accuracy"].iloc[0])
+        ax.axhline(final_acc, color="#333333", linestyle="--", linewidth=1.4, alpha=0.85,
+                   label=f"majority vote (pipeline_final) = {final_acc:.3f}")
+
+    ax.axhline(0.5, color="gray", linestyle=":", linewidth=0.7, alpha=0.4)
+    ax.legend(loc="upper right", fontsize=9)
+    ax.grid(axis="y", alpha=0.3)
+    plt.tight_layout()
+    _save(fig, out / "forest_agent_accuracy.png")
 
 
 def plot_confusion_matrices(cm_dict: dict, task: str, out: Path) -> None:
@@ -688,7 +905,16 @@ def main() -> None:
     parser.add_argument("--jsonl",      required=True, help="Path to eval JSONL file")
     parser.add_argument("--output_dir", default=None,
                         help="Output directory (default: outputs/analysis/<jsonl-stem>)")
+    parser.add_argument("--scoring", default="strict", choices=list(SCORING_MODES),
+                        help=(
+                            "Binary scoring convention. 'strict' (default): only the "
+                            "task's own pathology counts as positive; naming another "
+                            "pathology scores as negative. 'abnormal': any pathology "
+                            "label counts as positive (abnormality screening). "
+                            "Both are written to model_accuracy_summary.csv."
+                        ))
     args = parser.parse_args()
+    set_scoring(args.scoring)
 
     df   = load(args.jsonl)
     task = str(df["task"].iloc[0]) if "task" in df.columns and len(df) else "unknown"
@@ -698,7 +924,8 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
 
     multi = is_multiclass(task)
-    print(f"\nTask: {task}  |  {'multiclass' if multi else f'positive class: {pos}'}  |  n={len(df)}")
+    print(f"\nTask: {task}  |  {'multiclass' if multi else f'positive class: {pos}'}  |  n={len(df)}"
+          f"{'' if multi else f'  |  scoring: {SCORING}'}")
     print(f"Output: {out}/\n")
 
     # ── compute ────────────────────────────────────────────────────────────────
@@ -740,12 +967,33 @@ def main() -> None:
     lat_df = section_latency(df)
     print(lat_df.to_string(index=False))
 
+    forest_df = section_forest_voting(df, task)
+    if not forest_df.empty:
+        print("\n══ Agent Forest — voting quality (dissent vs. accuracy) ══")
+        print(forest_df.to_string(index=False))
+
+    forest_agent_df = section_forest_agent_accuracy(df, task)
+    if not forest_agent_df.empty:
+        print("\n══ Agent Forest — per-role accuracy ══")
+        print(forest_agent_df.to_string(index=False))
+
+    debate_df = section_debate_rounds(df, task)
+    if not debate_df.empty:
+        print("\n══ Multi-Agent Debate — round analysis (verdict stability vs. ECE) ══")
+        print(debate_df.to_string(index=False))
+
     # ── save CSVs ──────────────────────────────────────────────────────────────
     print("\nSaving CSVs...")
     accuracy_df.to_csv(out / "model_accuracy_summary.csv", index=False)
     shift_df.to_csv(out / "medgemma_shift_analysis.csv",   index=False)
     calib_df.to_csv(out / "confidence_calibration_summary.csv", index=False)
     lat_df.to_csv(out / "latency_stats.csv", index=False)
+    if not forest_df.empty:
+        forest_df.to_csv(out / "forest_voting_quality.csv", index=False)
+    if not forest_agent_df.empty:
+        forest_agent_df.to_csv(out / "forest_agent_accuracy.csv", index=False)
+    if not debate_df.empty:
+        debate_df.to_csv(out / "debate_round_analysis.csv", index=False)
     for name, bins in bins_dict.items():
         bins.to_csv(out / f"calibration_bins_{name}.csv", index=False)
     for name, cm_df in cm_dict.items():
@@ -761,6 +1009,7 @@ def main() -> None:
     plot_calibration(bins_dict, task, out)
     plot_confidence_by_correctness(df, task, out)
     plot_latency(df, task, out)
+    plot_forest_agent_accuracy(forest_agent_df, accuracy_df, task, out)
 
     print(f"\nAll outputs saved to {out}/")
     for f in sorted(out.iterdir()):

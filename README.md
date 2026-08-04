@@ -238,6 +238,246 @@ python run_pipeline.py --dataset_eval \
 The generic dataset evaluator scans `<dataset>/<class>/**/<image>` and writes to
 `outputs/eval/<task>_dataset_eval.jsonl` by default.
 
+**System B — Multi-Agent Debate** (CNN / BiomedCLIP / SAM3 MedGemma advocates + judge):
+
+```bash
+# Single-round arbitration (default)
+python run_pipeline.py --image scan.png --task multiclass_tumor --pipeline_mode debate
+
+# Two debate rounds: advocates respond to the round-1 verdict
+python run_pipeline.py --image scan.png --task multiclass_tumor --pipeline_mode debate --debate_rounds 2
+
+# Research sweep over 1 / 2 / 3 rounds (whole family)
+python run_research.py --family debate_rounds --multiclass_dir data/figshare
+
+# Or a single config on a class-balanced subset, for a quick run
+python run_research.py --family debate_rounds --points debate_r2 --max_samples 200 \
+  --multiclass_dir data/figshare
+```
+
+The sweep writes `outputs/research/debate_rounds_<timestamp>/analysis/report.md`, which
+includes a **Debate Round Analysis** table (verdict stability vs. ECE). Labels are
+canonicalized automatically, so raw class-folder datasets score correctly.
+
+Debate replaces the `verification + report` tail. Three MedGemma instances argue on behalf of CNN, BiomedCLIP, and SAM3 outputs respectively; a fourth MedGemma instance judges. In round 2+, advocates see the prior verdict and the other advocates' arguments before responding. Verdict stored in `state["debate_verdict"]`; per-round arguments in `state["debate_arguments"]`.
+
+**System C — Agent Forest** (N role-specialized MedGemma agents + majority vote):
+
+```bash
+# 3-agent forest (radiologist, conservative, emergency roles)
+python run_pipeline.py --image scan.png --task multiclass_tumor --pipeline_mode forest
+
+# 4-agent forest (adds differential-diagnostician role)
+python run_pipeline.py --image scan.png --task multiclass_tumor --pipeline_mode forest --forest_n_agents 4
+
+# Research sweep over N = 1 / 3 / 4 agents (whole family)
+python run_research.py --family agent_forest --multiclass_dir data/figshare
+
+# Or a single size on a class-balanced subset
+python run_research.py --family agent_forest --points forest_n4 --max_samples 200 \
+  --multiclass_dir data/figshare
+```
+
+The sweep report includes a **Forest Voting Quality** table (dissent rate vs. accuracy).
+`forest_n1` is the single-agent baseline (`radiologist` only, no vote) used as the
+control for the N-comparison.
+
+Forest replaces the single `triage` node. N role-specialized MedGemma instances (prompts in `prompts/forest_*.txt`) independently diagnose the scan; majority vote + confidence-weighted tiebreaking produces the consensus routing decision. All downstream nodes (CNN, SAM3, BiomedCLIP, report) run unchanged. Votes stored in `state["forest_votes"]`; consensus in `state["forest_consensus"]` (includes `dissent_rate` and `vote_fraction`).
+
+### Running these on a shared GPU server (`server_bundle/`)
+
+The six remaining runs below are executed on the faculty GPU servers by someone else, from
+their account, so they are packaged as a self-contained hand-off in
+[`server_bundle/`](server_bundle/): a Singularity definition (`container.def`, CUDA 12.6 /
+Python 3.12 / torch 2.10+cu126, versions pinned to the environment that produced the
+existing JSONLs), numbered one-command step scripts, a preflight that proves both pipelines
+run before a night of GPU time is committed, and TSV/CSV export of every result.
+
+```bash
+# locally, once
+python server_bundle/scripts/prepack_models.py     # build offline hf_cache/ (~12.5 GB)
+bash   server_bundle/scripts/pack_bundle.sh        # → maclf-code-data.tar.gz + maclf-models.tar
+
+# on the server (see server_bundle/README_SERVER.md — Macedonian + English)
+singularity build --remote container.sif container.def
+bash server_bundle/00_preflight.sh                 # must print PREFLIGHT OK
+nohup bash server_bundle/run_all.sh &              # or run_parallel.sh 0 1 2
+bash server_bundle/90_export_results.sh            # → results_<host>_<date>.tar.gz
+```
+
+`server_bundle/PLAN.md` holds the campaign plan and the measured facts behind it;
+`server_bundle/SEND_CHECKLIST.md` is the pre-send checklist.
+
+### Guide — reproducing paper-comparable Forest / Debate results
+
+These runs use the **resumable rich-JSONL eval path** — the same path the paper's tables
+came from. It is crash-safe (re-run the exact command to continue), applies label
+canonicalization, samples class-balanced up to `--max_samples`, and honours
+`--pipeline_mode`.
+
+The dataset directories below are the ones actually recorded in the `image_path` field of
+the completed runs in `outputs/eval/`, so they are the paths the results were produced
+from:
+
+| Task | `--*_eval_dir` | Class folders |
+|---|---|---|
+| `binary_tumor` | `data/Br35H` | `yes`, `no` |
+| `multiclass_tumor` | `data/figshare` | `1`, `2`, `3` |
+| `ms` | `data/sclerosis/MS` | `MS Axial_crop`, `MS Saggital_crop`, `Control Axial_crop`, `Control Saggital_crop` |
+| `stroke` | `data/stroke/Brain_Stroke_CT_Dataset` | `Bleeding/OVERLAY`, `Ischemia/OVERLAY`, `Normal/PNG` |
+
+Note that `data/processed` is a *separate* copy of the figshare data that no paper run
+used — point `multiclass_tumor` at `data/figshare` to stay comparable to the existing
+JSONLs. Stroke images sit one level below the class folder, which is fine here because
+`run_dataset_eval` globs recursively; `load_test_split` (used by `run_research.py`) does
+not, so the sweep path needs a directory whose class folders hold images directly.
+
+`--max_samples 500` samples class-balanced up to that cap (binary 250/250, multiclass
+167/167/166, MS 125×4, stroke 167/167/166).
+
+**Campaign status and run order.** Forest N=4 on both tumour tasks is done; the six runs
+below are the remaining work, in execution order. Debate R=2 costs roughly 1.5–2× a Forest
+N=4 run on the same task (9 image-conditioned MedGemma calls vs 7), so the debate runs are
+the ones at risk of not fitting a single overnight slot.
+
+| # | Run | Status | Est. wall clock (500 imgs) |
+|---|---|---|---|
+| — | Forest N=4, `binary_tumor` | **done** (n=500) | 8.9 h measured |
+| — | Forest N=4, `multiclass_tumor` | **done** (n=465) | 9.6 h measured |
+| 1 | Forest N=4, `stroke` | — | ~8 h |
+| 2 | Forest N=4, `ms` | — | ~8 h |
+| 3 | Debate R=2, `binary_tumor` | — | ~13–16 h |
+| 4 | Debate R=2, `stroke` | — | ~12–16 h |
+| 5 | Debate R=2, `ms` | — | ~12–16 h |
+| 6 | Debate R=2, `multiclass_tumor` | — | ~14–16 h |
+
+Step 6 is last deliberately: the multiclass CNN checkpoint has a 12-class head evaluated on
+3-class figshare (accuracy 0.140, and 0.271–0.314 even after masking the softmax to the
+three figshare classes) and BiomedCLIP scores 0.163, so both tool advocates the judge
+arbitrates between are at or below chance on that task. Drop step 6 first if time runs short.
+
+**0. Prove the debate path** — 10 images, MS, capped. The debate graph has never run at
+scale, so spend 15 minutes confirming it before committing a night. Because resume keys on
+the output file, re-running step 5's command later continues from image 11 rather than
+restarting, so this costs nothing:
+
+```bash
+python run_pipeline.py --dataset_eval --task ms     --label_map ms_binary \
+  --dataset_eval_dir data/sclerosis/MS                 --max_samples 10 \
+  --pipeline_mode debate --debate_rounds 2 \
+  --dataset_eval_output outputs/eval/ms_debate_r2.jsonl
+```
+
+Check `error` is null and that `debate_rounds_completed`, `debate_round_changed` and
+`debate_winner` are populated, then read the median `latency_s` to project the full run. If
+it exceeds ~100 s/image, drop the debate runs to `--max_samples 300` so each fits one night.
+
+**1–2. Forest N=4 — `stroke` then `ms`:**
+
+```bash
+python run_pipeline.py --dataset_eval --task stroke --label_map stroke_binary \
+  --dataset_eval_dir data/stroke/Brain_Stroke_CT_Dataset --max_samples 500 \
+  --pipeline_mode forest --forest_n_agents 4 \
+  --dataset_eval_output outputs/eval/stroke_forest_n4.jsonl
+
+python run_pipeline.py --dataset_eval --task ms     --label_map ms_binary \
+  --dataset_eval_dir data/sclerosis/MS                 --max_samples 500 \
+  --pipeline_mode forest --forest_n_agents 4 \
+  --dataset_eval_output outputs/eval/ms_forest_n4.jsonl
+```
+
+For reference, the two completed Forest runs were produced by:
+
+```bash
+python run_pipeline.py --tumor_eval   --task binary_tumor     --label_map br35h \
+  --tumor_eval_dir   data/Br35H                        --max_samples 500 \
+  --pipeline_mode forest --forest_n_agents 4 \
+  --tumor_eval_output   outputs/eval/binary_forest_n4.jsonl
+
+python run_pipeline.py --tumor_eval   --task multiclass_tumor --label_map figshare3 \
+  --tumor_eval_dir   data/figshare                     --max_samples 500 \
+  --pipeline_mode forest --forest_n_agents 4 \
+  --tumor_eval_output   outputs/eval/multiclass_forest_n4.jsonl
+```
+
+**3–6. Debate R=2 — `binary_tumor`, `stroke`, `ms`, `multiclass_tumor`:** identical to the
+Forest commands with `--pipeline_mode debate --debate_rounds 2` and `*_debate_r2.jsonl`
+output names:
+
+```bash
+python run_pipeline.py --tumor_eval   --task binary_tumor     --label_map br35h \
+  --tumor_eval_dir   data/Br35H                        --max_samples 500 \
+  --pipeline_mode debate --debate_rounds 2 \
+  --tumor_eval_output   outputs/eval/binary_debate_r2.jsonl
+
+python run_pipeline.py --dataset_eval --task stroke --label_map stroke_binary \
+  --dataset_eval_dir data/stroke/Brain_Stroke_CT_Dataset --max_samples 500 \
+  --pipeline_mode debate --debate_rounds 2 \
+  --dataset_eval_output outputs/eval/stroke_debate_r2.jsonl
+
+python run_pipeline.py --dataset_eval --task ms     --label_map ms_binary \
+  --dataset_eval_dir data/sclerosis/MS                 --max_samples 500 \
+  --pipeline_mode debate --debate_rounds 2 \
+  --dataset_eval_output outputs/eval/ms_debate_r2.jsonl
+
+python run_pipeline.py --tumor_eval   --task multiclass_tumor --label_map figshare3 \
+  --tumor_eval_dir   data/figshare                     --max_samples 500 \
+  --pipeline_mode debate --debate_rounds 2 \
+  --tumor_eval_output   outputs/eval/multiclass_debate_r2.jsonl
+```
+
+**Then build the metric tables** (Acc / F1 / Sens / Spec) from each JSONL, exactly as for
+the paper — compare each against the matching baseline JSONL already in `outputs/eval/`:
+
+```bash
+python eval/eval_analysis.py --jsonl outputs/eval/multiclass_forest_n4.jsonl
+python eval/eval_analysis.py --jsonl outputs/eval/multiclass_tumor_tumor_eval.jsonl  # baseline
+```
+
+**Scoring convention.** On binary tasks, `--scoring` selects how a prediction naming a
+*different* pathology is counted, and the choice moves the numbers substantially, so state
+it alongside any reported result. `strict` (the default) answers the task's own question —
+"is this stroke?" — so naming another pathology is an assertion that the target pathology is
+absent and scores as a negative. `abnormal` answers "is this scan not-normal?", counting any
+pathology label as positive, which inflates sensitivity and deflates specificity whenever
+the model names an off-task pathology. This matters here because MedGemma frequently does:
+23.5% of MS scans are labelled `glioma` and 13.7% of stroke CTs are labelled with a tumour
+subtype. Both conventions are written to `model_accuracy_summary.csv` (columns
+`accuracy`/`sensitivity`/`specificity` for the selected mode, plus `*_abnormal` for the
+other) together with `n_abstained`, so a reader can see how much of a number is the scoring
+choice rather than model behaviour. Multiclass tumour is unaffected — it is always scored on
+the canonical subtype.
+
+```bash
+python eval/eval_analysis.py --jsonl outputs/eval/ms_debate_r2.jsonl --scoring abnormal
+```
+
+The forest/debate JSONLs also carry the per-sample voting/verdict fields, so the **same**
+`eval_analysis.py` run additionally prints (and saves) the *Agent Forest — voting quality*
+table for forest JSONLs and the *Multi-Agent Debate — round analysis* table for debate
+JSONLs. No separate run is needed for those.
+
+**Notes**
+
+- **Resumable & crash-safe** — Forest N=4 and Debate R=2 add several MedGemma calls per
+  image, so each 500-image task is multi-hour and all eight together are a multi-day
+  campaign. Re-run any command to continue from where it stopped.
+- **Use the distinct `--*_output` names above — never the defaults.** Resume keys on the
+  output file, and the default names (`multiclass_tumor_tumor_eval.jsonl`, etc.) already
+  hold the **standard-pipeline baseline** results; reusing them would append forest/debate
+  rows into (and corrupt) the paper's baseline files.
+- **`--max_samples 500` samples class-balanced** on these directories. Drop it to run the
+  full datasets. Note the existing baseline JSONLs in `outputs/eval/` were run at
+  `--max_samples 1000` on the old dataset paths — the forest/debate splits above are not
+  the same images, just the same class-balanced sampling method at a smaller cap.
+- **Do not add `--skip_report` for forest** — the report node produces the forest's final
+  prediction. (Debate replaces the report node, so it doesn't apply there.)
+- **SAM3** contributes only to the tumour tasks, and only if `checkpoints/sam3_probe.pth`
+  is present on the machine.
+- The **dissent-rate / verdict-stability tables** are produced from these same JSONLs by
+  `eval/eval_analysis.py` (above) — no extra run. `run_research.py` remains an alternative
+  that renders them into a combined sweep report if you also want that format.
+
 **Force SAM3 routing intent on every non-normal case** (overrides the confidence-based routing decision recorded in state):
 
 ```bash
@@ -342,10 +582,12 @@ This pipeline builds on three prior thesis components:
 ```
 MultiAgentMedClassifier/
 ├── agents/
-│   ├── medgemma_agent.py   # MedGemma: triage, bbox diagnosis, report
+│   ├── medgemma_agent.py   # MedGemma: triage, bbox diagnosis, report, debate judge/advocate, forest role
 │   ├── cnn_tool.py         # CNN classifier (VGG16 / DenseNet / ResNet)
 │   ├── sam3_tool.py        # SAM3 segmentation + linear probe head
-│   └── biomedclip_tool.py  # BiomedCLIP zero-shot / linear probe
+│   ├── biomedclip_tool.py  # BiomedCLIP zero-shot / linear probe
+│   ├── debate.py           # System B: DebateOrchestrator (3 advocates + judge, 1–3 rounds)
+│   └── forest.py           # System C: AgentForest (4 roles, majority vote)
 ├── pipeline/
 │   ├── graph.py            # LangGraph StateGraph assembly
 │   ├── nodes.py            # Node factory functions
@@ -360,8 +602,12 @@ MultiAgentMedClassifier/
 │   ├── evaluate.py         # Metrics: accuracy, F1, ECE, specificity, SAM3-rate, latency
 │   └── tumor_eval.py       # Resumable JSONL eval for single class-folder datasets
 ├── prompts/
-│   ├── system_prompt.txt       # MedGemma radiologist persona + JSON schema
-│   └── system_prompt_bbox.txt  # Same schema, bbox-overlay context
+│   ├── system_prompt.txt           # MedGemma radiologist persona + JSON schema
+│   ├── system_prompt_bbox.txt      # Same schema, bbox-overlay context
+│   ├── forest_radiologist.txt      # Forest role: visual pattern recognition
+│   ├── forest_conservative.txt     # Forest role: specificity-focused
+│   ├── forest_emergency.txt        # Forest role: sensitivity-focused
+│   └── forest_differential.txt     # Forest role: uncertainty-aware
 ├── checkpoints/            # PyTorch state dicts (auto-downloaded on first run)
 ├── outputs/
 │   ├── explainability/     # Saliency maps: gradcam_pp_*.png, ig_*.png

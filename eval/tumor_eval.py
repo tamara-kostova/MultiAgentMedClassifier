@@ -120,7 +120,7 @@ TASK_DEFAULT_LABEL_MAP: dict[str, str] = {
 # Directory names that are never class folders (annotations, predictions, etc.)
 _DEFAULT_EXCLUDE_DIRS: frozenset[str] = frozenset({
     "pred", "Br35H-Mask-RCNN", "annotations", "__pycache__", ".DS_Store",
-    "External_Test",
+    "External_Test", "OVERLAY", "DICOM", "MASKS",
 })
 
 
@@ -132,7 +132,10 @@ def load_dataset(
     """Scan <data_dir>/<class>/**/<image.*> (case-insensitive extensions).
 
     Automatically skips directories whose names end with '_mask' or appear
-    in exclude_dirs (defaults to _DEFAULT_EXCLUDE_DIRS).
+    in exclude_dirs (defaults to _DEFAULT_EXCLUDE_DIRS), at any nesting level
+    under the class folder — e.g. a sibling `OVERLAY/` (annotated duplicates
+    of `PNG/`) or `DICOM/` folder inside a class dir is skipped, not just
+    excluded top-level class names.
     """
     excluded = _DEFAULT_EXCLUDE_DIRS | (exclude_dirs or set())
     root = Path(data_dir)
@@ -143,14 +146,17 @@ def load_dataset(
         if class_dir.name.endswith("_mask") or class_dir.name in excluded:
             continue
         for img_file in sorted(class_dir.rglob("*")):
-            if img_file.suffix.lower() in IMAGE_EXTENSIONS:
-                samples.append(
-                    {
-                        "image_path": str(img_file),
-                        "label": class_dir.name,
-                        "task": task,
-                    }
-                )
+            if img_file.suffix.lower() not in IMAGE_EXTENSIONS:
+                continue
+            if excluded.intersection(img_file.relative_to(class_dir).parts[:-1]):
+                continue
+            samples.append(
+                {
+                    "image_path": str(img_file),
+                    "label": class_dir.name,
+                    "task": task,
+                }
+            )
     return samples
 
 
@@ -191,9 +197,14 @@ _TUMOR_SUBTYPES = (
 
 
 def canonical_label(value: object, task: str | None = None) -> str:
-    """Normalize labels/predictions so metrics survive wording differences."""
+    """Normalize labels/predictions so metrics survive wording differences.
+
+    The prompt schema uses the literal string "null" as the sentinel for an
+    indeterminable field, so it must normalize to "" (absent) rather than being
+    treated as a class name. Kept in sync with eval_analysis.canonical_label.
+    """
     text = str(value or "").strip().lower()
-    if not text:
+    if not text or text in ("none", "null", "nan"):
         return ""
 
     normalized = (
@@ -203,6 +214,11 @@ def canonical_label(value: object, task: str | None = None) -> str:
         .replace("tumour", "tumor")
     )
 
+    # "abnormal" / "other abnormalities" contains the substring "normal", so it must
+    # be caught first — otherwise an abnormality assertion scores as a normal read.
+    # The debate judge's schema offers "other abnormalities" as a verdict.
+    if "abnormal" in normalized:
+        return "abnormal"
     if "normal" in normalized or "control" in normalized:
         return "normal"
     if (
@@ -330,6 +346,14 @@ def extract_row(
         "verification_agreement": verif.get("agreement"),
         "verification_alternative_dx": verif.get("alternative_diagnosis"),
         "verification_reasoning": verif.get("reasoning"),
+        # ── Agent Forest (System C) — None outside --pipeline_mode forest ─────
+        "dissent_rate": (final_state.get("forest_consensus") or {}).get("dissent_rate"),
+        "vote_fraction": (final_state.get("forest_consensus") or {}).get("vote_fraction"),
+        "forest_votes": final_state.get("forest_votes"),
+        # ── Multi-Agent Debate (System B) — None outside --pipeline_mode debate ─
+        "debate_rounds_completed": final_state.get("debate_rounds_completed"),
+        "debate_round_changed": (final_state.get("debate_verdict") or {}).get("round_changed"),
+        "debate_winner": (final_state.get("debate_verdict") or {}).get("winner"),
         # ── Full MedGemma report ──────────────────────────────────────────────
         "final_report": final_state.get("final_report"),
         # ── FHIR ──────────────────────────────────────────────────────────────

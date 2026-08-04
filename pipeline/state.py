@@ -32,8 +32,11 @@ class NeuroimagingState(TypedDict):
 
     # ── Routing ───────────────────────────────────────────────────────────────
     # All four fields written by: triage_node
-    routing_decision: Optional[str]  # "full_workup" (pipeline is currently linear; conditional
-                                     # routing is not yet implemented via LangGraph edges)
+    routing_decision: Optional[str]  # Always the literal "full_workup" — hardcoded by both
+                                     # triage nodes. All graphs are linear, so this gates
+                                     # nothing; its only reader is the unwired legacy helper
+                                     # route_from_triage(). Informational / for eval grouping
+                                     # only. See that docstring in pipeline/nodes.py.
     routing_confidence: float        # MedGemma's self-reported confidence in its routing decision
     routing_reasoning: str           # Short human-readable explanation from MedGemma
     suspected_pathology: str         # MedGemma's initial pathology label before specialist tools run
@@ -72,6 +75,19 @@ class NeuroimagingState(TypedDict):
                                          # explainability was not run
     fhir_report: Optional[dict]       # Written by fhir_node; FHIR R4 DiagnosticReport resource dict
 
+    # ── Agent Forest outputs ──────────────────────────────────────────────────
+    # Written by forest_triage_node (System C). None in standard / debate pipelines.
+    forest_votes: Optional[list]     # [{role, diagnosis_name, diagnosis_detailed, diagnosis_confidence}, ...]
+    forest_consensus: Optional[dict] # {winner, winner_detailed, vote_counts, vote_fraction,
+                                     #  confidence_weighted_confidence, dissent_rate, n_agents}
+
+    # ── Multi-Agent Debate outputs ────────────────────────────────────────────
+    # Written by debate_node (System B). None in standard / forest pipelines.
+    debate_arguments: Optional[list]       # [{round, role, argument}, ...]
+    debate_verdict: Optional[dict]         # {winner, winner_detailed, confidence, reason,
+                                           #  round_changed, rounds_completed}
+    debate_rounds_completed: Optional[int]
+
     # ── Diagnostics ───────────────────────────────────────────────────────────
     routing_path: list  # Append-only list; each node appends its own name on entry — used for
                         # evaluation reporting and debugging (never used for control flow)
@@ -105,4 +121,9 @@ def initial_state(
         verification_result=None,
         fhir_report=None,
         routing_path=[],
+        forest_votes=None,
+        forest_consensus=None,
+        debate_arguments=None,
+        debate_verdict=None,
+        debate_rounds_completed=None,
     )

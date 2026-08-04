@@ -154,11 +154,25 @@ def make_report_node(agent, routing_cfg: RoutingConfig = None, skip_report: bool
         # Determine final prediction from MedGemma's fused diagnosis when available.
         cnn = state.get("classification_result")
         clip = state.get("biomedclip_result")
-        if final_dx and final_dx.diagnosis_detailed:
-            final_class = final_dx.diagnosis_detailed
-            final_conf = final_dx.diagnosis_confidence
-        elif final_dx and final_dx.diagnosis_name:
-            final_class = final_dx.diagnosis_name
+        # Only multiclass tumor subtyping carries its label in diagnosis_detailed;
+        # for every other task diagnosis_name is the class and diagnosis_detailed is
+        # a free-text elaboration. Preferring detailed unconditionally corrupted
+        # normal-class predictions (the "null" sentinel was read as a class name).
+        # Mirrors eval_analysis.mg_diag_pred() so pipeline and scoring agree.
+        dx_fields = (
+            ("diagnosis_detailed", "diagnosis_name")
+            if state["task"] == "multiclass_tumor"
+            else ("diagnosis_name", "diagnosis_detailed")
+        )
+        dx_label = None
+        if final_dx:
+            for field in dx_fields:
+                value = getattr(final_dx, field, None)
+                if value and str(value).strip().lower() not in ("none", "null", "nan"):
+                    dx_label = value
+                    break
+        if dx_label:
+            final_class = dx_label
             final_conf = final_dx.diagnosis_confidence
         elif cnn:
             final_class = cnn["predicted_class"]
@@ -392,6 +406,99 @@ def make_verification_node(agent):
     return verification_node
 
 
+def make_forest_triage_node(forest, n_agents: int = 3):
+    """
+    Factory: returns a forest triage node that replaces the single MedGemma triage.
+    Runs n_agents role-specialized MedGemma instances, votes, and writes consensus
+    to state. Downstream nodes (CNN, SAM3, BiomedCLIP, report) run unchanged.
+    """
+    def forest_triage_node(state: NeuroimagingState) -> dict:
+        from agents.medgemma_agent import diagnosis_to_routing
+        t0 = _log_node_start("forest_triage", state)
+        votes = forest.run(state["image_path"], n_agents=n_agents)
+        consensus, winner_dx = forest.vote(votes, task=state.get("task"))
+        routing = diagnosis_to_routing(winner_dx, forest.medgemma.routing_cfg)
+
+        # Strip internal _dx objects before writing to state
+        serializable_votes = [
+            {k: v for k, v in vote.items() if not k.startswith("_")}
+            for vote in votes
+        ]
+        _log_node_done("forest_triage", state, t0)
+        return {
+            "routing_decision": "full_workup",
+            "routing_confidence": consensus["confidence_weighted_confidence"],
+            "routing_reasoning": (
+                f"Forest consensus ({n_agents} agents): {consensus['winner']} "
+                f"({consensus['vote_fraction'] * 100:.0f}% agreement, "
+                f"dissent={consensus['dissent_rate'] * 100:.0f}%)"
+            ),
+            "suspected_pathology": consensus.get("winner_detailed") or consensus["winner"],
+            "medgemma_diagnosis": winner_dx.model_dump(),
+            "forest_votes": serializable_votes,
+            "forest_consensus": consensus,
+            "routing_path": state["routing_path"] + ["forest_triage"],
+        }
+
+    return forest_triage_node
+
+
+def make_debate_node(orchestrator, rounds: int = 1, routing_cfg=None):
+    """
+    Factory: returns a debate node that replaces verification + report.
+    Runs the DebateOrchestrator and resolves final_predicted_class / final_confidence
+    from the judge's verdict.
+    """
+    cfg = routing_cfg or DEFAULT_CONFIG.routing
+
+    def debate_node(state: NeuroimagingState) -> dict:
+        t0 = _log_node_start("debate", state)
+        verdict = orchestrator.run(state, rounds=rounds)
+
+        # The judge's "winner" is coarse (tumor / stroke / multiple sclerosis /
+        # normal) and carries the subtype in "winner_detailed". On multiclass_tumor
+        # the label space *is* the subtype, so scoring "winner" there would mark
+        # every prediction wrong — prefer the detailed field when it is populated.
+        detailed = verdict.get("winner_detailed")
+        detailed_usable = str(detailed or "").strip().lower() not in ("", "null", "none")
+        if state.get("task") == "multiclass_tumor" and detailed_usable:
+            final_class = detailed
+        else:
+            final_class = verdict.get("winner") or state.get(
+                "suspected_pathology", "unknown"
+            )
+        final_conf = float(verdict.get("confidence", 0.5))
+
+        # Apply IoU penalty carried from explainability node
+        saliency_iou = state.get("saliency_sam3_iou")
+        requires_review = final_conf < cfg.human_review_threshold
+        if saliency_iou is not None and saliency_iou < cfg.low_iou_penalty_threshold:
+            penalty = saliency_iou / cfg.low_iou_penalty_threshold
+            final_conf = final_conf * penalty
+            requires_review = True
+
+        report_text = (
+            f"Debate verdict ({verdict.get('rounds_completed', 1)} round(s)): "
+            f"{final_class} (confidence {final_conf:.2f}). "
+            f"Reason: {verdict.get('reason', 'N/A')}"
+        )
+
+        _log_node_done("debate", state, t0)
+        return {
+            "debate_arguments": verdict.get("arguments", []),
+            "debate_verdict": {k: v for k, v in verdict.items() if k != "arguments"},
+            "debate_rounds_completed": verdict.get("rounds_completed", 1),
+            "final_predicted_class": final_class,
+            "final_confidence": final_conf,
+            "final_medgemma_diagnosis": None,
+            "final_report": report_text,
+            "requires_human_review": requires_review,
+            "routing_path": state["routing_path"] + ["debate"],
+        }
+
+    return debate_node
+
+
 def make_fhir_node(output_dir: str):
     """Factory: returns a FHIR serialisation node that writes to output_dir/fhir/."""
 
@@ -411,5 +518,19 @@ def make_fhir_node(output_dir: str):
 
 
 def route_from_triage(state: NeuroimagingState) -> str:
-    """Legacy helper retained for compatibility with older experiments."""
+    """Legacy helper retained for compatibility with older experiments.
+
+    NOT WIRED INTO ANY GRAPH. This is the only reader of `routing_decision`, and no
+    pipeline in graph.py calls add_conditional_edges — all three graphs (standard,
+    debate, forest) are linear, so every node runs for every image.
+
+    Consequently `routing_decision` gates nothing: both make_triage_node and
+    make_forest_triage_node hardcode it to "full_workup" and discard the
+    diagnosis_to_routing() result. The routing thresholds in RoutingConfig
+    (sam3_threshold, human_review_threshold, biomedclip_rerank_threshold) influence
+    *flags and confidence penalties* — segmentation_result["skipped"],
+    requires_human_review, the BiomedCLIP override — never which nodes execute.
+    Keep this in mind when interpreting the threshold_sweep / human_review_sweep
+    experiment families: they move flags and scores, not execution paths.
+    """
     return state["routing_decision"]
