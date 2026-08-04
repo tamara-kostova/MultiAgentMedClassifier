@@ -214,6 +214,11 @@ def canonical_label(value: object, task: str | None = None) -> str:
         .replace("tumour", "tumor")
     )
 
+    # "abnormal" / "other abnormalities" contains the substring "normal", so it must
+    # be caught first — otherwise an abnormality assertion scores as a normal read.
+    # The debate judge's schema offers "other abnormalities" as a verdict.
+    if "abnormal" in normalized:
+        return "abnormal"
     if "normal" in normalized or "control" in normalized:
         return "normal"
     if (

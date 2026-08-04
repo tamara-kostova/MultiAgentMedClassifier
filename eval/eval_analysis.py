@@ -69,6 +69,11 @@ def canonical_label(value: object, task: str | None = None) -> str:
         return ""
     n = (text.replace("_", " ").replace("-", " ")
               .replace("/", " ").replace("tumour", "tumor"))
+    # "abnormal" / "other abnormalities" contains the substring "normal" — catch it
+    # first, or an abnormality assertion is scored as a normal read. Kept in sync
+    # with eval.tumor_eval.canonical_label.
+    if "abnormal" in n:
+        return "abnormal"
     if "normal" in n or "control" in n:
         return "normal"
     if n == "ms" or n.startswith("ms ") or any(tok in n for tok in _MS_TOKENS):

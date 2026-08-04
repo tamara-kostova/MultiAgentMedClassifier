@@ -455,7 +455,18 @@ def make_debate_node(orchestrator, rounds: int = 1, routing_cfg=None):
         t0 = _log_node_start("debate", state)
         verdict = orchestrator.run(state, rounds=rounds)
 
-        final_class = verdict.get("winner") or state.get("suspected_pathology", "unknown")
+        # The judge's "winner" is coarse (tumor / stroke / multiple sclerosis /
+        # normal) and carries the subtype in "winner_detailed". On multiclass_tumor
+        # the label space *is* the subtype, so scoring "winner" there would mark
+        # every prediction wrong — prefer the detailed field when it is populated.
+        detailed = verdict.get("winner_detailed")
+        detailed_usable = str(detailed or "").strip().lower() not in ("", "null", "none")
+        if state.get("task") == "multiclass_tumor" and detailed_usable:
+            final_class = detailed
+        else:
+            final_class = verdict.get("winner") or state.get(
+                "suspected_pathology", "unknown"
+            )
         final_conf = float(verdict.get("confidence", 0.5))
 
         # Apply IoU penalty carried from explainability node

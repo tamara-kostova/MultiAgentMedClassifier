@@ -40,6 +40,7 @@ Checkpoints:
 
 import argparse
 import json
+import os
 from pathlib import Path
 
 from config import (
@@ -224,6 +225,14 @@ def parse_args():
         action="store_true",
         help="Skip MedGemma report generation (eval mode — saves ~5–9 s/image)",
     )
+    p.add_argument(
+        "--load_4bit",
+        action="store_true",
+        help=(
+            "Load MedGemma with 4-bit NF4 quantization (CUDA only). Use on GPUs "
+            "with <12 GB VRAM. Also enabled by MEDGEMMA_4BIT=1 in the environment."
+        ),
+    )
 
     # Explainability
     p.add_argument(
@@ -301,8 +310,19 @@ def build_config(args) -> PipelineConfig:
         {task: path for task, path in clip_overrides.items() if path is not None}
     )
 
+    # 4-bit NF4 for MedGemma: CLI flag or MEDGEMMA_4BIT=1 (lets a batch/container
+    # run flip it without editing config.py).
+    use_4bit = args.load_4bit or os.environ.get("MEDGEMMA_4BIT", "").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+    if use_4bit:
+        print("[run_pipeline] MedGemma 4-bit NF4 quantization enabled.")
+
     model_cfg = ModelConfig(
         cnn_checkpoints=cnn_checkpoints,
+        use_4bit_quantization=use_4bit,
         biomedclip_probe_checkpoints=clip_checkpoints,
         sam3_linear_probe_checkpoint=(
             args.sam3_probe or default_model_cfg.sam3_linear_probe_checkpoint

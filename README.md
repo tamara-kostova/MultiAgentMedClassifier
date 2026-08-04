@@ -284,6 +284,30 @@ control for the N-comparison.
 
 Forest replaces the single `triage` node. N role-specialized MedGemma instances (prompts in `prompts/forest_*.txt`) independently diagnose the scan; majority vote + confidence-weighted tiebreaking produces the consensus routing decision. All downstream nodes (CNN, SAM3, BiomedCLIP, report) run unchanged. Votes stored in `state["forest_votes"]`; consensus in `state["forest_consensus"]` (includes `dissent_rate` and `vote_fraction`).
 
+### Running these on a shared GPU server (`server_bundle/`)
+
+The six remaining runs below are executed on the faculty GPU servers by someone else, from
+their account, so they are packaged as a self-contained hand-off in
+[`server_bundle/`](server_bundle/): a Singularity definition (`container.def`, CUDA 12.6 /
+Python 3.12 / torch 2.10+cu126, versions pinned to the environment that produced the
+existing JSONLs), numbered one-command step scripts, a preflight that proves both pipelines
+run before a night of GPU time is committed, and TSV/CSV export of every result.
+
+```bash
+# locally, once
+python server_bundle/scripts/prepack_models.py     # build offline hf_cache/ (~12.5 GB)
+bash   server_bundle/scripts/pack_bundle.sh        # → maclf-code-data.tar.gz + maclf-models.tar
+
+# on the server (see server_bundle/README_SERVER.md — Macedonian + English)
+singularity build --remote container.sif container.def
+bash server_bundle/00_preflight.sh                 # must print PREFLIGHT OK
+nohup bash server_bundle/run_all.sh &              # or run_parallel.sh 0 1 2
+bash server_bundle/90_export_results.sh            # → results_<host>_<date>.tar.gz
+```
+
+`server_bundle/PLAN.md` holds the campaign plan and the measured facts behind it;
+`server_bundle/SEND_CHECKLIST.md` is the pre-send checklist.
+
 ### Guide — reproducing paper-comparable Forest / Debate results
 
 These runs use the **resumable rich-JSONL eval path** — the same path the paper's tables

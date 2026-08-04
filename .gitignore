@@ -233,3 +233,12 @@ outputs/
 *.sty
 *.bst
 *.zip
+# Faculty GPU server hand-off artifacts (see server_bundle/)
+hf_cache/
+sam3/
+bundle_out/
+bundle_stage/
+results_*.tar.gz
+maclf-*.tar
+maclf-*.tar.gz
+logs/
