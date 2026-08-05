@@ -109,12 +109,12 @@ mkdir -p "$DEST"
 
 echo "   code"
 rsync -a \
-    --exclude='.git' --exclude='.venv' --exclude='__pycache__' --exclude='*.pyc' \
-    --exclude='.env' --exclude='data' --exclude='outputs' --exclude='checkpoints' \
-    --exclude='hf_cache' --exclude='.codex' --exclude='.claude' \
+    --exclude='/.git' --exclude='/.venv' --exclude='__pycache__' --exclude='*.pyc' \
+    --exclude='/.env' --exclude='/data' --exclude='/outputs' --exclude='/checkpoints' \
+    --exclude='/hf_cache' --exclude='/.codex' --exclude='/.claude' \
     --exclude='sam3/.git' \
-    --exclude='paper' --exclude='papers' --exclude='presentation' --exclude='*.pdf' \
-    --exclude='*.tar' --exclude='*.tar.gz' --exclude='*.tgz' --exclude='logs' \
+    --exclude='/paper' --exclude='/papers' --exclude='/presentation' --exclude='*.pdf' \
+    --exclude='*.tar' --exclude='*.tar.gz' --exclude='*.tgz' --exclude='/logs' \
     --exclude='*.zip' --exclude='*.7z' --exclude='*.rar' --exclude='*.mat' \
     --exclude='*.jsonl' --exclude='*.sif' \
     ./ "$DEST/"
