@@ -125,7 +125,8 @@ SAM3 Segmentation Advocate:
 Weigh all three arguments carefully against what you observe in the scan.
 Identify which evidence is most compelling and internally consistent.
 
-Respond in JSON only:
+Output ONLY the JSON object below. Do not include any reasoning, analysis,
+or text before or after it — your entire response must be the JSON object.
 {{
   "winner": "<tumor|stroke|multiple sclerosis|normal|other abnormalities>",
   "winner_detailed": "<glioma|meningioma|pituitary_tumor|ischemic|hemorrhagic|null>",
@@ -293,18 +294,24 @@ class DebateOrchestrator:
                 sam_argument=sam_arg,
             )
             verdict_raw = self.medgemma.generate_for_prompt(
-                image_path, judge_prompt, max_new_tokens=200
+                image_path, judge_prompt, max_new_tokens=500
             )
 
             try:
                 verdict = MedGemmaAgent._extract_json_object(verdict_raw)
             except (json.JSONDecodeError, ValueError):
+                print(
+                    f"[debate] WARNING: judge parse failed on round {round_num}, "
+                    f"raw output: {verdict_raw[:300]!r}",
+                    flush=True,
+                )
                 verdict = {
                     "winner": state.get("suspected_pathology", "unknown"),
                     "winner_detailed": None,
                     "confidence": 0.5,
                     "reason": "Judge parse failed — defaulting to suspected pathology.",
                     "round_changed": False,
+                    "judge_parse_failed": True,
                 }
 
             verdict.setdefault("winner_detailed", None)

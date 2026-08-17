@@ -236,6 +236,52 @@ All written. Verification status noted per file.
 Still untested: the actual `singularity build` (only the equivalent docker build was run) and
 the offline `hf_cache` (needs `prepack_models.py` to run first).
 
+## Fix — SAM3 broken on the server, cause found and fixed (2026-08-05)
+
+`00_preflight.sh` run on 2026-08-04 (`gpgpu01.hpc.local`, A100-80GB) came back
+**`PREFLIGHT OK`** but with `SAM3 source not importable: ModuleNotFoundError: No module
+named 'sam3.train.data'`. Everything else — environment, all 4 datasets (500/500 selected,
+label maps recognised), all 9 checkpoints, the offline `hf_cache`, both smoke tests (Forest
+130.9 s/img, Debate 91.5 s/img on multiclass_tumor) — passed. Only SAM3 was broken, and it's
+one of the two tumour tasks (`binary_tumor`, `multiclass_tumor`) that needs it.
+
+**Root cause: an rsync anchoring bug in `pack_bundle.sh`'s code copy, not a container/setuptools
+issue.** The generic code rsync (`pack_bundle.sh` step 2) used unanchored excludes —
+`--exclude='data'`, `--exclude='outputs'`, `--exclude='checkpoints'`, `--exclude='logs'`,
+etc. — meant to drop the top-level `data/`, `outputs/`, `checkpoints/`, `logs/` (populated or
+created separately later in the script). In rsync, a single-component exclude pattern with no
+leading `/` matches that name **at any depth**, not just the transfer root. So
+`--exclude='data'` silently dropped `sam3/sam3/train/data/` too — and
+`sam3/sam3/model/sam3_image.py` does `from sam3.train.data.collator import BatchedDatapoint`,
+so `sam3.model_builder` (and therefore all of SAM3) failed to import on the server the moment
+that subpackage was missing. Verified empirically with `rsync --dry-run`: unanchored `data`
+drops `sam3/train/data/`; anchored `/data` does not. (`sam3/.git` was already fine — a
+pattern with an embedded, non-leading slash is anchored to the transfer root, so that one
+never had the bug.)
+
+**Fix applied**: anchored the directory excludes in `pack_bundle.sh` to `/data`, `/outputs`,
+`/checkpoints`, `/hf_cache`, `/.git`, `/.venv`, `/.env`, `/.codex`, `/.claude`, `/paper`,
+`/papers`, `/presentation`, `/logs` (leading `/` = transfer-root only). Left the genuinely
+recursive ones alone (`__pycache__`, `*.pyc`, `*.pdf`, `*.tar(.gz)`, `*.zip`/`*.7z`/`*.rar`,
+`*.mat`, `*.jsonl`, `*.sif`) — those are correctly meant to match anywhere.
+
+**Re-verified**: `SKIP_MODELS=1 bash server_bundle/scripts/pack_bundle.sh` rebuilt cleanly —
+staged tree still 2.0 GB, image counts unchanged (3000/3064/3427/6650), `sam3/sam3/train/data/`
+now present in `maclf-code-data.tar.gz` (checked via `tar tzf`), no stray-file trip. Only
+`maclf-code-data.tar.gz` changed (new sha256 `d11ebc26...`); `maclf-models.tar` is untouched
+(reused via `SKIP_MODELS=1`, same sha256 as before) — **no need to re-transfer the 12 GB model
+tar or the data**, since datasets are staged by a separate rsync call with its own excludes
+(`DATA_EXCLUDES`) that was never affected by this bug. Confirmed no `binary_debate_r2.jsonl` /
+`multiclass_debate_r2.jsonl` exist yet, so this is a pre-run fix, not a redo — no GPU-hours
+were wasted on a broken-SAM3 tumour run. Stroke/MS steps (01, 02, 04, 05) never touch SAM3
+(ineligible task, per [[project_sam3_scope]]) and are unaffected either way.
+
+**What to send**: just the new `maclf-code-data.tar.gz` (~1.9 GB) + updated
+`SHA256SUMS.txt`. She extracts it over the existing directory (overwrites code + data +
+checkpoints, leaves `hf_cache/` alone), re-runs `00_preflight.sh` to confirm section 4 now
+says SAM3 imports OK with no warning, then proceeds — no step needs to be redone.
+
+
 ## Ship status (2026-07-29)
 
 - [x] `prepack_models.py` → `PREPACK OK`. `hf_cache/` = **12 GB** after both trims; all five
@@ -282,6 +328,55 @@ scores 0.163, so both tool advocates are at/below chance there — drop step 6 f
 runs short.
 
 Already done, not re-run: Forest N=4 `binary_tumor` (n=500) and `multiclass_tumor` (n=465).
+
+## Fix — Debate judge silently never parsed, all 4 debate runs invalid (2026-08-17)
+
+(`results_gpgpu01_20260817_1027/`, all 6 remaining runs finished) came
+back with `debate_verdict_change_rate = 0.0` and `accuracy_final` far *below*
+`accuracy_cnn_only` on every one of the 4 debate tasks (e.g. stroke: 0.286 final vs. 0.99
+CNN-only; multiclass_tumor: 0.368 vs. 0.142). Root cause: `agents/debate.py`'s judge call
+(`_JUDGE_TEMPLATE`) never once produced parseable JSON across all 2000 debate images —
+confirmed via `grep -c "Judge parse failed" outputs/eval/*_debate_r2.jsonl` → 500/500 on
+every file — so every verdict silently fell back to
+`state["suspected_pathology"]` (the coarse triage guess) instead of an actual debated
+verdict. The `except (json.JSONDecodeError, ValueError)` fallback swallowed this with no
+error surfaced anywhere, so `n_errors: 0` in every summary and the bug was invisible short
+of reading `outputs/eval/*.jsonl`'s `final_report` text. It was already present in
+`00_preflight.log` (`conf=0.50` on both smoke-test rounds) but the preflight check only
+verified the pipeline "ran end to end," not that the verdict parsed — so it printed
+`PREFLIGHT OK` and the full campaign went ahead on a broken judge.
+
+Likely cause: the judge call was capped at `max_new_tokens=200` — the smallest budget
+anywhere in the codebase (advocates get 300, the main triage/report call gets 600) — for
+the most complex ask (weigh 3 arguments, reason, emit structured JSON). MedGemma is known
+to emit hidden `<unused95>` reasoning chatter before its answer elsewhere in this codebase;
+200 tokens plausibly gets consumed before the JSON object closes.
+
+Fix applied (not yet re-verified on a GPU — no local hardware big enough for MedGemma):
+- `agents/debate.py`: judge `max_new_tokens` 200 → 500; `_JUDGE_TEMPLATE` now explicitly
+  forbids preamble text; parse failures now print the raw truncated output and tag the
+  verdict `judge_parse_failed: True` instead of failing silently.
+- `eval/tumor_eval.py`: `extract_row` now writes `debate_judge_parse_failed` into every
+  JSONL record.
+- `server_bundle/scripts/export_results.py`: `all_runs_summary.tsv` now has a
+  `judge_parse_failure_rate` column — would have caught this immediately.
+- `server_bundle/scripts/preflight.py`: the Debate smoke test now hard-`fail()`s (blocking
+  `PREFLIGHT OK`) if `debate_judge_parse_failed` is true on the 1-image smoke test.
+
+**All 4 debate JSONLs in `results_gpgpu01_20260817_1027/` (`binary_debate_r2`,
+`multiclass_debate_r2`, `ms_debate_r2`, `stroke_debate_r2`) are invalid and must be
+re-run** — they measure "default to triage guess," not agent debate. The CNN-only /
+BiomedCLIP / SAM3 / routing / latency columns in the same files are unaffected and remain
+usable. The 2 Forest runs (stroke, ms) are a separate code path (`agent_forest.py`, not
+`debate.py`) and are not implicated by this bug — no evidence yet either way, should still
+re-run preflight once before trusting them, since preflight itself missed this class of bug
+for months.
+
+Next step: re-run `00_preflight.sh` on the server with the fix (must show
+`judge parse failed False` and a non-trivial, non-0.50 confidence on both smoke rounds)
+before re-running the 4 debate scripts (`03`, `04`, `05`, `06`) for real. Send an
+updated `maclf-code-data.tar.gz` (`SKIP_MODELS=1 bash server_bundle/scripts/pack_bundle.sh`
+— only code changed) the same way as the SAM3 fix above.
 
 ## Open items / risks
 

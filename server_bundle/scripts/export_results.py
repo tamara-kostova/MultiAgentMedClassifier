@@ -234,6 +234,16 @@ def build_summary(rows: list[dict], name: str) -> dict:
         if rounds:
             summary["mean_debate_rounds"] = round(sum(rounds) / len(rounds), 2)
 
+        parse_failed = [
+            bool(r.get("debate_judge_parse_failed"))
+            for r in ok_rows
+            if r.get("debate_judge_parse_failed") is not None
+        ]
+        if parse_failed:
+            summary["judge_parse_failure_rate"] = round(
+                sum(parse_failed) / len(parse_failed), 4
+            )
+
     return summary
 
 

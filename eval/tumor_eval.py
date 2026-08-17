@@ -354,6 +354,7 @@ def extract_row(
         "debate_rounds_completed": final_state.get("debate_rounds_completed"),
         "debate_round_changed": (final_state.get("debate_verdict") or {}).get("round_changed"),
         "debate_winner": (final_state.get("debate_verdict") or {}).get("winner"),
+        "debate_judge_parse_failed": (final_state.get("debate_verdict") or {}).get("judge_parse_failed", False),
         # ── Full MedGemma report ──────────────────────────────────────────────
         "final_report": final_state.get("final_report"),
         # ── FHIR ──────────────────────────────────────────────────────────────

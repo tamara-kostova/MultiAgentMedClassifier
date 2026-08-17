@@ -335,12 +335,19 @@ def smoke_tests(usable: dict[str, str]) -> None:
                 print(f"    debate rounds      {row['debate_rounds_completed']}")
                 print(f"    verdict changed    {row['debate_round_changed']}")
                 print(f"    debate winner      {row['debate_winner']}")
+                print(f"    judge parse failed {row.get('debate_judge_parse_failed')}")
             print(f"    latency            {latency:.1f} s/image")
 
             if row["error"] is not None:
                 fail(f"{label}: pipeline returned an error: {row['error']}")
             elif not row["predicted_class"]:
                 fail(f"{label}: no prediction produced")
+            elif "Debate" in label and row.get("debate_judge_parse_failed"):
+                fail(
+                    f"{label}: judge JSON parse failed and silently defaulted to "
+                    "suspected_pathology — debate did not actually run. Check "
+                    "agents/debate.py's judge prompt/max_new_tokens before proceeding."
+                )
             else:
                 ok(f"{label} ran end to end in {latency:.1f} s")
                 per_500 = latency * 500 / 3600
