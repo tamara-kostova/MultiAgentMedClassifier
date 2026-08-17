@@ -1,14 +1,23 @@
 #!/usr/bin/env bash
-# Optional: spread the six runs over several GPUs. The runs are fully independent
-# processes writing to different output files, so this is safe.
+# Optional: spread the runs over several GPUs (or several slots on one GPU). The
+# runs are fully independent processes writing to different output files, so
+# this is safe.
 #
 #   bash server_bundle/run_parallel.sh 0 1 2        # use GPUs 0, 1 and 2
 #   nohup bash server_bundle/run_parallel.sh 0 1 > logs/run_parallel.log 2>&1 &
 #
 # Each run needs roughly 14 GB of VRAM (MedGemma bfloat16 ~9 GB + SAM3 ~3.5 GB +
-# CNN/BiomedCLIP ~1 GB), so use one run per GPU of 16 GB or more. On 40/80 GB cards
-# a GPU id may be listed twice to get two concurrent runs on it, e.g. "0 0 1 1".
-# With LOAD_4BIT=1 in config.env a run fits in about 7 GB.
+# CNN/BiomedCLIP ~1 GB), so use one run per GPU of 16 GB or more. On a 40 GB card
+# a GPU id may be listed twice; on an 80 GB card (e.g. A100-SXM4-80GB) it can be
+# listed up to ~5 times, e.g. "0 0 0 0 0", for 5 concurrent runs on the one GPU
+# (~70 GB used, ~10 GB headroom). With LOAD_4BIT=1 in config.env a run fits in
+# about 7 GB, so up to ~10 concurrent runs fit in 80 GB.
+#
+# Defaults to all 6 remaining runs. To re-run only a subset (e.g. just the 4
+# debate steps after a debate-only fix), override STEPS:
+#
+#   STEPS="03_debate_binary_tumor 04_debate_stroke 05_debate_ms 06_debate_multiclass_tumor" \
+#       bash server_bundle/run_parallel.sh 0 0 0 0
 #
 # Preflight is run once, first, before anything is launched.
 set -uo pipefail
@@ -23,14 +32,18 @@ if [ "$#" -lt 1 ]; then
 fi
 
 GPUS=("$@")
-STEPS=(
-    01_forest_stroke
-    02_forest_ms
-    03_debate_binary_tumor
-    04_debate_stroke
-    05_debate_ms
-    06_debate_multiclass_tumor
-)
+if [ -n "${STEPS:-}" ]; then
+    read -ra STEPS <<< "$STEPS"
+else
+    STEPS=(
+        01_forest_stroke
+        02_forest_ms
+        03_debate_binary_tumor
+        04_debate_stroke
+        05_debate_ms
+        06_debate_multiclass_tumor
+    )
+fi
 
 mkdir -p logs
 
