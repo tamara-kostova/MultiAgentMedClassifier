@@ -53,6 +53,14 @@ SYSTEM_PROMPT_FEW_SHOT = (_PROMPTS_DIR / "system_prompt_few_shot.txt").read_text
 SYSTEM_PROMPT_BBOX = (_PROMPTS_DIR / "system_prompt_bbox.txt").read_text()
 
 
+# MedGemma 1.5 emits a hidden reasoning block, `<unused94>thought … <unused95>`,
+# before its visible answer. On long analytical prompts (the debate judge) that
+# block can swallow the whole token budget, so the JSON is never emitted and the
+# generation is a truncated, unparseable thought. Prefilling the model turn with
+# an already-closed empty thought makes generation start in the answer channel.
+NO_THINK_PREFILL = "<unused94>thought\n<unused95>"
+
+
 # ── Pydantic schema matching system_prompt.txt output ────────────────────────
 
 
@@ -510,6 +518,7 @@ class MedGemmaAgent:
         text_prompt: str,
         max_new_tokens: int = 2048,
         few_shot: list[tuple[Image.Image, str]] | None = None,
+        prefill: str | None = None,
     ) -> str:
         images = image if isinstance(image, list) else [image]
         messages = []
@@ -532,13 +541,29 @@ class MedGemmaAgent:
                 ],
             }
         )
-        inputs = self.processor.apply_chat_template(
-            messages,
-            add_generation_prompt=True,
-            tokenize=True,
-            return_dict=True,
-            return_tensors="pt",
-        )
+        if prefill:
+            # Seed the model's turn with `prefill` so generation continues from it
+            # instead of starting fresh. Used with NO_THINK_PREFILL to skip
+            # MedGemma's hidden reasoning channel. add_special_tokens=False because
+            # the rendered template already carries <bos>; without it the processor
+            # prepends a second one.
+            chat = self.processor.apply_chat_template(
+                messages, add_generation_prompt=True, tokenize=False
+            )
+            inputs = self.processor(
+                text=chat + prefill,
+                images=images,
+                return_tensors="pt",
+                add_special_tokens=False,
+            )
+        else:
+            inputs = self.processor.apply_chat_template(
+                messages,
+                add_generation_prompt=True,
+                tokenize=True,
+                return_dict=True,
+                return_tensors="pt",
+            )
         inputs = self._move_inputs_to_model_device(inputs)
 
         with torch.no_grad():
@@ -606,14 +631,22 @@ class MedGemmaAgent:
         return self._run_diagnostic_prompt(image, role_prompt)
 
     def generate_for_prompt(
-        self, image_path: str, prompt: str, max_new_tokens: int = 300
+        self,
+        image_path: str,
+        prompt: str,
+        max_new_tokens: int = 300,
+        prefill: str | None = None,
     ) -> str:
         """
         Run a free-form prompt against the image and return raw text.
         Used by DebateOrchestrator for advocate and judge calls.
+
+        `prefill` seeds the model's own turn (see NO_THINK_PREFILL).
         """
         image = Image.open(image_path).convert("RGB")
-        return self._generate(image, prompt, max_new_tokens=max_new_tokens)
+        return self._generate(
+            image, prompt, max_new_tokens=max_new_tokens, prefill=prefill
+        )
 
     def verify_cnn_prediction(
         self,

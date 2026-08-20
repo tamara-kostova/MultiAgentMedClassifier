@@ -16,8 +16,19 @@ In the LangGraph pipeline this replaces the verification + report tail:
 import json
 from typing import Optional
 
-from agents.medgemma_agent import MedGemmaAgent
+from agents.medgemma_agent import NO_THINK_PREFILL, MedGemmaAgent
 from pipeline.state import NeuroimagingState
+
+# The judge only has to emit a small JSON object, so a short budget is enough
+# *provided* the hidden thought block is skipped (NO_THINK_PREFILL). If a call
+# still fails to parse we retry once without the prefill and with room for a
+# full thought block plus the JSON after it.
+JUDGE_MAX_NEW_TOKENS = 400
+JUDGE_RETRY_MAX_NEW_TOKENS = 1500
+ADVOCATE_MAX_NEW_TOKENS = 300
+# If the prefill itself is the problem (e.g. a model revision that tokenizes it
+# differently), stop paying for a doomed first attempt on every later image.
+PREFILL_DISABLE_AFTER = 3
 
 # ── Advocate prompt templates ─────────────────────────────────────────────────
 
@@ -136,6 +147,15 @@ or text before or after it — your entire response must be the JSON object.
 }}"""
 
 
+def _as_float(value, default: float) -> float:
+    """The judge occasionally returns confidence as a word or a percentage string;
+    a long run must not die on one bad token."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 # ── Prompt builders ───────────────────────────────────────────────────────────
 
 def _build_cnn_prompt(state: NeuroimagingState, round_num: int,
@@ -245,6 +265,67 @@ class DebateOrchestrator:
 
     def __init__(self, medgemma: MedGemmaAgent):
         self.medgemma = medgemma
+        self._prefill_enabled = True
+        self._prefill_failures = 0
+
+    def _prefill(self) -> Optional[str]:
+        return NO_THINK_PREFILL if self._prefill_enabled else None
+
+    def _note_prefill_failure(self, why: str) -> None:
+        self._prefill_failures += 1
+        if self._prefill_enabled and self._prefill_failures >= PREFILL_DISABLE_AFTER:
+            self._prefill_enabled = False
+            print(
+                f"[debate] disabling the no-think prefill for the rest of this run "
+                f"after {self._prefill_failures} failures ({why})",
+                flush=True,
+            )
+
+    def _judge(self, image_path: str, judge_prompt: str, round_num: int) -> Optional[dict]:
+        """
+        Ask the judge for a verdict. Returns the parsed verdict, or None if every
+        attempt failed to produce a JSON object with a `winner` field.
+        """
+        attempts: list[tuple[str, Optional[str], int]] = []
+        if self._prefill_enabled:
+            attempts.append(("prefill", NO_THINK_PREFILL, JUDGE_MAX_NEW_TOKENS))
+        attempts.append(("retry-long", None, JUDGE_RETRY_MAX_NEW_TOKENS))
+
+        for kind, prefill, budget in attempts:
+            try:
+                raw = self.medgemma.generate_for_prompt(
+                    image_path, judge_prompt, max_new_tokens=budget, prefill=prefill
+                )
+            except Exception as exc:  # a broken prefill must not kill a long run
+                print(
+                    f"[debate] WARNING: judge generation ({kind}) raised "
+                    f"{type(exc).__name__}: {exc}",
+                    flush=True,
+                )
+                if kind == "prefill":
+                    self._note_prefill_failure(f"{type(exc).__name__}")
+                continue
+
+            try:
+                verdict = MedGemmaAgent._extract_json_object(raw)
+            except (json.JSONDecodeError, ValueError):
+                verdict = None
+            if verdict is None or "winner" not in verdict:
+                reason = "no JSON object" if verdict is None else "JSON without a 'winner' field"
+                print(
+                    f"[debate] WARNING: judge parse failed on round {round_num} "
+                    f"({kind}, {reason}), raw output: {raw[:300]!r}",
+                    flush=True,
+                )
+                if kind == "prefill":
+                    self._note_prefill_failure(reason)
+                continue
+
+            if kind == "prefill":
+                self._prefill_failures = 0
+            return verdict
+
+        return None
 
     def run(self, state: NeuroimagingState, rounds: int = 1) -> dict:
         """
@@ -252,11 +333,13 @@ class DebateOrchestrator:
 
         Returns dict with:
             winner, winner_detailed, confidence, reason,
-            rounds_completed, round_changed, arguments
+            rounds_completed, round_changed, judge_parse_failed,
+            judge_parse_failed_rounds, arguments
         """
         rounds = max(1, min(rounds, self.MAX_ROUNDS))
         image_path = state["image_path"]
         prior_verdict: Optional[dict] = None
+        parse_failures = 0
         all_arguments: list[dict] = []
         current_args: dict[str, str] = {}
 
@@ -267,9 +350,16 @@ class DebateOrchestrator:
             clip_prompt = _build_clip_prompt(state, round_num, prior_verdict, current_args)
             sam_prompt = _build_sam_prompt(state, round_num, prior_verdict, current_args)
 
-            cnn_arg = self.medgemma.generate_for_prompt(image_path, cnn_prompt)
-            clip_arg = self.medgemma.generate_for_prompt(image_path, clip_prompt)
-            sam_arg = self.medgemma.generate_for_prompt(image_path, sam_prompt)
+            # Advocates are asked for a single paragraph, so they too are better
+            # off skipping the hidden thought block — otherwise a truncated
+            # thought is what the judge ends up reading.
+            advocate_kwargs = {
+                "max_new_tokens": ADVOCATE_MAX_NEW_TOKENS,
+                "prefill": self._prefill(),
+            }
+            cnn_arg = self.medgemma.generate_for_prompt(image_path, cnn_prompt, **advocate_kwargs)
+            clip_arg = self.medgemma.generate_for_prompt(image_path, clip_prompt, **advocate_kwargs)
+            sam_arg = self.medgemma.generate_for_prompt(image_path, sam_prompt, **advocate_kwargs)
 
             current_args = {"cnn": cnn_arg, "clip": clip_arg, "sam": sam_arg}
             all_arguments.extend([
@@ -293,18 +383,9 @@ class DebateOrchestrator:
                 clip_argument=clip_arg,
                 sam_argument=sam_arg,
             )
-            verdict_raw = self.medgemma.generate_for_prompt(
-                image_path, judge_prompt, max_new_tokens=500
-            )
-
-            try:
-                verdict = MedGemmaAgent._extract_json_object(verdict_raw)
-            except (json.JSONDecodeError, ValueError):
-                print(
-                    f"[debate] WARNING: judge parse failed on round {round_num}, "
-                    f"raw output: {verdict_raw[:300]!r}",
-                    flush=True,
-                )
+            verdict = self._judge(image_path, judge_prompt, round_num)
+            if verdict is None:
+                parse_failures += 1
                 verdict = {
                     "winner": state.get("suspected_pathology", "unknown"),
                     "winner_detailed": None,
@@ -314,6 +395,7 @@ class DebateOrchestrator:
                     "judge_parse_failed": True,
                 }
 
+            verdict["confidence"] = _as_float(verdict.get("confidence"), 0.5)
             verdict.setdefault("winner_detailed", None)
             verdict.setdefault("round_changed", prior_verdict is not None and
                                verdict.get("winner") != (prior_verdict or {}).get("winner"))
@@ -327,9 +409,13 @@ class DebateOrchestrator:
         return {
             "winner": prior_verdict.get("winner", "unknown"),
             "winner_detailed": prior_verdict.get("winner_detailed"),
-            "confidence": float(prior_verdict.get("confidence", 0.5)),
+            "confidence": _as_float(prior_verdict.get("confidence"), 0.5),
             "reason": prior_verdict.get("reason", ""),
             "round_changed": prior_verdict.get("round_changed", False),
             "rounds_completed": rounds,
+            # Surfaced all the way to the eval JSONL: a run where this is True on
+            # any image did not actually debate, it fell back to the triage guess.
+            "judge_parse_failed": parse_failures > 0,
+            "judge_parse_failed_rounds": parse_failures,
             "arguments": all_arguments,
         }

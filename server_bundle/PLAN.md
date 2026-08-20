@@ -378,13 +378,65 @@ before re-running the 4 debate scripts (`03`, `04`, `05`, `06`) for real. Send a
 updated `maclf-code-data.tar.gz` (`SKIP_MODELS=1 bash server_bundle/scripts/pack_bundle.sh`
 — only code changed) the same way as the SAM3 fix above.
 
+## Fix round 2 — the judge thinks past its token budget (2026-08-20)
+
+The 2026-08-19 preflight (`00_preflight.log`, gpgpu01, A100 80 GB) ran with the 500-token
+fix above and **still failed to parse the judge on both rounds**:
+
+```
+[debate] WARNING: judge parse failed on round 1, raw output:
+  '<unused94>thought\nThe user wants me to act as a senior neuroradiologist and evaluate ...'
+```
+
+So the 2026-08-17 diagnosis was right about the mechanism but not about the size of it.
+MedGemma 1.5 opens a hidden reasoning channel — `<unused94>thought … <unused95>` — before
+its visible answer, and on the judge prompt it *always* does. The whole 500-token budget is
+spent inside that thought; the JSON is never reached. The "Output ONLY the JSON object"
+wording cannot suppress it — the thought channel is opened before the model is "answering"
+at all.
+
+The preflight *still* printed `PREFLIGHT OK`, for a second, independent reason:
+`DebateOrchestrator.run()` builds a fresh return dict and never copied
+`judge_parse_failed` out of the per-round verdict, so `debate_judge_parse_failed` was
+always `False` in the JSONL and the guard added on 2026-08-17 could never fire.
+
+Fix applied (again not GPU-verified — no local hardware; tokenizer plumbing was verified,
+model behaviour was not):
+- `agents/medgemma_agent.py`: new `NO_THINK_PREFILL = "<unused94>thought\n<unused95>"` and a
+  `prefill=` argument on `_generate()` / `generate_for_prompt()`. The prefill seeds the
+  model's own turn with an already-closed, empty thought block, so generation starts in the
+  answer channel. Verified locally that `<unused95>` is a single token (id 101) and that the
+  `apply_chat_template(tokenize=False) + prefill` + `add_special_tokens=False` path
+  reproduces the template's tokenization exactly.
+- `agents/debate.py`: judge and advocates use the prefill. If a judge call still fails to
+  parse, it is retried **once** with no prefill and `max_new_tokens=1500` (room for a full
+  thought *plus* the JSON), so neither path depends on the prefill working. A parsed object
+  without a `winner` field counts as a failure. After `PREFILL_DISABLE_AFTER = 3` failures
+  the prefill is dropped for the rest of the process so a doomed first attempt is not paid
+  for on every image. Confidence is parsed defensively (`_as_float`).
+- `agents/debate.py`: `run()` now returns `judge_parse_failed` / `judge_parse_failed_rounds`,
+  which `debate_node` copies into `state["debate_verdict"]` — this is what makes the
+  preflight guard and the `judge_parse_failure_rate` TSV column actually work.
+
+What the next preflight must show before the 4 debate runs are restarted:
+- no `judge parse failed on round` warnings at all (a warning followed by a successful
+  `retry-long` is tolerable but means every image pays double for the judge — report it);
+- `judge parse failed False` **and** a confidence that is not exactly `0.50`;
+- ideally a `winner_detailed` on the multiclass smoke image.
+
+Note the two `[debate] Round N verdict: tumor conf=0.50 changed=False` lines in the old log
+are the signature of this bug: `0.50` is the hard-coded fallback confidence.
+
+Not changed: triage/report/forest calls also run without the prefill (600–2048 tokens) and
+have so far produced parseable JSON, so they are left alone — but the same failure mode is
+available to them, and `report_node` degrades quietly to raw text when it hits it.
+
 ## Open items / risks
 
 - **Server GPU model and count are unknown.** Affects bf16 vs `--load_4bit` and whether
   steps can run in parallel. Preflight print it and have the outputs pasted back. `run_parallel.sh` covers the multi-GPU case without another round trip.
 - **Gated weights leave Tamara's control** once `hf_cache/` is shipped (MedGemma + SAM3
-  under their respective terms). Accepted deliberately; note it in the reply so
-  the cache is not redistributed further.
+  under their respective terms).
 - **`sam3/` clone is not on this machine yet** — `pack_bundle.sh` clones it (needs network at
   packing time, not at build/run time).
 - **Container build needs internet** (pip + base image) — fine on the sylabs remote builder.
