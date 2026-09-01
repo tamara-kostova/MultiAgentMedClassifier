@@ -942,7 +942,11 @@ def main() -> None:
 
     print("\n══ MedGemma initial→final shift ══")
     shift_df = section_medgemma_shift(df, task)
-    if multi:
+    if shift_df.empty:
+        # debate mode replaces the report node, so final_medgemma_diagnosis is
+        # always null and there is nothing to compare initial vs. final on.
+        print("  (empty — no final_medgemma_diagnosis, likely a debate/forest run)")
+    elif multi:
         n = len(shift_df)
         print(f"  n={n}  init_acc={shift_df['init_correct'].mean():.4f}  "
               f"fin_acc={shift_df['fin_correct'].mean():.4f}  "

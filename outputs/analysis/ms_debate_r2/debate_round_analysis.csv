@@ -1,0 +1,2 @@
+n,pct_verdict_changed,accuracy_changed,accuracy_unchanged,ece_changed,ece_unchanged,ece_overall
+500,49.6,0.629,0.7897,0.2963,0.1896,0.2425

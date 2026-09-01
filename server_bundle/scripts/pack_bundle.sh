@@ -117,6 +117,8 @@ rsync -a \
     --exclude='*.tar' --exclude='*.tar.gz' --exclude='*.tgz' --exclude='/logs' \
     --exclude='*.zip' --exclude='*.7z' --exclude='*.rar' --exclude='*.mat' \
     --exclude='*.jsonl' --exclude='*.sif' \
+    --exclude='/Master_Thesis' --exclude='/realm review' \
+    --exclude='/log.log' --exclude='/00_preflight.log' --exclude='*_report.txt' \
     ./ "$DEST/"
 
 echo "   checkpoints (9 files)"
