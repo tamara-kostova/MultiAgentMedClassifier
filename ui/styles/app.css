@@ -600,3 +600,260 @@ body.dark {
     align-items: flex-start;
   }
 }
+
+/* ── Pipeline mode + run controls ──────────────────────────────────────────── */
+
+#mode-select {
+  border: 1px solid #c8d4de;
+  border-radius: 14px;
+  background: #f8fafc;
+  padding: 0.35rem 0.5rem;
+}
+
+#mode-select label {
+  color: #1a2e3d !important;
+}
+
+.mode-note {
+  margin: 0.35rem 0 0.2rem;
+  font-size: 0.86rem;
+  line-height: 1.5;
+  color: #5a7184;
+}
+
+.mode-slider {
+  border-radius: 14px;
+}
+
+#run-btn button:disabled,
+#run-btn:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+.step-time {
+  font-size: 0.72rem;
+  font-weight: 500;
+  color: #6b8299;
+}
+
+.pipeline-total {
+  margin-left: auto;
+  padding-left: 0.8rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: #5a7184;
+  white-space: nowrap;
+}
+
+/* ── Result tabs ───────────────────────────────────────────────────────────── */
+
+#result-tabs {
+  margin-top: 0.85rem;
+  border: none;
+  background: transparent;
+}
+
+#result-tabs button[role="tab"] {
+  font-weight: 600;
+  color: #4a6172;
+}
+
+#result-tabs button[role="tab"][aria-selected="true"] {
+  color: #2563eb;
+}
+
+.summary-provisional {
+  background: #eff6ff;
+  border-color: #bfdbfe;
+}
+
+.summary-provisional .summary-badge {
+  background: #dbeafe;
+  border-color: #bfdbfe;
+}
+
+/* ── Agent cards ───────────────────────────────────────────────────────────── */
+
+.agent-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 0.75rem;
+}
+
+.agent-card {
+  border: 1px solid #dde3e9;
+  border-radius: 16px;
+  background: #f8fafc;
+  padding: 0.85rem 0.95rem;
+  margin-bottom: 0.75rem;
+  color: #1a2e3d;
+}
+
+.agent-grid .agent-card {
+  margin-bottom: 0;
+}
+
+.agent-warn {
+  background: #fffbeb;
+  border-color: #fde68a;
+}
+
+.agent-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.6rem;
+}
+
+.agent-title {
+  font-size: 0.95rem;
+  font-weight: 700;
+}
+
+.agent-sub {
+  font-size: 0.78rem;
+  color: #5a7184;
+}
+
+.agent-note {
+  margin: 0.6rem 0 0;
+  font-size: 0.86rem;
+  line-height: 1.55;
+  color: #4a6172;
+}
+
+.agent-note-warn {
+  color: #92400e;
+}
+
+.kv-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 0.45rem 0.8rem;
+  margin: 0;
+}
+
+.kv-grid dt {
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #5a7184;
+}
+
+.kv-grid dd {
+  margin: 0.15rem 0 0;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: #1a2e3d;
+  word-break: break-word;
+}
+
+.bar-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-top: 0.4rem;
+}
+
+.bar-row {
+  display: grid;
+  grid-template-columns: minmax(90px, 34%) 1fr 58px;
+  align-items: center;
+  gap: 0.6rem;
+  font-size: 0.85rem;
+  color: #4a6172;
+}
+
+.bar-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bar-track {
+  height: 8px;
+  border-radius: 999px;
+  background: #e2e8f0;
+  overflow: hidden;
+}
+
+.bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: #94a3b8;
+}
+
+.bar-value {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.bar-top {
+  color: #1a2e3d;
+  font-weight: 700;
+}
+
+.bar-top .bar-fill {
+  background: #2563eb;
+}
+
+/* ── Forest ballot + debate transcript ─────────────────────────────────────── */
+
+.vote-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.86rem;
+}
+
+.vote-table th {
+  text-align: left;
+  font-size: 0.7rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #5a7184;
+  padding: 0.35rem 0.5rem;
+  border-bottom: 1px solid #dde3e9;
+}
+
+.vote-table td {
+  padding: 0.45rem 0.5rem;
+  border-bottom: 1px solid #eef2f6;
+  color: #1a2e3d;
+}
+
+.debate-arg {
+  border-left: 3px solid #bfdbfe;
+  padding: 0.1rem 0 0.1rem 0.75rem;
+  margin: 0.55rem 0;
+}
+
+.debate-role {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #2563eb;
+}
+
+.debate-arg p {
+  margin: 0.25rem 0 0;
+  font-size: 0.88rem;
+  line-height: 1.6;
+  color: #1a2e3d;
+}
+
+.report-meta {
+  margin-bottom: 0.9rem;
+  padding-bottom: 0.8rem;
+  border-bottom: 1px solid #dde3e9;
+}
+
+#fhir-json {
+  max-height: 460px;
+  overflow: auto;
+}

@@ -228,11 +228,20 @@ outputs/
 # Keep the env template (not the actual secrets)
 !.env.example
 *.tex
+*.aux
+*.toc
+*.lot
+*.lof
+*.bbl
+*.blg
+*.bak
 *.bib
 *.db
 *.sty
 *.bst
 *.zip
+*.pdf
+*.pptx
 # Faculty GPU server hand-off artifacts (see server_bundle/)
 hf_cache/
 sam3/
@@ -242,3 +251,6 @@ results_*.tar.gz
 maclf-*.tar
 maclf-*.tar.gz
 logs/
+*.md
+*.png
+*.json

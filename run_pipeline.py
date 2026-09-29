@@ -59,7 +59,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
-def parse_args():
+def parse_args(argv: list[str] | None = None):
     p = argparse.ArgumentParser(description="Multi-agent neuroimaging pipeline")
 
     # Mode
@@ -269,7 +269,7 @@ def parse_args():
     # Output
     p.add_argument("--output_dir", type=str, default="outputs")
 
-    return p.parse_args()
+    return p.parse_args(argv)
 
 
 def build_config(args) -> PipelineConfig:
