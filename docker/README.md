@@ -5,15 +5,15 @@ medical device.
 
 ## Get the image
 
-The image is private on Docker Hub: `tamarakostova/neuro-mcp` (tags `0.1.0`, `latest`).
-Ask for collaborator access, then:
+Public on Docker Hub: [`tamarakostova/neuro-mcp`](https://hub.docker.com/r/tamarakostova/neuro-mcp)
+(tags `0.1.0`, `latest`). No login needed:
 
 ```bash
-docker login -u <your docker hub user>      # a personal access token as the password
 docker pull tamarakostova/neuro-mcp:0.1.0
 ```
 
-Or build it from this repo: `docker build -t neuro-mcp .`
+The image holds only code and prompts: no model weights and no tokens. Pin `0.1.0` rather
+than `latest` so an update never changes a running deployment unexpectedly.
 
 ## Requirements
 
