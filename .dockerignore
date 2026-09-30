@@ -1,0 +1,16 @@
+# Whitelist: the MCP server image gets only the code it runs (see Dockerfile).
+*
+!mcp_server.py
+!mcp_client.py
+!run_pipeline.py
+!config.py
+!agents/
+!pipeline/
+!explainability/
+!eval/
+!prompts/
+!configs/
+!sam3/sam3/
+!docker/requirements-mcp.txt
+**/__pycache__
+**/*.md

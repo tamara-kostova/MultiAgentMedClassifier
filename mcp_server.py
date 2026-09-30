@@ -7,6 +7,7 @@ MCP endpoint for the neuroimaging classifier (stage pipeline, pipeline/runner.py
     python mcp_server.py --transport stdio --load_4bit
 
 Tools:
+    classify           base64 image or volume + tumor|ms|stroke → flat MedGemma-schema diagnosis
     list_capabilities  tasks, pipelines, registered stages, input limits
     classify_slices    base64 PNG/JPEG slices → study-level result
     classify_volume    base64 (or server-side) .npy/.npz volume → study-level result
@@ -33,11 +34,12 @@ import sys
 import threading
 import uuid
 from pathlib import Path
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional, get_args
 
 import anyio.from_thread
 import numpy as np
 from mcp.server.mcpserver import Context, MCPServer
+from pydantic import BaseModel, Field
 from mcp.server.mcpserver.exceptions import ToolError
 
 from pipeline.context import PipelineContext
@@ -80,9 +82,91 @@ SLICE_FIELDS = [
     "debate_rounds_completed",
     "final_predicted_class",
     "final_confidence",
+    "final_medgemma_diagnosis",
     "requires_human_review",
     "final_report",
 ]
+
+
+# Allowed values of the flat classify output; mirrors prompts/system_prompt.txt.
+DiagnosisName = Literal["tumor", "stroke", "multiple sclerosis", "normal", "other abnormalities"]
+DetailedDiagnosis = Literal[
+    "glioma", "meningioma", "pituitary_tumor", "carcinoma", "germinoma", "granuloma", "medulloblastoma",
+    "neurocytoma", "papilloma", "schwannoma", "tuberculoma", "ischemic", "hemorrhagic",
+]
+Sequence = Literal["FLAIR", "T1", "T2", "T1C+"]
+Plane = Literal["axial", "sagittal", "coronal"]
+Modality = Literal["MRI", "CT"]
+
+
+class Diagnosis(BaseModel):
+    """classify result: the MedGemma output schema of prompts/system_prompt.txt, field for field.
+
+    Nullable fields are null when they could not be determined.
+    """
+
+    modality: Optional[Modality]
+    specialized_sequence: Optional[Sequence] = Field(description="MRI sequence; null for CT")
+    plane: Optional[Plane]
+    diagnosis_name: Optional[DiagnosisName]
+    diagnosis_detailed: Optional[DetailedDiagnosis] = Field(description="Tumor or stroke subtype; null otherwise")
+    icd10_code: Optional[str]
+    severity_score: Optional[float] = Field(ge=0, le=1, description="Extent of abnormality")
+    diagnosis_confidence: float = Field(ge=0, le=1)
+    severity_confidence: float = Field(ge=0, le=1)
+
+
+# classify's task names → the pipeline's tasks. multiclass_tumor, not binary_tumor, because
+# its 12 CNN classes (normal included) are exactly the tumor values of diagnosis_detailed.
+SimpleTask = Literal["tumor", "ms", "stroke"]
+SIMPLE_TASKS = {"tumor": "multiclass_tumor", "ms": "ms", "stroke": "stroke"}
+TASK_MODALITY = {"tumor": "MR", "ms": "MR", "stroke": "CT"}
+
+
+def _pick(value: Any, allowed) -> Optional[str]:
+    """Case-insensitive match against a Literal's values; anything else becomes null."""
+    if value is None:
+        return None
+    lookup = {a.lower(): a for a in get_args(allowed)}
+    return lookup.get(str(value).strip().lower())
+
+
+def _unit(value: Any) -> Optional[float]:
+    try:
+        return min(1.0, max(0.0, float(value)))
+    except (TypeError, ValueError):
+        return None
+
+
+def _flat_diagnosis(slice_result: dict) -> Diagnosis:
+    """Flatten one slice of _run's output into the classify contract.
+
+    Uses the report's fused diagnosis (MedGemma over every tool output), falling
+    back to the triage diagnosis if the report did not parse. diagnosis_confidence
+    is the pipeline's final confidence, which includes the low GradCAM++/SAM3 IoU
+    penalty.
+    """
+    final = slice_result.get("final_medgemma_diagnosis")
+    dx = final or slice_result.get("medgemma_diagnosis") or {}
+    confidence = slice_result.get("final_confidence") if final else dx.get("diagnosis_confidence")
+    return Diagnosis(
+        modality=_pick(dx.get("modality"), Modality),
+        specialized_sequence=_pick(dx.get("specialized_sequence"), Sequence),
+        plane=_pick(dx.get("plane"), Plane),
+        diagnosis_name=_pick(dx.get("diagnosis_name"), DiagnosisName),
+        diagnosis_detailed=_pick(dx.get("diagnosis_detailed"), DetailedDiagnosis),
+        icd10_code=dx.get("icd10_code") or None,
+        severity_score=_unit(dx.get("severity_score")),
+        diagnosis_confidence=_unit(confidence) or 0.0,
+        severity_confidence=_unit(dx.get("severity_confidence")) or 0.0,
+    )
+
+
+def _most_abnormal(diagnoses: list[Diagnosis]) -> Diagnosis:
+    """Study-level pick over slices, like aggregation.study's max_abnormal: the most
+    confident abnormal slice, else the most confident one."""
+    abnormal = [d for d in diagnoses if d.diagnosis_name not in (None, "normal")]
+    return max(abnormal or diagnoses, key=lambda d: d.diagnosis_confidence)
 
 
 class _Server:
@@ -222,6 +306,29 @@ def _request_dir() -> Path:
     return path
 
 
+def _save_images(images: list[str], what: str) -> tuple[Path, list[str]]:
+    """Decode base64 images into a fresh request dir as PNGs; the dir is removed on failure."""
+    from PIL import Image
+
+    workdir = _request_dir()
+    paths = []
+    try:
+        for i, data in enumerate(images):
+            raw = _decode_b64(data, f"{what}[{i}]" if len(images) > 1 else what)
+            try:
+                image = Image.open(io.BytesIO(raw))
+                image.load()
+            except Exception as exc:
+                raise ToolError(f"{what} is not a readable image: {exc}") from None
+            path = workdir / f"input_{i:04d}.png"
+            image.save(path)
+            paths.append(str(path))
+    except BaseException:
+        shutil.rmtree(workdir, ignore_errors=True)
+        raise
+    return workdir, paths
+
+
 # ── MCP server ────────────────────────────────────────────────────────────────
 
 mcp = MCPServer(
@@ -229,6 +336,7 @@ mcp = MCPServer(
     title="Neuroimaging multi-agent classifier",
     instructions=(
         "Classifies brain MRI/CT for four tasks: binary_tumor, multiclass_tumor, ms, stroke. "
+        "For one image or volume use classify, which returns a flat diagnosis. "
         "Send prepared 2D slices with classify_slices, or a whole volume with classify_volume. "
         "Every slice is screened with a CNN and only the top_k most abnormal slices go through the full "
         "multi-agent pipeline ('standard'; 'forest' = N role-specialised MedGemma agents + vote; "
@@ -237,6 +345,46 @@ mcp = MCPServer(
         "and must be reviewed when requires_human_review is true."
     ),
 )
+
+
+@mcp.tool()
+def classify(
+    task: SimpleTask,
+    image: Optional[str] = None,
+    volume: Optional[str] = None,
+    ctx: Optional[Context] = None,
+) -> Diagnosis:
+    """Diagnose one brain scan with the standard multi-agent pipeline.
+
+    task: tumor | ms | stroke. stroke expects CT; tumor and ms expect MRI.
+    Give exactly one of:
+      image: base64 PNG or JPEG (raw base64 or a data: URL), one 2D slice
+          windowed like a viewer shows it;
+      volume: base64 of a .npy/.npz 3D array (slices, H, W), axial-first
+          (npz: key "volume" or the first array). CT in HU, MR in raw intensities.
+          32 slices are sampled, the 3 most abnormal (CNN screening) are analysed
+          and the most abnormal diagnosis is returned.
+
+    Returns the fused MedGemma diagnosis; fields are null when undetermined.
+    """
+    if (image is None) == (volume is None):
+        raise ToolError("give exactly one of image or volume")
+    pipeline_task = SIMPLE_TASKS[task]
+
+    if image is not None:
+        config = _pipeline_config("standard", volume=False, overrides=_overrides(1, "max_abnormal", 3, 1))
+        workdir, paths = _save_images([image], "image")
+        context = PipelineContext(task=pipeline_task, metadata={"image_paths": paths})
+        result = _run(config, context, ctx, include_fhir=False, cleanup=[str(workdir)])
+    else:
+        array = _load_volume(_decode_b64(volume, "volume"))
+        config = _pipeline_config("standard", volume=True, overrides=_overrides(3, "max_abnormal", 3, 1, n_slices=32))
+        context = PipelineContext(task=pipeline_task, volume=array, modality=TASK_MODALITY[task], metadata={})
+        result = _run(config, context, ctx, include_fhir=False, cleanup=[])
+
+    if not result["slices"]:
+        raise ToolError("no slice could be analysed")
+    return _most_abnormal([_flat_diagnosis(s) for s in result["slices"]])
 
 
 @mcp.tool()
@@ -297,25 +445,7 @@ def classify_slices(
         pipeline, volume=False, overrides=_overrides(top_k, aggregation, forest_n_agents, debate_rounds)
     )
 
-    workdir = _request_dir()
-    paths = []
-    try:
-        from PIL import Image
-
-        for i, data in enumerate(images):
-            raw = _decode_b64(data, f"images[{i}]")
-            try:
-                image = Image.open(io.BytesIO(raw))
-                image.load()
-            except Exception as exc:
-                raise ToolError(f"images[{i}] is not a readable image: {exc}") from None
-            path = workdir / f"input_{i:04d}.png"
-            image.save(path)
-            paths.append(str(path))
-    except BaseException:
-        shutil.rmtree(workdir, ignore_errors=True)
-        raise
-
+    workdir, paths = _save_images(images, "images")
     context = PipelineContext(task=task, metadata={**(metadata or {}), "image_paths": paths})
     return _run(config, context, ctx, include_fhir, cleanup=[str(workdir)])
 
@@ -419,7 +549,41 @@ def parse_args(argv=None):
     p.add_argument("--volume_dir", help="Enable classify_volume(volume_path=...) for files under this directory")
     p.add_argument("--keep_files", action="store_true", help="Keep decoded inputs and slice PNGs (default: delete)")
     p.add_argument("--lazy_load", action="store_true", help="Load models on first request instead of at startup")
+    p.add_argument(
+        "--allow_missing_checkpoints", action="store_true",
+        help="Start even if a task checkpoint is missing (CNN falls back to ImageNet weights, BiomedCLIP to zero-shot)",
+    )
     return p.parse_known_args(argv)
+
+
+def _check_checkpoints(model_cfg) -> list[str]:
+    """Fetch any missing task checkpoint now and return the ones still missing.
+
+    The agents would otherwise fall back silently on the first request (CNN to
+    ImageNet weights, BiomedCLIP to zero-shot, SAM3 skipped) and still return a
+    confident-looking diagnosis.
+    """
+    from config import CHECKPOINT_SOURCE, TASKS, download_hf_checkpoint
+
+    wanted = [(t, "cnn", model_cfg.cnn_checkpoints.get(t)) for t in TASKS]
+    wanted += [(t, "biomedclip", model_cfg.biomedclip_probe_checkpoints.get(t)) for t in TASKS]
+    wanted.append(("tumor_segmentation", "sam3", model_cfg.sam3_linear_probe_checkpoint))
+
+    missing = []
+    for task, kind, path in wanted:
+        if path is None:
+            missing.append(f"{task}/{kind}: no checkpoint configured")
+            continue
+        if Path(path).exists():
+            continue
+        if CHECKPOINT_SOURCE == "local":
+            missing.append(f"{task}/{kind}: {path} (CHECKPOINT_SOURCE=local)")
+            continue
+        try:
+            download_hf_checkpoint(task, kind, path, caller="mcp_server")
+        except Exception as exc:
+            missing.append(f"{task}/{kind}: {path} ({type(exc).__name__}: {str(exc)[:200]})")
+    return missing
 
 
 def main(argv=None):
@@ -439,6 +603,16 @@ def main(argv=None):
         from pipeline.resources import Resources
 
         cfg = run_pipeline.build_config(run_pipeline.parse_args(["--image", "<mcp>", *rest]))
+        missing = _check_checkpoints(cfg.model)
+        if missing:
+            listing = "\n  ".join(missing)
+            if not args.allow_missing_checkpoints:
+                sys.exit(
+                    f"[mcp_server] Missing task checkpoints:\n  {listing}\n"
+                    "Put them under checkpoints/ (/models/checkpoints in Docker), allow the HF "
+                    "download, or pass --allow_missing_checkpoints to serve degraded results."
+                )
+            print(f"[mcp_server] WARNING: serving with missing checkpoints:\n  {listing}", flush=True)
         _Server.resources = Resources(cfg)
         _Server.input_root = Path(cfg.output_dir) / "mcp_inputs"
         _Server.volume_dir = Path(args.volume_dir).resolve() if args.volume_dir else None

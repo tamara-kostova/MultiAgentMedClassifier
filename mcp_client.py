@@ -3,11 +3,15 @@ Minimal client for mcp_server.py — smoke test and reference for the host syste
 
     # server already running over HTTP (token from NEURO_MCP_TOKEN)
     python mcp_client.py --url http://127.0.0.1:8765/mcp --list
+    # classify: the flat MedGemma-schema diagnosis (task: tumor | ms | stroke)
+    python mcp_client.py --url http://127.0.0.1:8765/mcp --task tumor --image scan.png
+    python mcp_client.py --url http://127.0.0.1:8765/mcp --task stroke --volume vol.npy
+    # study-level detail: classify_slices / classify_volume (task: binary_tumor | multiclass_tumor | ms | stroke)
     python mcp_client.py --url http://gpu-host:8765/mcp --task binary_tumor --images a.png b.png
-    python mcp_client.py --url http://gpu-host:8765/mcp --task stroke --volume vol.npy --modality CT
+    python mcp_client.py --url http://gpu-host:8765/mcp --task stroke --volume vol.npy --modality CT --detailed
 
     # spawn the server as a subprocess over stdio (extra server flags after --)
-    python mcp_client.py --stdio --task binary_tumor --images scan.png -- --load_4bit
+    python mcp_client.py --stdio --task tumor --image scan.png -- --load_4bit
 
 Prints progress notifications to stderr and the tool result as JSON to stdout.
 """
@@ -55,6 +59,10 @@ def _server(args, server_flags: list[str]):
 
 
 def _arguments(args) -> tuple[str, dict]:
+    if args.image:
+        return "classify", {"task": args.task, "image": _b64(args.image)}
+    if args.volume and not args.detailed:
+        return "classify", {"task": args.task, "volume": _b64(args.volume)}
     common = {
         "task": args.task,
         "pipeline": args.pipeline,
@@ -109,11 +117,17 @@ def parse_args(argv=None):
     where.add_argument("--url", default="http://127.0.0.1:8765/mcp")
     where.add_argument("--stdio", action="store_true", help="Spawn mcp_server.py over stdio")
     p.add_argument("--list", action="store_true", help="Call list_capabilities")
-    p.add_argument("--task", choices=["binary_tumor", "multiclass_tumor", "ms", "stroke"])
+    p.add_argument(
+        "--task",
+        choices=["tumor", "binary_tumor", "multiclass_tumor", "ms", "stroke"],
+        help="classify takes tumor|ms|stroke; --images/--detailed take binary_tumor|multiclass_tumor|ms|stroke",
+    )
     src = p.add_mutually_exclusive_group()
+    src.add_argument("--image", help="One PNG/JPEG → classify (flat diagnosis)")
     src.add_argument("--images", nargs="+", help="PNG/JPEG slices → classify_slices")
-    src.add_argument("--volume", help="Local .npy/.npz → classify_volume (sent base64)")
+    src.add_argument("--volume", help="Local .npy/.npz (sent base64) → classify, or classify_volume with --detailed")
     src.add_argument("--volume_path", help="Server-side .npy/.npz (server needs --volume_dir)")
+    p.add_argument("--detailed", action="store_true", help="--volume → classify_volume (study-level detail)")
     p.add_argument("--modality", choices=["CT", "MR"], default="MR")
     p.add_argument("--pipeline", choices=["standard", "forest", "debate"], default="standard")
     p.add_argument("--n_slices", type=int, default=32)
@@ -124,8 +138,8 @@ def parse_args(argv=None):
     p.add_argument("--no_fhir", action="store_true", help="Omit FHIR bundles from the result")
     p.add_argument("--timeout", type=float, default=1800.0, help="Read timeout in seconds")
     args = p.parse_args(argv)
-    if args.task and not (args.images or args.volume or args.volume_path) and not args.list:
-        p.error("--task needs --images, --volume or --volume_path")
+    if args.task and not (args.image or args.images or args.volume or args.volume_path) and not args.list:
+        p.error("--task needs --image, --images, --volume or --volume_path")
     return args, server_flags
 
 
