@@ -1,0 +1,18 @@
+# Stage-pipeline equivalent of pipeline/graph.py:assemble_pipeline (baseline).
+# Node stages must stay in graph.py's order for results to match slice for slice.
+# For a volume input, replace from_files with:
+#   - inference.slice_extraction.neuro_axial: {n_slices: 32}
+name: standard
+stages:
+  - inference.slice_extraction.from_files
+  - inference.io.materialize
+  - inference.screening.cnn_topk: {top_k: 3}
+  - inference.agents.triage
+  - inference.agents.cnn_classify
+  - inference.agents.sam3_segment
+  - inference.agents.biomedclip
+  - inference.agents.explainability
+  - inference.agents.verification
+  - inference.agents.report
+  - inference.agents.fhir_output
+  - inference.aggregation.study: {strategy: max_abnormal}
