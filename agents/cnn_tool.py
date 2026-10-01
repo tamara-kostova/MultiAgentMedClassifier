@@ -34,9 +34,11 @@ NUM_CLASSES = {
     "stroke": 2,
 }
 
+# Training label order of the checkpoint, recovered by scripts/diagnose_multiclass_cnn.py on
+# the CNN's own 12-class test split. Before 2026-10 this list was alphabetical.
 _CNN_MULTICLASS_CLASSES = [
-    "carcinoma", "germinoma", "glioma", "granuloma", "medulloblastoma",
-    "meningioma", "neurocytoma", "normal", "papilloma", "pituitary_tumor",
+    "normal", "glioma", "meningioma", "pituitary_tumor", "carcinoma",
+    "germinoma", "granuloma", "medulloblastoma", "neurocytoma", "papilloma",
     "schwannoma", "tuberculoma",
 ]
 
