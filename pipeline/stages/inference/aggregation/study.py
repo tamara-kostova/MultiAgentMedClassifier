@@ -36,7 +36,7 @@ class StudyAggregation(Stage):
         self.strategy = strategy
 
     def run(self, context: PipelineContext) -> PipelineContext:
-        from eval.tumor_eval import canonical_label
+        from eval.labels import canonical_label
 
         rows = []
         for pos in context.selected:

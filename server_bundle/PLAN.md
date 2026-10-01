@@ -1,6 +1,19 @@
 # PLAN — Faculty GPU server bundle (Singularity + .py scripts + data)
 
-**Status:** in progress. Created 2026-07-29. Pick this file up to resume cold.
+> **v2 campaign (2026-10-01) supersedes the six-run campaign below.** The bundle now runs
+> RERUN_PLAN.md's Tier 2 + H1: 16 steps `<system>_<task>` (base / forest / debate / homog ×
+> binary_tumor / ms / stroke / multiclass_tumor) through `step.sh`, ordered in `steps.sh`
+> (multiclass last). Gates: `00_preflight` (now also checks every path in
+> `image_lists/`), `05_diagnose_cnn` (multiclass CNN, non-blocking), `10_smoke` (every mode on
+> SMOKE_N images + `scripts/check_smoke.py`). Every run uses `--image_list
+> server_bundle/image_lists/<task>.txt` (the published 500 Forest/Debate images) and writes
+> `outputs/eval/v2/<task>_<system>.jsonl`; base/forest/debate run with explainability on.
+> `pack_bundle.sh` stamps `CODE_VERSION` (commit, dirty) and refuses uncommitted code, so rows
+> record `run_config.git_commit` without `.git`. The old 01–06 step scripts are removed.
+> Optional steps: `rolesamp_<task>` (H2), `nosam_binary_tumor` (S1). History below is kept
+> for the record.
+
+**Status (six-run campaign):** done. Created 2026-07-29.
 
 ## Why this exists
 

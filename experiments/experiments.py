@@ -9,6 +9,19 @@ Families:
   human_review_sweep  — vary human_review_threshold (6 points, 0.30–0.55)
   ablation            — 4 structural variants (full / no_sam3 / always_sam3 / no_biomedclip)
   biomedclip_threshold — vary biomedclip_rerank_threshold (7 points, 0.50–0.80)
+
+WARNING — routing-only sweep points. The LangGraph pipeline is linear: every node
+(SAM3, BiomedCLIP, ...) runs for every image regardless of the routing decision.
+sam3_threshold, biomedclip_rerank_threshold, always_run_sam3 and
+always_run_biomedclip only change the *recorded* routing_decision label
+(agents/medgemma_agent.py:diagnosis_to_routing), never a prediction or confidence.
+So the whole threshold_sweep and biomedclip_threshold families and the ablation
+points no_sam3 / always_sam3 / no_biomedclip measure nothing about the pipeline's
+output: their accuracy/ECE equal full_pipeline's up to MedGemma sampling noise.
+They are kept (routing_distribution still reflects them) and flagged with
+``routing_only=True``; run_research.py warns when one is selected. Do not report
+them as an ablation. human_review_threshold is NOT routing-only: report_node uses
+it to set requires_human_review.
 """
 
 from dataclasses import dataclass, field
@@ -21,6 +34,12 @@ class SweepPoint:
     routing_overrides: dict  # fields to override on RoutingConfig
     pipeline_mode: str = "standard"        # "standard" | "debate" | "forest"
     pipeline_kwargs: dict = field(default_factory=dict)  # extra args for assembler
+    # True when the override only changes the recorded routing label, not the output
+    # (see module docstring). Such points are not a real ablation.
+    routing_only: bool = False
+
+
+_RO = "[ROUTING LABEL ONLY — pipeline output unchanged] "
 
 
 EXPERIMENT_FAMILIES: dict[str, list[SweepPoint]] = {
@@ -28,8 +47,9 @@ EXPERIMENT_FAMILIES: dict[str, list[SweepPoint]] = {
     "threshold_sweep": [
         SweepPoint(
             experiment_id=f"sam3_{t:.2f}",
-            description=f"SAM3 threshold = {t:.2f} (default 0.70)",
+            description=f"{_RO}SAM3 threshold = {t:.2f} (default 0.70)",
             routing_overrides={"sam3_threshold": t},
+            routing_only=True,
         )
         for t in [0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85]
     ],
@@ -53,18 +73,21 @@ EXPERIMENT_FAMILIES: dict[str, list[SweepPoint]] = {
         ),
         SweepPoint(
             experiment_id="no_sam3",
-            description="No SAM3 — sam3_threshold=1.0 so SAM3 path is never triggered",
+            description=f"{_RO}No SAM3 — sam3_threshold=1.0 (SAM3 still runs on every image; only the label changes)",
             routing_overrides={"sam3_threshold": 1.0},
+            routing_only=True,
         ),
         SweepPoint(
             experiment_id="always_sam3",
-            description="Always SAM3 — every non-normal case routed through segmentation",
+            description=f"{_RO}Always SAM3 — always_run_sam3=True (SAM3 already runs on every image)",
             routing_overrides={"always_run_sam3": True},
+            routing_only=True,
         ),
         SweepPoint(
             experiment_id="no_biomedclip",
-            description="No BiomedCLIP — rerank threshold=0.0 so BiomedCLIP path is never triggered",
+            description=f"{_RO}No BiomedCLIP — rerank threshold=0.0 (BiomedCLIP still runs on every image)",
             routing_overrides={"biomedclip_rerank_threshold": 0.0},
+            routing_only=True,
         ),
     ],
 
@@ -72,8 +95,9 @@ EXPERIMENT_FAMILIES: dict[str, list[SweepPoint]] = {
     "biomedclip_threshold": [
         SweepPoint(
             experiment_id=f"biomedclip_{t:.2f}",
-            description=f"BiomedCLIP rerank threshold = {t:.2f} (default 0.65)",
+            description=f"{_RO}BiomedCLIP rerank threshold = {t:.2f} (default 0.65)",
             routing_overrides={"biomedclip_rerank_threshold": t},
+            routing_only=True,
         )
         for t in [0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80]
     ],

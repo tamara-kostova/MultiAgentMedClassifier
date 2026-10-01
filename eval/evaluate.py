@@ -33,7 +33,14 @@ from sklearn.metrics import (
 )
 
 from config import DEFAULT_CONFIG, TASKS
-from eval.tumor_eval import LABEL_MAPS, TASK_DEFAULT_LABEL_MAP, canonical_label
+from eval.labels import canonical_label
+from eval.metrics import compute_ece  # noqa: F401  (re-exported: `from eval.evaluate import compute_ece`)
+from eval.tumor_eval import (  # read-only shared constants
+    IMAGE_EXTENSIONS,
+    LABEL_MAPS,
+    TASK_DEFAULT_LABEL_MAP,
+    _DEFAULT_EXCLUDE_DIRS,
+)
 from pipeline.state import NeuroimagingState, initial_state
 
 
@@ -54,35 +61,6 @@ ConfigName = Literal["baseline_cnn", "static_sam3_cnn", "agent_pipeline"]
 
 
 # ── Calibration utilities ──────────────────────────────────────────────────────
-
-
-def compute_ece(
-    confidences: np.ndarray, correct: np.ndarray, n_bins: int = 10
-) -> float:
-    """Expected Calibration Error (ECE) with equal-width bins.
-
-    A well-calibrated model has ECE close to 0: when it says 80% confident,
-    ~80% of those predictions should be correct.
-
-    Args:
-        confidences: predicted confidence per sample, shape (N,)
-        correct:     1.0 if correct, 0.0 otherwise, shape (N,)
-        n_bins:      number of equal-width confidence bins (default 10)
-
-    Returns:
-        ECE scalar.
-    """
-    bin_edges = np.linspace(0.0, 1.0, n_bins + 1)
-    ece = 0.0
-    n = len(confidences)
-    for lo, hi in zip(bin_edges[:-1], bin_edges[1:]):
-        mask = (confidences > lo) & (confidences <= hi)
-        if mask.sum() == 0:
-            continue
-        bin_conf = confidences[mask].mean()
-        bin_acc = correct[mask].mean()
-        ece += (mask.sum() / n) * abs(bin_acc - bin_conf)
-    return float(ece)
 
 
 class TemperatureScaler(nn.Module):
@@ -163,6 +141,11 @@ def load_test_split(dataset_dir: str, task: str) -> list[dict]:
     Load test split from a directory structured as:
         <dataset_dir>/<class_name>/<image_file>
 
+    Non-recursive (images must sit directly in the class folder). Skips class
+    folders named in eval.tumor_eval._DEFAULT_EXCLUDE_DIRS (e.g. stroke's
+    lesion-painted OVERLAY) or ending in "_mask", matches extensions
+    case-insensitively (.png/.jpg/.jpeg), and returns a sorted list.
+
     Returns list of {"image_path": str, "label": str, "task": str}
     """
     dataset_path = Path(dataset_dir)
@@ -170,7 +153,13 @@ def load_test_split(dataset_dir: str, task: str) -> list[dict]:
     for class_dir in sorted(dataset_path.iterdir()):
         if not class_dir.is_dir():
             continue
-        for img_file in class_dir.glob("*.png"):
+        if class_dir.name.endswith("_mask") or class_dir.name in _DEFAULT_EXCLUDE_DIRS:
+            continue
+        for img_file in sorted(class_dir.iterdir()):
+            if not img_file.is_file() or img_file.suffix.lower() not in IMAGE_EXTENSIONS:
+                continue
+            if img_file.stem.endswith("_mask"):
+                continue
             samples.append(
                 {
                     "image_path": str(img_file),
@@ -178,15 +167,7 @@ def load_test_split(dataset_dir: str, task: str) -> list[dict]:
                     "task": task,
                 }
             )
-        for img_file in class_dir.glob("*.jpg"):
-            samples.append(
-                {
-                    "image_path": str(img_file),
-                    "label": class_dir.name,
-                    "task": task,
-                }
-            )
-    return samples
+    return sorted(samples, key=lambda s: (s["label"], s["image_path"]))
 
 
 # ── Single-configuration evaluator ───────────────────────────────────────────
@@ -246,6 +227,11 @@ class PipelineEvaluator:
                         final_state["medgemma_diagnosis"].get("diagnosis_name")
                         if final_state.get("medgemma_diagnosis") else None
                     ),
+                    # multiclass_tumor scores the subtype (diagnosis_detailed)
+                    "medgemma_class_detailed": (
+                        final_state["medgemma_diagnosis"].get("diagnosis_detailed")
+                        if final_state.get("medgemma_diagnosis") else None
+                    ),
                     # Forest fields (None in standard / debate pipelines)
                     "dissent_rate": (
                         final_state["forest_consensus"].get("dissent_rate")
@@ -261,6 +247,12 @@ class PipelineEvaluator:
                         final_state["debate_verdict"].get("round_changed")
                         if final_state.get("debate_verdict") else None
                     ),
+                    # Per-round verdicts when the debate agent exposes them (newer
+                    # versions); analysis prefers these over the judge's own flag.
+                    "debate_round_verdicts": (
+                        final_state.get("debate_round_verdicts")
+                        or (final_state.get("debate_verdict") or {}).get("round_verdicts")
+                    ),
                 }
                 f.write(json.dumps(row) + "\n")
 
@@ -271,50 +263,81 @@ class PipelineEvaluator:
 # ── Metric computation ────────────────────────────────────────────────────────
 
 
-def compute_metrics(df: pd.DataFrame) -> dict:
+def score_frame(df: pd.DataFrame, task: str | None = None) -> pd.DataFrame:
+    """Per-row scoring identical to the paper path (eval_analysis strict scoring).
+
+    Adds columns: _true (prep'd canonical truth), _pred (prep'd canonical
+    prediction, "unknown" for an abstention), _correct (abstain = wrong) and
+    _conf (final_confidence; only a missing value becomes 0.5).
+    """
+    from eval.eval_analysis import prep  # lazy: keeps matplotlib out of module import
+
+    out = df.copy()
+    tasks = out["task"] if "task" in out.columns else pd.Series([task] * len(out), index=out.index)
+    if task is not None:
+        tasks = pd.Series([task] * len(out), index=out.index)
+
+    def _true(row, t):
+        raw = row.get("true_label_canonical")
+        if raw is None or (isinstance(raw, float) and np.isnan(raw)) or raw == "":
+            raw = _canonical_true_label(str(row.get("true_label", "")), t)
+        return prep(canonical_label(raw, t), t)
+
+    def _pred(row, t):
+        raw = row.get("predicted_class")
+        if raw is None or (isinstance(raw, float) and np.isnan(raw)):
+            raw = row.get("predicted_class_canonical")
+        if raw is None or (isinstance(raw, float) and np.isnan(raw)):
+            raw = ""
+        lbl = canonical_label(raw, t)
+        return prep(lbl, t) if lbl else "unknown"
+
+    out["_true"] = [_true(r, t) for (_, r), t in zip(out.iterrows(), tasks)]
+    out["_pred"] = [_pred(r, t) for (_, r), t in zip(out.iterrows(), tasks)]
+    out["_correct"] = ((out["_true"] == out["_pred"]) & (out["_pred"] != "unknown")).astype(float)
+    conf = pd.to_numeric(out.get("final_confidence"), errors="coerce") if "final_confidence" in out else None
+    out["_conf"] = np.clip(conf.fillna(0.5).values, 0, 1) if conf is not None else 0.5
+    return out
+
+
+def compute_metrics(df: pd.DataFrame, task: str | None = None) -> dict:
     """
     Compute standard and agent-specific metrics from a results DataFrame.
 
-    Uses the canonical label columns when present (written by PipelineEvaluator.run)
-    so accuracy/F1/specificity are computed on normalized labels rather than raw
-    dataset folder names. Falls back to the raw columns for older result files.
+    Scoring is the paper path's: eval.labels.canonical_label + eval_analysis.prep
+    strict binarization (binary tasks collapse to pos|normal; naming another
+    pathology is a negative; "other abnormalities" -> "abnormal" is NOT "normal").
+    Abstentions (empty/unknown prediction) count as wrong. Accuracy, F1, ROC-AUC,
+    specificity and ECE all use the same per-row predictions.
     """
-    true_col = "true_label_canonical" if "true_label_canonical" in df.columns else "true_label"
-    pred_col = "predicted_class_canonical" if "predicted_class_canonical" in df.columns else "predicted_class"
-    y_true = df[true_col].tolist()
-    y_pred = df[pred_col].tolist()
-
-    # Handle case where predicted class contains text descriptions (BiomedCLIP zero-shot)
-    # Map back to short class names via substring matching
+    if task is None and "task" in df.columns and len(df):
+        task = str(df["task"].iloc[0])
+    sc = score_frame(df, task)
+    sc = sc[sc["_true"] != "unknown"]
+    y_true = sc["_true"].tolist()
+    y_pred = sc["_pred"].tolist()
     classes = sorted(set(y_true))
-    y_pred_clean = []
-    for p in y_pred:
-        matched = next((c for c in classes if c.lower() in p.lower()), p)
-        y_pred_clean.append(matched)
+    labels = sorted(set(y_true) | (set(y_pred) - {"unknown"}))
 
     metrics = {
-        "accuracy": accuracy_score(y_true, y_pred_clean),
-        "f1_macro": f1_score(y_true, y_pred_clean, average="macro", zero_division=0),
+        "n_scored": len(sc),
+        "n_abstained": int((sc["_pred"] == "unknown").sum()),
+        "accuracy": float(sc["_correct"].mean()) if len(sc) else float("nan"),
+        "f1_macro": f1_score(y_true, y_pred, labels=labels, average="macro", zero_division=0),
         "classification_report": classification_report(
-            y_true, y_pred_clean, zero_division=0
+            y_true, y_pred, labels=labels, zero_division=0
         ),
     }
 
-    # ROC-AUC (binary tasks only; multiclass requires probability vectors)
+    # ROC-AUC (binary tasks): positive-class score from final_confidence of the
+    # same canonical prediction; an abstention scores 0.5.
     if len(classes) == 2:
-        # Use routing_confidence as proxy for positive-class probability
         positive_class = (
-            [c for c in classes if c != "normal"][0]
-            if "normal" in classes
-            else classes[1]
+            [c for c in classes if c != "normal"][0] if "normal" in classes else classes[1]
         )
         y_scores = [
-            (
-                row["final_confidence"]
-                if row[pred_col] == positive_class
-                else 1 - row["final_confidence"]
-            )
-            for _, row in df.iterrows()
+            c if p == positive_class else (1 - c if p != "unknown" else 0.5)
+            for p, c in zip(sc["_pred"], sc["_conf"])
         ]
         y_binary = [1 if t == positive_class else 0 for t in y_true]
         try:
@@ -324,34 +347,39 @@ def compute_metrics(df: pd.DataFrame) -> dict:
 
     # ── Agent-specific metrics ────────────────────────────────────────────────
 
-    # Specificity on normal scans (key metric — fixes specificity collapse from sam3_pipeline.tex)
-    normal_mask = df[true_col] == "normal"
+    # Specificity on normal scans: canonical "normal" only ("abnormal" is not normal).
+    normal_mask = sc["_true"] == "normal"
     if normal_mask.any():
-        normal_correct = df.loc[normal_mask, pred_col].apply(
-            lambda x: "normal" in str(x).lower()
-        )
-        metrics["normal_specificity"] = normal_correct.mean()
+        metrics["normal_specificity"] = float((sc.loc[normal_mask, "_pred"] == "normal").mean())
 
     # SAM3 invocation rate
-    metrics["sam3_invocation_rate"] = (df["routing_path"].str.contains("sam3")).mean()
+    if "routing_path" in df.columns:
+        metrics["sam3_invocation_rate"] = (df["routing_path"].fillna("").str.contains("sam3")).mean()
 
     # Human review rate
-    metrics["human_review_rate"] = df["requires_human_review"].mean()
+    if "requires_human_review" in df.columns:
+        from eval.metrics import parse_bool
+        metrics["human_review_rate"] = float(np.mean(
+            [parse_bool(v) is True for v in df["requires_human_review"]]))
 
     # Average latency per path
-    metrics["mean_latency_s"] = df["latency_s"].mean()
-    metrics["latency_by_path"] = (
-        df.groupby("routing_decision")["latency_s"].mean().to_dict()
-    )
+    if "latency_s" in df.columns:
+        metrics["mean_latency_s"] = df["latency_s"].mean()
+        if "routing_decision" in df.columns:
+            metrics["latency_by_path"] = (
+                df.groupby("routing_decision")["latency_s"].mean().to_dict()
+            )
 
-    # Calibration: proper ECE with equal-width bins
-    confidences = df["final_confidence"].values
-    correct = (df[true_col] == df[pred_col]).values.astype(float)
-    metrics["mean_confidence"] = float(confidences.mean())
-    metrics["mean_accuracy"] = float(correct.mean())
-    metrics["ece"] = compute_ece(confidences, correct, n_bins=10)
-    # Keep the old MAE-based approximation for backwards-compatibility comparison
-    metrics["ece_approx"] = float(np.abs(confidences - correct).mean())
+    # Calibration: ECE (eval.metrics, first bin [0, 0.1]) on the same predictions
+    confidences = np.asarray(sc["_conf"], dtype=float)
+    correct = sc["_correct"].values.astype(float)
+    if len(sc):
+        metrics["mean_confidence"] = float(confidences.mean())
+        metrics["mean_accuracy"] = float(correct.mean())
+        from eval.metrics import check_ece_bound
+        metrics["ece"] = check_ece_bound(confidences, correct)
+        # Keep the old MAE-based approximation for backwards-compatibility comparison
+        metrics["ece_approx"] = float(np.abs(confidences - correct).mean())
 
     return metrics
 
@@ -391,12 +419,14 @@ def compare_configurations(
             results_df = evaluator.run(samples, task_output_path)
             all_results_df.append(results_df)
 
-            metrics = compute_metrics(results_df)
+            metrics = compute_metrics(results_df, task)
 
             row = {
                 "config": config_name,
                 "task": task,
                 "n_samples": len(samples),
+                "n_scored": metrics.get("n_scored", len(samples)),
+                "n_abstained": metrics.get("n_abstained", 0),
                 "accuracy": metrics["accuracy"],
                 "f1_macro": metrics["f1_macro"],
                 "roc_auc": metrics.get("roc_auc", float("nan")),

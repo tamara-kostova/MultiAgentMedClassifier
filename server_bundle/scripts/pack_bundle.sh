@@ -101,6 +101,25 @@ else
     echo "            SAM3 will be skipped on the server."
 fi
 
+# ── 1b. code version ─────────────────────────────────────────────────────────
+# The bundle has no .git, so the commit is stamped into CODE_VERSION; every result
+# row records it in run_config.git_commit. Uncommitted code would make the runs
+# untraceable, so it is refused unless ALLOW_DIRTY=1.
+say "Code version"
+COMMIT=$(git rev-parse HEAD)
+if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+    DIRTY=true
+    echo "   WARNING: tracked files have uncommitted changes:"
+    git status --short --untracked-files=no | sed 's/^/     /'
+    if [ "${ALLOW_DIRTY:-0}" != "1" ]; then
+        echo "   Commit first (results must be traceable to a commit), or set ALLOW_DIRTY=1."
+        exit 1
+    fi
+else
+    DIRTY=false
+fi
+echo "   $COMMIT (dirty=$DIRTY)"
+
 # ── 2. stage the tree ────────────────────────────────────────────────────────
 say "Staging $STAGE/$BUNDLE_NAME"
 rm -rf "$STAGE"
@@ -135,6 +154,8 @@ rsync -a "${DATA_EXCLUDES[@]}" "$SRC_BR35H/"    "$DEST/data/Br35H/"
 rsync -a "${DATA_EXCLUDES[@]}" "$SRC_FIGSHARE/" "$DEST/data/figshare/"
 rsync -a "${DATA_EXCLUDES[@]}" "$SRC_MS/"       "$DEST/data/sclerosis/MS/"
 rsync -a "${DATA_EXCLUDES[@]}" "$SRC_STROKE/"   "$DEST/data/stroke/Brain_Stroke_CT_Dataset/"
+
+printf '{"commit": "%s", "dirty": %s, "packed": "%s"}\n' "$COMMIT" "$DIRTY" "$(date -Is)" > "$DEST/CODE_VERSION"
 
 echo "   empty output dirs"
 mkdir -p "$DEST/outputs/eval" "$DEST/outputs/results_tsv" "$DEST/logs"

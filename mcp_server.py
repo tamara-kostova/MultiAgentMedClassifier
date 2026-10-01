@@ -57,8 +57,19 @@ MAX_IMAGES = 64
 MAX_TOP_K = 32
 MAX_VOLUME_SLICES = 128
 MAX_VOLUME_VOXELS = 256 * 1024 * 1024  # ~1 GB as float32 once normalised
-MAX_FOREST_AGENTS = 8  # AgentForest cycles its 4 roles beyond 4
+MAX_FOREST_AGENTS = 4  # one per distinct role; the pipeline refuses repeated roles under greedy decoding
 MAX_DEBATE_ROUNDS = 3  # DebateOrchestrator.MAX_ROUNDS; larger values are silently clamped
+MAX_VOLUME_ARRAY_BYTES = 1024**3  # decoded array size (dtype itemsize × voxels), checked from the header
+MAX_VOLUME_FILE_BYTES = 1024**3  # .npy/.npz file (decoded base64 or volume_path) before parsing
+MAX_IMAGE_PIXELS = 4096 * 4096  # per slice, checked from the image header before decoding pixels
+MAX_IMAGE_BYTES = 32 * 1024**2  # per encoded image (after base64 decoding)
+MAX_REQUEST_IMAGE_BYTES = 256 * 1024**2  # all encoded images of one request
+MAX_METADATA_KEYS = 32
+MAX_METADATA_KEY_LENGTH = 64
+MAX_METADATA_STRING_LENGTH = 256
+# Metadata keys the pipeline itself writes; a caller value would be overwritten or confuse it.
+RESERVED_METADATA_KEYS = {"image_paths", "source_paths", "slice_index"}
+NUMERIC_METADATA_KEYS = {"rescale_slope", "rescale_intercept"}  # read by neuro_axial CT windowing
 
 DISCLAIMER = (
     "Research prototype, not a medical device. Slice-level accuracy was measured on curated "
@@ -186,31 +197,155 @@ def _jsonable(obj: Any) -> Any:
     return json.loads(json.dumps(obj, default=str))
 
 
-def _decode_b64(data: str, what: str) -> bytes:
+def _mib(n: int) -> str:
+    return f"{n / 1024**2:.1f} MiB"
+
+
+def _decode_b64(data: str, what: str, max_bytes: int) -> bytes:
+    """Decode raw base64 or a data: URL, rejecting oversize payloads before decoding."""
+    if not isinstance(data, str):
+        raise ToolError(f"{what} must be a base64 string")
     if data.startswith("data:"):  # data URL: data:image/png;base64,....
         data = data.split(",", 1)[-1]
+    if len(data) // 4 * 3 > max_bytes + 3:
+        raise ToolError(f"{what} is too large: about {_mib(len(data) // 4 * 3)}, limit is {_mib(max_bytes)}")
     try:
-        return base64.b64decode(data, validate=True)
-    except (binascii.Error, ValueError) as exc:
-        raise ToolError(f"{what} is not valid base64: {exc}") from None
+        raw = base64.b64decode(data, validate=True)
+    except (binascii.Error, ValueError):
+        raise ToolError(f"{what} is not valid base64") from None
+    if len(raw) > max_bytes:
+        raise ToolError(f"{what} is too large: {_mib(len(raw))}, limit is {_mib(max_bytes)}")
+    return raw
 
 
-def _load_volume(raw: bytes) -> np.ndarray:
+_NPY_MAGIC = b"\x93NUMPY"
+_ZIP_MAGICS = (b"PK\x03\x04", b"PK\x05\x06")  # local file header / empty archive
+
+
+def _npy_header(fp, what: str) -> tuple[tuple, bool, np.dtype]:
+    """Read and validate a .npy header (shape, fortran_order, dtype) without reading the data."""
     try:
-        loaded = np.load(io.BytesIO(raw), allow_pickle=False)
-    except Exception as exc:
-        raise ToolError(f"volume is not a readable .npy/.npz file: {exc}") from None
-    if isinstance(loaded, np.lib.npyio.NpzFile):
-        key = "volume" if "volume" in loaded.files else loaded.files[0]
-        loaded = loaded[key]
-    volume = np.asarray(loaded)
-    if volume.ndim != 3:
-        raise ToolError(f"volume must be 3D (slices, H, W), got shape {volume.shape}")
-    if not (np.issubdtype(volume.dtype, np.integer) or np.issubdtype(volume.dtype, np.floating)):
-        raise ToolError(f"volume must be an integer or float array, got dtype {volume.dtype}")
-    if volume.size > MAX_VOLUME_VOXELS:
-        raise ToolError(f"volume has {volume.size} voxels, limit is {MAX_VOLUME_VOXELS}")
+        version = np.lib.format.read_magic(fp)
+        if version == (1, 0):
+            shape, fortran, dtype = np.lib.format.read_array_header_1_0(fp)
+        elif version == (2, 0):
+            shape, fortran, dtype = np.lib.format.read_array_header_2_0(fp)
+        else:
+            raise ToolError(f"{what}: unsupported .npy format version {version[0]}.{version[1]}")
+    except ToolError:
+        raise
+    except Exception:
+        raise ToolError(f"{what} is not a readable .npy array (bad or oversized header)") from None
+
+    if dtype.hasobject or dtype.names is not None or dtype.subdtype is not None:
+        raise ToolError(f"{what} must be a plain integer or float array (object/structured dtypes are not accepted)")
+    if not (np.issubdtype(dtype, np.integer) or np.issubdtype(dtype, np.floating)):
+        raise ToolError(f"{what} must be an integer or float array, got dtype {dtype.name}")
+    if len(shape) != 3:
+        raise ToolError(f"{what} must be 3D (slices, H, W), got {len(shape)}D shape {tuple(shape)}")
+    if min(shape) < 1:
+        raise ToolError(f"{what} is empty, shape {tuple(shape)}")
+    voxels = int(np.prod(shape, dtype=object))  # Python ints: no overflow on a forged header
+    if voxels > MAX_VOLUME_VOXELS:
+        raise ToolError(f"{what} has {voxels} voxels, limit is {MAX_VOLUME_VOXELS}")
+    if voxels * dtype.itemsize > MAX_VOLUME_ARRAY_BYTES:
+        raise ToolError(
+            f"{what} is {_mib(voxels * dtype.itemsize)} as {dtype.name}, limit is {_mib(MAX_VOLUME_ARRAY_BYTES)}"
+        )
+    return tuple(shape), fortran, dtype
+
+
+def _read_npy(fp, what: str, available: Optional[int] = None) -> np.ndarray:
+    """Validate the header, then read exactly the declared array from `fp` (positioned at its start)."""
+    start = fp.tell()
+    shape, _, dtype = _npy_header(fp, what)
+    nbytes = int(np.prod(shape, dtype=object)) * dtype.itemsize
+    if available is not None and available - (fp.tell() - start) < nbytes:
+        raise ToolError(f"{what} is truncated: the header declares {_mib(nbytes)} of data")
+    fp.seek(start)
+    try:
+        return np.lib.format.read_array(fp, allow_pickle=False)
+    except Exception:
+        raise ToolError(f"{what} could not be read (truncated or corrupt array data)") from None
+
+
+def _load_volume(fp, size: int) -> np.ndarray:
+    """Parse a .npy/.npz from a seekable binary file of `size` bytes, checking every limit
+    from the headers before any array data is decompressed or allocated."""
+    import zipfile
+
+    if size > MAX_VOLUME_FILE_BYTES:
+        raise ToolError(f"volume file is {_mib(size)}, limit is {_mib(MAX_VOLUME_FILE_BYTES)}")
+    head = fp.read(6)
+    fp.seek(0)
+
+    if head.startswith(_NPY_MAGIC):
+        volume = _read_npy(fp, "volume", available=size)
+    elif head[:4] in _ZIP_MAGICS:
+        try:
+            archive = zipfile.ZipFile(fp)
+            members = [m for m in archive.infolist() if not m.is_dir()]
+        except Exception:
+            raise ToolError("volume is not a readable .npz archive") from None
+        if not members:
+            raise ToolError("volume .npz archive contains no arrays")
+        names = {m.filename.removesuffix(".npy"): m for m in members}
+        member = names.get("volume") or members[0]
+        what = f"volume (npz member {member.filename!r})"
+        # ZipExtFile stops at the declared file_size, so this bounds decompression too.
+        if member.file_size > MAX_VOLUME_ARRAY_BYTES + 64 * 1024:
+            raise ToolError(f"{what} is {_mib(member.file_size)} uncompressed, limit is {_mib(MAX_VOLUME_ARRAY_BYTES)}")
+        try:
+            with archive.open(member) as data:  # seekable; header is validated before the data is read
+                volume = _read_npy(data, what, available=member.file_size)
+        except ToolError:
+            raise
+        except Exception:
+            raise ToolError(f"{what} could not be read (corrupt archive)") from None
+    else:
+        raise ToolError("volume must be a .npy or .npz file")
+
+    if np.issubdtype(volume.dtype, np.floating) and not np.isfinite(volume).all():
+        raise ToolError("volume contains NaN or infinite values")
     return volume
+
+
+def _clean_metadata(metadata: Any) -> dict[str, Any]:
+    """Bound caller metadata: at most MAX_METADATA_KEYS short string keys with scalar values."""
+    if metadata is None:
+        return {}
+    if not isinstance(metadata, dict):
+        raise ToolError("metadata must be an object")
+    if len(metadata) > MAX_METADATA_KEYS:
+        raise ToolError(f"metadata has {len(metadata)} keys, limit is {MAX_METADATA_KEYS}")
+    clean = {}
+    for key, value in metadata.items():
+        if not isinstance(key, str) or not key or len(key) > MAX_METADATA_KEY_LENGTH:
+            raise ToolError(f"metadata keys must be non-empty strings of at most {MAX_METADATA_KEY_LENGTH} characters")
+        if key in RESERVED_METADATA_KEYS:
+            raise ToolError(f"metadata key {key!r} is reserved")
+        if key in NUMERIC_METADATA_KEYS:
+            value = _finite_float(value, f"metadata.{key}")
+        elif isinstance(value, str):
+            if len(value) > MAX_METADATA_STRING_LENGTH:
+                raise ToolError(f"metadata.{key} is longer than {MAX_METADATA_STRING_LENGTH} characters")
+        elif isinstance(value, float):
+            if not np.isfinite(value):
+                raise ToolError(f"metadata.{key} must be a finite number")
+        elif not (value is None or isinstance(value, (bool, int))):
+            raise ToolError(f"metadata.{key} must be a string, number, boolean or null")
+        clean[key] = value
+    return clean
+
+
+def _finite_float(value: Any, what: str) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        raise ToolError(f"{what} must be a number") from None
+    if isinstance(value, bool) or not np.isfinite(number):
+        raise ToolError(f"{what} must be a finite number")
+    return number
 
 
 def _pipeline_config(name: str, *, volume: bool, overrides: dict[str, dict]) -> dict[str, Any]:
@@ -227,13 +362,19 @@ def _pipeline_config(name: str, *, volume: bool, overrides: dict[str, dict]) -> 
     return config
 
 
+def _check_int(value: Any, name: str, limit: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= limit:
+        raise ToolError(f"{name} must be an integer in 1..{limit}")
+    return value
+
+
 def _overrides(top_k, aggregation, forest_n_agents, debate_rounds, n_slices=None) -> dict[str, Any]:
-    if not 1 <= top_k <= MAX_TOP_K:
-        raise ToolError(f"top_k must be in 1..{MAX_TOP_K}")
-    if not 1 <= forest_n_agents <= MAX_FOREST_AGENTS:
-        raise ToolError(f"forest_n_agents must be in 1..{MAX_FOREST_AGENTS}")
-    if not 1 <= debate_rounds <= MAX_DEBATE_ROUNDS:
-        raise ToolError(f"debate_rounds must be in 1..{MAX_DEBATE_ROUNDS}")
+    """Validate per-request stage kwargs. Call before decoding any input."""
+    _check_int(top_k, "top_k", MAX_TOP_K)
+    _check_int(forest_n_agents, "forest_n_agents", MAX_FOREST_AGENTS)
+    _check_int(debate_rounds, "debate_rounds", MAX_DEBATE_ROUNDS)
+    if aggregation not in get_args(Aggregation):
+        raise ToolError(f"aggregation must be one of {', '.join(get_args(Aggregation))}")
     overrides = {
         "inference.screening.cnn_topk": {"top_k": top_k},
         "inference.aggregation.study": {"strategy": aggregation},
@@ -241,8 +382,7 @@ def _overrides(top_k, aggregation, forest_n_agents, debate_rounds, n_slices=None
         "inference.agents.debate": {"rounds": debate_rounds},
     }
     if n_slices is not None:
-        if not 1 <= n_slices <= MAX_VOLUME_SLICES:
-            raise ToolError(f"n_slices must be in 1..{MAX_VOLUME_SLICES}")
+        _check_int(n_slices, "n_slices", MAX_VOLUME_SLICES)
         overrides["inference.slice_extraction.neuro_axial"] = {"n_slices": n_slices}
     return overrides
 
@@ -256,8 +396,18 @@ def _report(ctx: Optional[Context], done: int, total: int, message: str) -> None
 
 
 def _run(config: dict, context: PipelineContext, ctx: Optional[Context], include_fhir: bool, cleanup: list) -> dict[str, Any]:
-    """Build the pipeline, run it under the GPU lock, shape the response."""
+    """Build the pipeline, run it under the GPU lock, shape the response.
+
+    Slice PNGs go to a per-request dir passed to inference.io.materialize, so they
+    are removed even when materialize or a later stage fails partway (materialize
+    only sets context.workdir after writing every slice).
+    """
     progress = {"done": 0}
+    slice_root = _request_dir()
+    cleanup = [*cleanup, str(slice_root)]
+    for spec in config["stages"]:
+        if "inference.io.materialize" in spec:
+            spec["inference.io.materialize"]["workdir"] = str(slice_root)
 
     try:
         pipe = Pipeline.from_config(config, resources=_Server.resources)
@@ -306,21 +456,52 @@ def _request_dir() -> Path:
     return path
 
 
-def _save_images(images: list[str], what: str) -> tuple[Path, list[str]]:
-    """Decode base64 images into a fresh request dir as PNGs; the dir is removed on failure."""
+def _open_image(raw: bytes, what: str):
+    """Open an encoded image, checking its header dimensions before decoding any pixels."""
     from PIL import Image
 
+    try:
+        image = Image.open(io.BytesIO(raw))
+    except Image.DecompressionBombError:
+        raise ToolError(f"{what} is too large: more than {MAX_IMAGE_PIXELS} pixels") from None
+    except Exception:
+        raise ToolError(f"{what} is not a readable PNG/JPEG image") from None
+    if image.format not in ("PNG", "JPEG"):
+        raise ToolError(f"{what} must be PNG or JPEG, got {image.format or 'unknown format'}")
+    width, height = image.size
+    if width < 1 or height < 1 or width * height > MAX_IMAGE_PIXELS:
+        raise ToolError(f"{what} is {width}x{height} pixels, limit is {MAX_IMAGE_PIXELS} pixels")
+    try:
+        image.load()
+    except Exception:
+        raise ToolError(f"{what} could not be decoded (truncated or corrupt image)") from None
+    return image
+
+
+def _check_images(images: list[str]) -> None:
+    """Count and total-size checks on the base64 payload, before anything is decoded."""
+    if not images:
+        raise ToolError("images is empty")
+    if len(images) > MAX_IMAGES:
+        raise ToolError(f"at most {MAX_IMAGES} images per request")
+    total = sum(len(d) // 4 * 3 for d in images if isinstance(d, str))
+    if total > MAX_REQUEST_IMAGE_BYTES:
+        raise ToolError(f"images total about {_mib(total)}, limit is {_mib(MAX_REQUEST_IMAGE_BYTES)} per request")
+
+
+def _save_images(images: list[str], what: str) -> tuple[Path, list[str]]:
+    """Decode base64 images into a fresh request dir as PNGs; the dir is removed on failure."""
+    _check_images(images)
     workdir = _request_dir()
     paths = []
     try:
         for i, data in enumerate(images):
-            raw = _decode_b64(data, f"{what}[{i}]" if len(images) > 1 else what)
-            try:
-                image = Image.open(io.BytesIO(raw))
-                image.load()
-            except Exception as exc:
-                raise ToolError(f"{what} is not a readable image: {exc}") from None
+            label = f"{what}[{i}]" if len(images) > 1 else what
+            raw = _decode_b64(data, label, MAX_IMAGE_BYTES)
+            image = _open_image(raw, label)
             path = workdir / f"input_{i:04d}.png"
+            if image.mode not in ("1", "L", "LA", "I", "I;16", "P", "RGB", "RGBA"):
+                image = image.convert("RGB")  # e.g. CMYK JPEG, which PNG cannot store
             image.save(path)
             paths.append(str(path))
     except BaseException:
@@ -377,8 +558,10 @@ def classify(
         context = PipelineContext(task=pipeline_task, metadata={"image_paths": paths})
         result = _run(config, context, ctx, include_fhir=False, cleanup=[str(workdir)])
     else:
-        array = _load_volume(_decode_b64(volume, "volume"))
         config = _pipeline_config("standard", volume=True, overrides=_overrides(3, "max_abnormal", 3, 1, n_slices=32))
+        raw = _decode_b64(volume, "volume", MAX_VOLUME_FILE_BYTES)
+        array = _load_volume(io.BytesIO(raw), len(raw))
+        del raw
         context = PipelineContext(task=pipeline_task, volume=array, modality=TASK_MODALITY[task], metadata={})
         result = _run(config, context, ctx, include_fhir=False, cleanup=[])
 
@@ -402,6 +585,15 @@ def list_capabilities() -> dict[str, Any]:
             "max_volume_voxels": MAX_VOLUME_VOXELS,
             "max_forest_agents": MAX_FOREST_AGENTS,
             "max_debate_rounds": MAX_DEBATE_ROUNDS,
+            "max_volume_array_bytes": MAX_VOLUME_ARRAY_BYTES,
+            "max_volume_file_bytes": MAX_VOLUME_FILE_BYTES,
+            "max_image_pixels": MAX_IMAGE_PIXELS,
+            "max_image_bytes": MAX_IMAGE_BYTES,
+            "max_request_image_bytes": MAX_REQUEST_IMAGE_BYTES,
+            "max_metadata_keys": MAX_METADATA_KEYS,
+            "max_metadata_key_length": MAX_METADATA_KEY_LENGTH,
+            "max_metadata_string_length": MAX_METADATA_STRING_LENGTH,
+            "reserved_metadata_keys": sorted(RESERVED_METADATA_KEYS),
             "volume_path_enabled": _Server.volume_dir is not None,
         },
         "models_loaded": bool(_Server.resources is not None and _Server.resources._agents is not None),
@@ -431,22 +623,23 @@ def classify_slices(
     pipeline: standard | forest | debate.
     top_k: slices (ranked by CNN abnormality) that get the full agent pipeline.
     aggregation: max_abnormal (any abnormal slice → abnormal study) or majority.
-    metadata: optional caller context (e.g. StudyInstanceUID) echoed into FHIR.
+    metadata: optional caller context (e.g. StudyInstanceUID): at most
+        MAX_METADATA_KEYS keys with string/number/boolean/null values. It is
+        stored in the pipeline context and each slice state; it is not currently
+        written into the FHIR bundles or echoed in the response.
 
     Returns the study-level prediction, per-slice agent outputs and, if
     include_fhir, one FHIR R4 bundle per analysed slice.
     """
-    if not images:
-        raise ToolError("images is empty")
-    if len(images) > MAX_IMAGES:
-        raise ToolError(f"at most {MAX_IMAGES} images per request")
-    # Validate everything before writing inputs to disk.
+    # Validate everything before decoding inputs or writing them to disk.
+    _check_images(images)
+    meta = _clean_metadata(metadata)
     config = _pipeline_config(
         pipeline, volume=False, overrides=_overrides(top_k, aggregation, forest_n_agents, debate_rounds)
     )
 
     workdir, paths = _save_images(images, "images")
-    context = PipelineContext(task=task, metadata={**(metadata or {}), "image_paths": paths})
+    context = PipelineContext(task=task, metadata={**meta, "image_paths": paths})
     return _run(config, context, ctx, include_fhir, cleanup=[str(workdir)])
 
 
@@ -477,10 +670,22 @@ def classify_volume(
     rescale_slope / rescale_intercept: DICOM rescale tags if the CT volume is
         stored as raw values rather than HU.
     n_slices: slices sampled from the tissue-containing range.
-    top_k, pipeline, aggregation: as in classify_slices.
+    top_k, pipeline, aggregation, metadata: as in classify_slices.
     """
     if (volume_b64 is None) == (volume_path is None):
         raise ToolError("give exactly one of volume_b64 or volume_path")
+
+    # Validate everything cheap before reading or decoding the volume.
+    config = _pipeline_config(
+        pipeline,
+        volume=True,
+        overrides=_overrides(top_k, aggregation, forest_n_agents, debate_rounds, n_slices=n_slices),
+    )
+    meta = _clean_metadata(metadata)
+    if rescale_slope is not None:
+        meta["rescale_slope"] = _finite_float(rescale_slope, "rescale_slope")
+    if rescale_intercept is not None:
+        meta["rescale_intercept"] = _finite_float(rescale_intercept, "rescale_intercept")
 
     if volume_path is not None:
         if _Server.volume_dir is None:
@@ -488,24 +693,23 @@ def classify_volume(
         path = Path(volume_path).resolve()
         if not path.is_relative_to(_Server.volume_dir):
             raise ToolError("volume_path must be inside the server's --volume_dir")
+        if path.suffix.lower() not in (".npy", ".npz"):
+            raise ToolError("volume_path must be a .npy or .npz file")
         if not path.is_file():
             raise ToolError(f"volume_path not found: {volume_path}")
-        raw = path.read_bytes()
+        size = path.stat().st_size
+        if size > MAX_VOLUME_FILE_BYTES:
+            raise ToolError(f"volume_path is {_mib(size)}, limit is {_mib(MAX_VOLUME_FILE_BYTES)}")
+        try:
+            with path.open("rb") as fp:
+                volume = _load_volume(fp, size)
+        except OSError:
+            raise ToolError(f"volume_path could not be read: {volume_path}") from None
     else:
-        raw = _decode_b64(volume_b64, "volume_b64")
-    volume = _load_volume(raw)
+        raw = _decode_b64(volume_b64, "volume_b64", MAX_VOLUME_FILE_BYTES)
+        volume = _load_volume(io.BytesIO(raw), len(raw))
+        del raw
 
-    meta = dict(metadata or {})
-    if rescale_slope is not None:
-        meta["rescale_slope"] = rescale_slope
-    if rescale_intercept is not None:
-        meta["rescale_intercept"] = rescale_intercept
-
-    config = _pipeline_config(
-        pipeline,
-        volume=True,
-        overrides=_overrides(top_k, aggregation, forest_n_agents, debate_rounds, n_slices=n_slices),
-    )
     context = PipelineContext(task=task, volume=volume, modality=modality, metadata=meta)
     return _run(config, context, ctx, include_fhir, cleanup=[])
 

@@ -22,9 +22,10 @@ def _triage(res):
     return make_triage_node(res.medgemma, res.cfg.routing)
 
 
-def _forest_triage(res, n_agents: int = 3):
+def _forest_triage(res, n_agents: int | None = None):
     from pipeline.nodes import make_forest_triage_node
 
+    n_agents = res.cfg.forest_n_agents if n_agents is None else n_agents
     return make_forest_triage_node(res.forest, n_agents=n_agents)
 
 
@@ -61,16 +62,26 @@ def _verification(res):
     return make_verification_node(res.medgemma)
 
 
-def _debate(res, rounds: int = 1):
+def _debate(res, rounds: int | None = None, advocates=None):
     from pipeline.nodes import make_debate_node
 
-    return make_debate_node(res.debate, rounds=rounds, routing_cfg=res.cfg.routing)
+    rounds = res.cfg.debate_rounds if rounds is None else rounds
+    advocates = res.cfg.debate_advocates if advocates is None else advocates
+    return make_debate_node(
+        res.debate, rounds=rounds, routing_cfg=res.cfg.routing, advocates=advocates
+    )
 
 
 def _report(res):
     from pipeline.nodes import make_report_node
 
     return make_report_node(res.medgemma, res.cfg.routing, skip_report=res.cfg.skip_report)
+
+
+def _triage_final(res):
+    from pipeline.nodes import make_triage_final_node
+
+    return make_triage_final_node(res.cfg.routing)
 
 
 def _fhir_output(res):
@@ -90,6 +101,7 @@ NODE_FACTORIES = {
     "verification": _verification,
     "debate": _debate,
     "report": _report,
+    "triage_final": _triage_final,
     "fhir_output": _fhir_output,
 }
 

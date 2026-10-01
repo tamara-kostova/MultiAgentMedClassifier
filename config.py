@@ -10,8 +10,18 @@ from typing import Optional
 
 import torch
 
-_DEFAULT_SAM3_PROBE = "checkpoints/sam3_probe.pth"
-_DEFAULT_SAM3_BPE_PATH = "sam3/sam3/assets/bpe_simple_vocab_16e6.txt.gz"
+# Default asset paths are anchored at the repo root so a run started from another
+# working directory still finds them (cwd-relative paths silently fell back to
+# ImageNet / zero-shot weights).
+REPO_ROOT = Path(__file__).resolve().parent
+
+
+def _repo_path(rel: str) -> str:
+    return str(REPO_ROOT / rel)
+
+
+_DEFAULT_SAM3_PROBE = _repo_path("checkpoints/sam3_probe.pth")
+_DEFAULT_SAM3_BPE_PATH = _repo_path("sam3/sam3/assets/bpe_simple_vocab_16e6.txt.gz")
 
 
 def cuda_is_usable() -> tuple[bool, str | None]:
@@ -229,10 +239,10 @@ class ModelConfig:
     # ── CNN checkpoints (None → ImageNet pretrained weights) ──────────────────
     cnn_checkpoints: dict = field(
         default_factory=lambda: {
-            "binary_tumor": "checkpoints/vgg16_MRI_tumor_binary_norm_final.pt",
-            "multiclass_tumor": "checkpoints/densenet169_MRI_tumor_multiclass_norm_final.pt",
-            "ms": "checkpoints/resnet101_MRI_ms_norm_final.pt",
-            "stroke": "checkpoints/densenet169_CT_stroke_binary_norm_final.pt",
+            "binary_tumor": _repo_path("checkpoints/vgg16_MRI_tumor_binary_norm_final.pt"),
+            "multiclass_tumor": _repo_path("checkpoints/densenet169_MRI_tumor_multiclass_norm_final.pt"),
+            "ms": _repo_path("checkpoints/resnet101_MRI_ms_norm_final.pt"),
+            "stroke": _repo_path("checkpoints/densenet169_CT_stroke_binary_norm_final.pt"),
         }
     )
 
@@ -240,10 +250,10 @@ class ModelConfig:
     # Probe heads from 18_layer_fusion_benchmark.py (layer-6 or concat fusion of layers 2,6,11)
     biomedclip_probe_checkpoints: dict = field(
         default_factory=lambda: {
-            "binary_tumor":     "checkpoints/linear_probe_BiomedCLIP_MRI_tumor_binary_norm_best.pt",
-            "multiclass_tumor": "checkpoints/linear_probe_BiomedCLIP_MRI_tumor_multiclass_norm_best.pt",
-            "ms":               "checkpoints/linear_probe_BiomedCLIP_MRI_ms_norm_best.pt",
-            "stroke":           "checkpoints/linear_probe_BiomedCLIP_CT_stroke_binary_norm_best.pt",
+            "binary_tumor":     _repo_path("checkpoints/linear_probe_BiomedCLIP_MRI_tumor_binary_norm_best.pt"),
+            "multiclass_tumor": _repo_path("checkpoints/linear_probe_BiomedCLIP_MRI_tumor_multiclass_norm_best.pt"),
+            "ms":               _repo_path("checkpoints/linear_probe_BiomedCLIP_MRI_ms_norm_best.pt"),
+            "stroke":           _repo_path("checkpoints/linear_probe_BiomedCLIP_CT_stroke_binary_norm_best.pt"),
         }
     )
 
@@ -322,6 +332,9 @@ class RoutingConfig:
     max_parse_retries: int = 3
     # IoU between GradCAM++ heatmap and SAM3 mask below this → confidence penalty
     low_iou_penalty_threshold: float = 0.3
+    # Lower bound on the IoU penalty factor (iou / threshold); without it an IoU of
+    # 0 drives the confidence to exactly 0.
+    low_iou_penalty_floor: float = 0.5
 
 
 @dataclass
@@ -341,9 +354,25 @@ class PipelineConfig:
     # Set True to generate Grad-CAM++ and Integrated Gradients after CNN classification.
     # Adds ~1-2s per image but produces saliency PNGs in outputs/explainability/.
     generate_explainability: bool = False
-    # Set True to skip MedGemma report generation during evaluation.
-    # Saves ~5–9 s/image with no effect on accuracy/F1/ECE metrics.
+    # Set True to skip MedGemma report generation (saves ~5–9 s/image). NOT
+    # accuracy-neutral: without the fused report the final class falls back to the
+    # CNN prediction (then BiomedCLIP, then triage).
     skip_report: bool = False
+
+    # ── Pipeline variant (recorded in every eval row's run_config) ───────────
+    pipeline_mode: str = "standard"  # standard | debate | forest
+    # Stop after triage / forest_triage; final class comes from the triage.
+    triage_only: bool = False
+    # System C. forest_roles=None → FOREST_ROLES order, cycled to forest_n_agents.
+    forest_n_agents: int = 3
+    forest_roles: Optional[tuple] = None
+    forest_temperature: float = 0.0  # 0.0 = greedy (published runs)
+    forest_top_p: float = 1.0
+    forest_seed: int = 0  # agent i samples with seed + i
+    forest_vote: str = "majority"  # majority | confidence
+    # System B
+    debate_rounds: int = 1
+    debate_advocates: tuple = ("cnn", "clip", "sam")
 
 
 # Module-level default (import and mutate as needed)

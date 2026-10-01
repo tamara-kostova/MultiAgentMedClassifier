@@ -14,6 +14,7 @@ In the LangGraph pipeline this replaces the verification + report tail:
 """
 
 import json
+import re
 from typing import Optional
 
 from agents.medgemma_agent import NO_THINK_PREFILL, MedGemmaAgent
@@ -52,13 +53,10 @@ CNN Predicted Class: {predicted_class}
 CNN Confidence: {confidence:.1%}
 Class Probabilities: {all_probs}
 
-The judge's previous verdict: "{prior_winner}" (confidence {prior_confidence:.1%})
+The judge's previous verdict: "{prior_winner}" (confidence {prior_confidence})
 Reason given: {prior_reason}
 
-Other advocates argued:
-- BiomedCLIP advocate: {clip_argument}
-- SAM3 advocate: {sam_argument}
-
+{others_section}
 Respond to the judge's verdict and the other advocates' arguments.
 If you agree with the verdict, say so briefly. If you disagree, argue your case with specific evidence.
 Output ONLY your response paragraph."""
@@ -80,13 +78,10 @@ Task: {task}
 BiomedCLIP Top Prediction: {top_label} (score: {top_score:.3f})
 Ranked Predictions: {ranked}
 
-The judge's previous verdict: "{prior_winner}" (confidence {prior_confidence:.1%})
+The judge's previous verdict: "{prior_winner}" (confidence {prior_confidence})
 Reason given: {prior_reason}
 
-Other advocates argued:
-- CNN advocate: {cnn_argument}
-- SAM3 advocate: {sam_argument}
-
+{others_section}
 Respond to the judge's verdict and the other advocates' arguments.
 If you agree, say so briefly. If you disagree, argue your case.
 Output ONLY your response paragraph."""
@@ -110,13 +105,10 @@ Lesion Detected: {lesion_detected}
 Bounding Box: {bbox}
 Mask Coverage: {mask_area}
 
-The judge's previous verdict: "{prior_winner}" (confidence {prior_confidence:.1%})
+The judge's previous verdict: "{prior_winner}" (confidence {prior_confidence})
 Reason given: {prior_reason}
 
-Other advocates argued:
-- CNN advocate: {cnn_argument}
-- BiomedCLIP advocate: {clip_argument}
-
+{others_section}
 Respond to the judge's verdict and the other advocates' arguments.
 Output ONLY your response paragraph."""
 
@@ -124,16 +116,9 @@ _JUDGE_TEMPLATE = """You are a senior neuroradiologist judging a multi-agent deb
 
 Task: {task}
 {prior_verdict_section}
-CNN Classifier Advocate:
-{cnn_argument}
+{advocate_sections}
 
-BiomedCLIP Visual-Language Advocate:
-{clip_argument}
-
-SAM3 Segmentation Advocate:
-{sam_argument}
-
-Weigh all three arguments carefully against what you observe in the scan.
+Weigh {weigh_phrase} carefully against what you observe in the scan.
 Identify which evidence is most compelling and internally consistent.
 
 Output ONLY the JSON object below. Do not include any reasoning, analysis,
@@ -147,19 +132,86 @@ or text before or after it — your entire response must be the JSON object.
 }}"""
 
 
-def _as_float(value, default: float) -> float:
-    """The judge occasionally returns confidence as a word or a percentage string;
-    a long run must not die on one bad token."""
+ADVOCATES = ("cnn", "clip", "sam")
+# Titles used in the judge prompt and in the round-N "other advocates" lists.
+_JUDGE_TITLES = {
+    "cnn": "CNN Classifier Advocate",
+    "clip": "BiomedCLIP Visual-Language Advocate",
+    "sam": "SAM3 Segmentation Advocate",
+}
+_PEER_TITLES = {"cnn": "CNN advocate", "clip": "BiomedCLIP advocate", "sam": "SAM3 advocate"}
+_WEIGH_PHRASES = {1: "the argument", 2: "both arguments", 3: "all three arguments"}
+
+
+def parse_advocates(value) -> tuple:
+    """Normalize an advocate list ("cnn,clip" or an iterable) to ADVOCATES order."""
+    if value is None:
+        return ADVOCATES
+    items = value.split(",") if isinstance(value, str) else list(value)
+    chosen = {str(a).strip().lower() for a in items if str(a).strip()}
+    unknown = chosen - set(ADVOCATES)
+    if unknown or not chosen:
+        raise ValueError(
+            f"debate advocates must be a non-empty subset of {list(ADVOCATES)}, got {items!r}"
+        )
+    return tuple(a for a in ADVOCATES if a in chosen)
+
+
+def parse_confidence(value) -> Optional[float]:
+    """Judge confidence → [0, 1], or None when it cannot be read.
+
+    Accepts floats, numeric strings and percentages ("85%", 85 → 0.85).
+    """
+    if isinstance(value, bool) or value is None:
+        return None
+    pct = False
+    if isinstance(value, str):
+        text = value.strip()
+        pct = text.endswith("%")
+        match = re.search(r"-?\d+(?:\.\d+)?", text)
+        if not match:
+            return None
+        value = match.group(0)
     try:
-        return float(value)
+        conf = float(value)
     except (TypeError, ValueError):
-        return default
+        return None
+    if conf != conf:  # NaN
+        return None
+    if pct or 1.0 < conf <= 100.0:
+        conf /= 100.0
+    return max(0.0, min(1.0, conf))
+
+
+def verdict_label(verdict: dict, task: Optional[str]) -> str:
+    """Canonical class of a judge verdict (winner_detailed preferred on multiclass)."""
+    from eval.labels import canonical_label
+
+    detailed = verdict.get("winner_detailed")
+    if task == "multiclass_tumor" and canonical_label(detailed, task):
+        return canonical_label(detailed, task)
+    return canonical_label(verdict.get("winner"), task)
+
+
+def _fmt_conf(conf: Optional[float]) -> str:
+    return "unknown" if conf is None else f"{conf:.1%}"
+
+
+def _others_section(own: str, others: dict, advocates: tuple) -> str:
+    peers = [a for a in advocates if a != own]
+    if not peers:
+        return ""
+    lines = "\n".join(
+        f"- {_PEER_TITLES[a]}: {others.get(a, '[not available]')}" for a in peers
+    )
+    return f"Other advocates argued:\n{lines}\n"
 
 
 # ── Prompt builders ───────────────────────────────────────────────────────────
 
 def _build_cnn_prompt(state: NeuroimagingState, round_num: int,
-                      prior: Optional[dict], others: Optional[dict]) -> str:
+                      prior: Optional[dict], others: Optional[dict],
+                      advocates: tuple = ADVOCATES) -> str:
     cnn = state.get("classification_result") or {}
     expl = state.get("explainability_result") or {}
     gradcam = expl.get("gradcam_pp")
@@ -181,15 +233,15 @@ def _build_cnn_prompt(state: NeuroimagingState, round_num: int,
         confidence=cnn.get("confidence", 0.0),
         all_probs=all_probs_str,
         prior_winner=prior.get("winner", "unknown"),
-        prior_confidence=prior.get("confidence", 0.0),
+        prior_confidence=_fmt_conf(prior.get("confidence")),
         prior_reason=prior.get("reason", ""),
-        clip_argument=others.get("clip", "[not available]"),
-        sam_argument=others.get("sam", "[not available]"),
+        others_section=_others_section("cnn", others, advocates),
     )
 
 
 def _build_clip_prompt(state: NeuroimagingState, round_num: int,
-                       prior: Optional[dict], others: Optional[dict]) -> str:
+                       prior: Optional[dict], others: Optional[dict],
+                       advocates: tuple = ADVOCATES) -> str:
     clip = state.get("biomedclip_result") or {}
     ranked = list(zip(clip.get("ranked_labels", []), clip.get("scores", [])))
     ranked_str = ", ".join(f"{lbl} ({sc:.3f})" for lbl, sc in ranked) or "not available"
@@ -208,15 +260,15 @@ def _build_clip_prompt(state: NeuroimagingState, round_num: int,
         top_score=clip.get("top_score", 0.0),
         ranked=ranked_str,
         prior_winner=prior.get("winner", "unknown"),
-        prior_confidence=prior.get("confidence", 0.0),
+        prior_confidence=_fmt_conf(prior.get("confidence")),
         prior_reason=prior.get("reason", ""),
-        cnn_argument=others.get("cnn", "[not available]"),
-        sam_argument=others.get("sam", "[not available]"),
+        others_section=_others_section("clip", others, advocates),
     )
 
 
 def _build_sam_prompt(state: NeuroimagingState, round_num: int,
-                      prior: Optional[dict], others: Optional[dict]) -> str:
+                      prior: Optional[dict], others: Optional[dict],
+                      advocates: tuple = ADVOCATES) -> str:
     seg = state.get("segmentation_result") or {}
     if seg.get("skipped"):
         lesion_detected = "No (SAM3 not applicable for this task)"
@@ -224,7 +276,13 @@ def _build_sam_prompt(state: NeuroimagingState, round_num: int,
         mask_area = "N/A"
     else:
         bbox = seg.get("bbox")
-        has_lesion = bbox and any(b is not None for b in bbox)
+        has_lesion = (
+            not seg.get("mask_empty")
+            and bool(bbox)
+            and all(b is not None for b in bbox)
+        )
+        if not has_lesion:
+            bbox = None
         lesion_detected = "Yes" if has_lesion else "No (no lesion segmented)"
         mask_area = "available" if has_lesion else "empty mask"
 
@@ -242,10 +300,9 @@ def _build_sam_prompt(state: NeuroimagingState, round_num: int,
         bbox=bbox or "N/A",
         mask_area=mask_area,
         prior_winner=prior.get("winner", "unknown"),
-        prior_confidence=prior.get("confidence", 0.0),
+        prior_confidence=_fmt_conf(prior.get("confidence")),
         prior_reason=prior.get("reason", ""),
-        cnn_argument=others.get("cnn", "[not available]"),
-        clip_argument=others.get("clip", "[not available]"),
+        others_section=_others_section("sam", others, advocates),
     )
 
 
@@ -327,29 +384,48 @@ class DebateOrchestrator:
 
         return None
 
-    def run(self, state: NeuroimagingState, rounds: int = 1) -> dict:
+    def run(
+        self,
+        state: NeuroimagingState,
+        rounds: int = 1,
+        advocates=ADVOCATES,
+    ) -> dict:
         """
-        Run the debate for `rounds` rounds (clamped to 1–3).
+        Run the debate for `rounds` rounds (1–3; anything else raises ValueError)
+        with the given advocate subset of ADVOCATES.
 
         Returns dict with:
-            winner, winner_detailed, confidence, reason,
-            rounds_completed, round_changed, judge_parse_failed,
-            judge_parse_failed_rounds, arguments
+            winner, winner_detailed, confidence (None if unreadable), reason,
+            rounds_completed, round_changed (computed from the verdict labels),
+            judge_claimed_round_changed, round_verdicts, advocates,
+            judge_parse_failed, judge_parse_failed_rounds, arguments
         """
-        rounds = max(1, min(rounds, self.MAX_ROUNDS))
+        if not isinstance(rounds, int) or not 1 <= rounds <= self.MAX_ROUNDS:
+            raise ValueError(f"debate rounds must be in 1..{self.MAX_ROUNDS}, got {rounds!r}")
+        advocates = parse_advocates(advocates)
+        # SAM3 is not run for ineligible tasks (ms, stroke). An advocate without
+        # evidence still argues (in practice "normal" on every image) and the judge
+        # follows it, so it does not take part when segmentation was skipped.
+        if "sam" in advocates and (state.get("segmentation_result") or {}).get("skipped"):
+            advocates = tuple(a for a in advocates if a != "sam")
+            if not advocates:
+                raise ValueError("debate needs at least one advocate besides SAM3 when SAM3 is skipped")
+        task = state.get("task")
         image_path = state["image_path"]
         prior_verdict: Optional[dict] = None
         parse_failures = 0
         all_arguments: list[dict] = []
+        round_verdicts: list[dict] = []
         current_args: dict[str, str] = {}
+        builders = {"cnn": _build_cnn_prompt, "clip": _build_clip_prompt, "sam": _build_sam_prompt}
 
         for round_num in range(1, rounds + 1):
             print(f"[debate] Round {round_num}/{rounds}", flush=True)
 
-            cnn_prompt = _build_cnn_prompt(state, round_num, prior_verdict, current_args)
-            clip_prompt = _build_clip_prompt(state, round_num, prior_verdict, current_args)
-            sam_prompt = _build_sam_prompt(state, round_num, prior_verdict, current_args)
-
+            prompts = {
+                a: builders[a](state, round_num, prior_verdict, current_args, advocates)
+                for a in advocates
+            }
             # Advocates are asked for a single paragraph, so they too are better
             # off skipping the hidden thought block — otherwise a truncated
             # thought is what the judge ends up reading.
@@ -357,64 +433,75 @@ class DebateOrchestrator:
                 "max_new_tokens": ADVOCATE_MAX_NEW_TOKENS,
                 "prefill": self._prefill(),
             }
-            cnn_arg = self.medgemma.generate_for_prompt(image_path, cnn_prompt, **advocate_kwargs)
-            clip_arg = self.medgemma.generate_for_prompt(image_path, clip_prompt, **advocate_kwargs)
-            sam_arg = self.medgemma.generate_for_prompt(image_path, sam_prompt, **advocate_kwargs)
-
-            current_args = {"cnn": cnn_arg, "clip": clip_arg, "sam": sam_arg}
-            all_arguments.extend([
-                {"round": round_num, "role": "cnn",  "argument": cnn_arg},
-                {"round": round_num, "role": "clip", "argument": clip_arg},
-                {"round": round_num, "role": "sam",  "argument": sam_arg},
-            ])
+            current_args = {
+                a: self.medgemma.generate_for_prompt(image_path, prompts[a], **advocate_kwargs)
+                for a in advocates
+            }
+            all_arguments.extend(
+                {"round": round_num, "role": a, "argument": current_args[a]} for a in advocates
+            )
 
             prior_section = ""
             if prior_verdict:
                 prior_section = (
                     f"Previous round verdict: {prior_verdict['winner']} "
-                    f"(confidence {prior_verdict.get('confidence', 0):.1%}). "
+                    f"(confidence {_fmt_conf(prior_verdict.get('confidence'))}). "
                     "Re-evaluate whether the new arguments change your verdict.\n\n"
                 )
 
             judge_prompt = _JUDGE_TEMPLATE.format(
                 task=state["task"],
                 prior_verdict_section=prior_section,
-                cnn_argument=cnn_arg,
-                clip_argument=clip_arg,
-                sam_argument=sam_arg,
+                advocate_sections="\n\n".join(
+                    f"{_JUDGE_TITLES[a]}:\n{current_args[a]}" for a in advocates
+                ),
+                weigh_phrase=_WEIGH_PHRASES[len(advocates)],
             )
             verdict = self._judge(image_path, judge_prompt, round_num)
-            if verdict is None:
-                parse_failures += 1
+            round_failed = verdict is None
+            if round_failed:
                 verdict = {
-                    "winner": state.get("suspected_pathology", "unknown"),
+                    "winner": state.get("suspected_pathology") or "unknown",
                     "winner_detailed": None,
-                    "confidence": 0.5,
+                    "confidence": None,
                     "reason": "Judge parse failed — defaulting to suspected pathology.",
-                    "round_changed": False,
-                    "judge_parse_failed": True,
                 }
-
-            verdict["confidence"] = _as_float(verdict.get("confidence"), 0.5)
+            raw_conf = verdict.get("confidence")
+            verdict["confidence"] = parse_confidence(raw_conf)
+            if verdict["confidence"] is None:
+                round_failed = True
+                if raw_conf is not None:
+                    verdict["confidence_raw"] = raw_conf
+            if round_failed:
+                parse_failures += 1
             verdict.setdefault("winner_detailed", None)
-            verdict.setdefault("round_changed", prior_verdict is not None and
-                               verdict.get("winner") != (prior_verdict or {}).get("winner"))
+            verdict["judge_claimed_round_changed"] = verdict.pop("round_changed", None)
+            label = verdict_label(verdict, task)
+            verdict["round_changed"] = bool(
+                round_verdicts and label != round_verdicts[-1]["label_canonical"]
+            )
+            verdict["judge_parse_failed"] = round_failed
+            round_verdicts.append({"round": round_num, **verdict, "label_canonical": label})
             prior_verdict = verdict
             print(
                 f"[debate] Round {round_num} verdict: {verdict.get('winner')} "
-                f"conf={verdict.get('confidence', 0):.2f} "
-                f"changed={verdict.get('round_changed')}"
+                f"conf={_fmt_conf(verdict.get('confidence'))} "
+                f"changed={verdict['round_changed']}"
             )
 
         return {
             "winner": prior_verdict.get("winner", "unknown"),
             "winner_detailed": prior_verdict.get("winner_detailed"),
-            "confidence": _as_float(prior_verdict.get("confidence"), 0.5),
+            "confidence": prior_verdict.get("confidence"),
             "reason": prior_verdict.get("reason", ""),
-            "round_changed": prior_verdict.get("round_changed", False),
+            # True when any round's verdict label differs from the previous round's.
+            "round_changed": any(v["round_changed"] for v in round_verdicts),
+            "judge_claimed_round_changed": prior_verdict.get("judge_claimed_round_changed"),
+            "round_verdicts": round_verdicts,
+            "advocates": list(advocates),
             "rounds_completed": rounds,
             # Surfaced all the way to the eval JSONL: a run where this is True on
-            # any image did not actually debate, it fell back to the triage guess.
+            # any image did not fully debate (fallback verdict or unreadable confidence).
             "judge_parse_failed": parse_failures > 0,
             "judge_parse_failed_rounds": parse_failures,
             "arguments": all_arguments,

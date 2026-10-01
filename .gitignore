@@ -254,3 +254,5 @@ logs/
 *.md
 *.png
 *.json
+# UI example scans are small and must ship with the repo (ui/demo.py loads ui/examples/<task>/*).
+!ui/examples/**

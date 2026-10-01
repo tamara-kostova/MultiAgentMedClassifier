@@ -36,7 +36,19 @@ sys.path.insert(0, str(PROJECT_ROOT))
 import pandas as pd
 from sklearn.metrics import accuracy_score, f1_score
 
-from eval.tumor_eval import canonical_label
+from eval.forest_votes import forest_vote
+from eval.jsonl_io import ERROR_FLAG, load_records
+from eval.labels import canonical_label
+from eval.metrics import parse_bool
+
+
+def _scored_label(value, task) -> str:
+    """Paper scoring: canonical_label + eval_analysis.prep (strict binarization);
+    "unknown" for an abstention. Imported lazily (eval_analysis pulls matplotlib)."""
+    from eval.eval_analysis import prep
+
+    lbl = canonical_label(value, task)
+    return prep(lbl, task) if lbl else "unknown"
 
 # Flat, human-readable column order for the per-image table. Any other key present
 # in the JSONL is appended after these.
@@ -100,16 +112,10 @@ BULKY_COLUMNS = [
 
 
 def load_jsonl(path: Path) -> list[dict]:
-    rows = []
-    with path.open(encoding="utf-8") as f:
-        for line_no, line in enumerate(f, start=1):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rows.append(json.loads(line))
-            except json.JSONDecodeError:
-                print(f"  [warn] {path.name}:{line_no} is not valid JSON — skipped")
+    """eval.jsonl_io: last non-error row per image_path; error-only images kept (flagged)."""
+    rows, stats = load_records(path, verbose=False)
+    if stats.n_unparsable or stats.n_duplicate_rows or stats.n_error_only:
+        print(f"  [info] {stats.summary()}")
     return rows
 
 
@@ -136,9 +142,14 @@ def build_per_image(rows: list[dict]) -> pd.DataFrame:
     if pred_canon is None:
         pred_canon = df.get("predicted_class").map(lambda v: canonical_label(v, task))
 
-    df["correct"] = (true_canon == pred_canon).astype(int)
+    # Same scoring as the paper path (strict binarization, abstain/error = wrong).
+    t_s = true_canon.map(lambda v: _scored_label(v, task))
+    p_s = pred_canon.map(lambda v: _scored_label(v, task))
+    err = df[ERROR_FLAG].fillna(False).astype(bool) if ERROR_FLAG in df.columns else False
+    df["correct"] = ((t_s == p_s) & (p_s != "unknown") & ~err).astype(int)
     if "cnn_predicted_class_canonical" in df.columns:
-        df["cnn_correct"] = (true_canon == df["cnn_predicted_class_canonical"]).astype(int)
+        c_s = df["cnn_predicted_class_canonical"].map(lambda v: _scored_label(v, task))
+        df["cnn_correct"] = ((t_s == c_s) & (c_s != "unknown") & ~err).astype(int)
 
     ordered = [c for c in PREFERRED_COLUMNS if c in df.columns]
     ordered += [c for c in df.columns if c not in ordered and c not in BULKY_COLUMNS]
@@ -173,30 +184,32 @@ def build_summary(rows: list[dict], name: str) -> dict:
     if not ok_rows:
         return summary
 
-    y_true = [
-        r.get("true_label_canonical")
-        or canonical_label(r.get("true_label_name") or r.get("true_label"), r.get("task"))
-        for r in ok_rows
-    ]
-    y_pred = [
-        r.get("predicted_class_canonical")
-        or canonical_label(r.get("predicted_class"), r.get("task"))
-        for r in ok_rows
-    ]
-    y_cnn = [
-        r.get("cnn_predicted_class_canonical")
-        or canonical_label(r.get("cnn_predicted_class"), r.get("task"))
-        for r in ok_rows
-    ]
+    # Accuracy over every image with known truth: abstentions and error-only
+    # images count as wrong (the paper convention). F1 over the same rows.
+    def _t(r):
+        return _scored_label(r.get("true_label_canonical")
+                             or r.get("true_label_name") or r.get("true_label"), r.get("task"))
+
+    def _p(r, key):
+        if r.get(ERROR_FLAG):
+            return "error"
+        return _scored_label(r.get(f"{key}_canonical") or r.get(key), r.get("task"))
+
+    scored = [r for r in rows if _t(r) != "unknown"]
+    y_true = [_t(r) for r in scored]
+    y_pred = [_p(r, "predicted_class") for r in scored]
+    y_cnn = [_p(r, "cnn_predicted_class") for r in scored]
+    labels = sorted(set(y_true) | (set(y_pred) - {"unknown", "error"}))
 
     latencies = sorted(float(r.get("latency_s") or 0.0) for r in ok_rows)
-    n_abstained = sum(1 for p in y_pred if not p)
+    n_abstained = sum(1 for p in y_pred if p == "unknown")
 
     summary.update(
         {
+            "n_scored": len(scored),
             "accuracy_final": round(accuracy_score(y_true, y_pred), 4),
             "f1_macro_final": round(
-                f1_score(y_true, y_pred, average="macro", zero_division=0), 4
+                f1_score(y_true, y_pred, labels=labels, average="macro", zero_division=0), 4
             ),
             "accuracy_cnn_only": round(accuracy_score(y_true, y_cnn), 4),
             "n_abstained": n_abstained,
@@ -215,17 +228,21 @@ def build_summary(rows: list[dict], name: str) -> dict:
     dissent = [r["dissent_rate"] for r in ok_rows if r.get("dissent_rate") is not None]
     if dissent:
         summary["mean_dissent_rate"] = round(sum(dissent) / len(dissent), 4)
-        votes = [r["vote_fraction"] for r in ok_rows if r.get("vote_fraction") is not None]
+        # Recomputed from the canonical ballots (stored vote_fraction can be stale).
+        votes = [forest_vote(r.get("forest_votes"), task)["vote_fraction"] for r in ok_rows
+                 if isinstance(r.get("forest_votes"), list) and r["forest_votes"]]
+        votes = [v for v in votes if v is not None]
         if votes:
             summary["mean_vote_fraction"] = round(sum(votes) / len(votes), 4)
 
     changed = [
-        r["debate_round_changed"]
+        parse_bool(r["debate_round_changed"])
         for r in ok_rows
-        if r.get("debate_round_changed") is not None
+        if parse_bool(r.get("debate_round_changed")) is not None
     ]
     if changed:
-        summary["debate_verdict_change_rate"] = round(sum(bool(c) for c in changed) / len(changed), 4)
+        # Judge-reported (legacy) flag; eval_analysis prefers per-round verdicts.
+        summary["debate_verdict_change_rate"] = round(sum(changed) / len(changed), 4)
         rounds = [
             r["debate_rounds_completed"]
             for r in ok_rows
@@ -235,7 +252,7 @@ def build_summary(rows: list[dict], name: str) -> dict:
             summary["mean_debate_rounds"] = round(sum(rounds) / len(rounds), 2)
 
         parse_failed = [
-            bool(r.get("debate_judge_parse_failed"))
+            parse_bool(r.get("debate_judge_parse_failed")) is True
             for r in ok_rows
             if r.get("debate_judge_parse_failed") is not None
         ]

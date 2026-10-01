@@ -52,6 +52,7 @@ class ResearchState(TypedDict):
     base_cfg: Any                   # PipelineConfig
     preloaded_agents: Any           # tuple from load_agents()
     max_samples: Optional[int]      # cap per task (class-balanced); None = all
+    sample_seed: Optional[int]      # seed for the class-balanced subset shuffle (default 0)
     point_ids: Optional[list]       # run only these experiment_ids; None = whole family
     results_dir: str
     sweep_summary: Optional[Any]    # pd.DataFrame
@@ -59,18 +60,27 @@ class ResearchState(TypedDict):
     report_md: str
 
 
-def _cap_samples_balanced(samples: list, max_samples: Optional[int]) -> list:
+def _cap_samples_balanced(samples: list, max_samples: Optional[int], seed: int = 0) -> list:
     """
     Cap a sample list to at most max_samples, round-robin across class labels so
     the subset keeps class balance (load_test_split returns samples grouped by
     class, so a naive samples[:N] would only cover the first class).
+
+    Each class list is shuffled with a fixed seed first, so the subset is a
+    reproducible random draw rather than the alphabetically-first files of each
+    class (which can be one patient / one acquisition series).
     """
     if max_samples is None or len(samples) <= max_samples:
         return samples
+    import random
+
+    rng = random.Random(seed)
     by_label: dict[str, list] = {}
-    for s in samples:
+    for s in sorted(samples, key=lambda x: (x["label"], x["image_path"])):
         by_label.setdefault(s["label"], []).append(s)
-    label_lists = list(by_label.values())
+    label_lists = [by_label[k] for k in sorted(by_label)]
+    for lst in label_lists:
+        rng.shuffle(lst)
     capped: list = []
     idx = 0
     while len(capped) < max_samples:
@@ -137,7 +147,8 @@ def run_experiments(state: ResearchState) -> dict:
     max_samples = state.get("max_samples")
     test_datasets = {}
     for task, d in state["dataset_dirs"].items():
-        samples = _cap_samples_balanced(load_test_split(d, task), max_samples)
+        samples = _cap_samples_balanced(load_test_split(d, task), max_samples,
+                                        seed=state.get("sample_seed") or 0)
         test_datasets[task] = samples
         print(f"[run_experiments] task={task}: {len(samples)} samples")
     sweep_summary = run_experiment_family(

@@ -38,7 +38,13 @@ import shutil
 from collections import Counter
 from pathlib import Path
 
-from eval.tumor_eval import canonical_label
+import sys as _sys
+from pathlib import Path as _Path
+
+if __package__ in (None, ""):  # run as `python eval/<script>.py`: make `eval` importable
+    _sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))
+
+from eval.labels import canonical_label
 
 _NULLISH = ("none", "null", "nan", "")
 

@@ -33,12 +33,25 @@ docker run -d --name neuro-mcp --gpus all --restart unless-stopped \
   --memory 12g \
   -p 8765:8765 \
   -v neuro-models:/models \
+  -v neuro-outputs:/app/outputs \
   -e NEURO_MCP_TOKEN=<long random secret> \
   -e HF_TOKEN=<your hugging face token> \
   -e MEDGEMMA_4BIT=1 \
   tamarakostova/neuro-mcp:0.1.0
 
 docker logs -f neuro-mcp      # ready when it prints "Uvicorn running on http://0.0.0.0:8765"
+docker ps                     # STATUS shows (healthy) once the port is open
+```
+
+The server runs as the unprivileged user `app` (uid 1000). New named volumes inherit the
+right ownership automatically. A host bind mount (`-v /srv/models:/models`) must be writable
+by uid 1000: `sudo chown -R 1000:1000 /srv/models`.
+
+**Upgrading from 0.1.0:** that image ran as root, so an existing `neuro-models` volume is
+root-owned and the new image cannot write to it. Fix it once:
+
+```bash
+docker run --rm --user root -v neuro-models:/models --entrypoint chown tamarakostova/neuro-mcp:<new tag> -R 1000:1000 /models
 ```
 
 Endpoint: `http://<host>:8765/mcp` (MCP Streamable HTTP). Every request needs the header
@@ -84,8 +97,10 @@ this (the CNN then falls back to ImageNet weights and results are meaningless).
 - One container per GPU. Requests are processed one at a time behind a GPU lock and queue
   otherwise. Set client timeouts generously (30 min), since a volume takes a few minutes.
 - Run one worker only: each extra process would load MedGemma again.
-- Inputs are deleted after each request. FHIR and explainability files stay in `/app/outputs`
-  inside the container.
+- Inputs are deleted after each request. SAM3 overlays, saliency maps and FHIR JSON stay in
+  `/app/outputs`. These are derived from patient images. Keep them in the `neuro-outputs`
+  volume and prune it to your retention policy, or mount `--tmpfs /app/outputs` to drop them
+  when the container stops.
 - Extra `mcp_server.py` flags go after the image name, e.g. `tamarakostova/neuro-mcp:0.1.0 --lazy_load`.
 - Research prototype, not a medical device. Outputs are not for clinical use.
 
@@ -95,7 +110,7 @@ MCP tool name: **`classify`**. Arguments:
 
 | Field | Type | Required | Values |
 |---|---|---|---|
-| `task` | string | yes | `tumor` \| `ms` \| `stroke`. `tumor` and `ms` expect **MRI**, `stroke` expects **CT**. `tumor` returns the subtype (glioma / meningioma / pituitary). |
+| `task` | string | yes | `tumor` \| `ms` \| `stroke`. `tumor` and `ms` expect **MRI**, `stroke` expects **CT**. `tumor` returns the subtype (`glioma` / `meningioma` / `pituitary_tumor`). |
 | `image` | string | one of `image` / `volume` | One 2D slice as base64 PNG or JPEG, either raw base64 or a `data:image/png;base64,...` URL. Windowed as a viewer shows it (not raw DICOM values). |
 | `volume` | string | one of `image` / `volume` | A 3D array `(slices, H, W)`, **axial-first**, as base64 of a `.npy` or `.npz` file (key `volume`, or its first array). CT in **HU**. MR can be raw intensities. |
 
@@ -169,8 +184,22 @@ normalised; anything outside the lists above becomes null, so **check for null**
 mask disagree. Treat low confidence (< 0.45) as "needs human review".
 
 Errors (bad base64, unreadable image, a volume that is not 3D, both or neither of
-`image`/`volume`, an unknown task) come back as an MCP tool error (`isError: true`) with a
-readable message. A missing or wrong bearer token gets HTTP 401.
+`image`/`volume`, an unknown task, an input over a limit) come back as an MCP tool error
+(`isError: true`) with a readable message. A missing or wrong bearer token gets HTTP 401.
+Inputs are checked against these limits before any pixel or voxel data is decoded
+(`list_capabilities` reports the live values under `limits`):
+
+| Input | Limit |
+|---|---|
+| Image | PNG or JPEG; ≤ 32 MiB encoded; ≤ 4096 × 4096 = 16,777,216 pixels |
+| Images per request (`classify_slices`) | ≤ 64, ≤ 256 MiB encoded in total |
+| Volume file (`.npy`/`.npz`, base64 or `volume_path`) | ≤ 1 GiB |
+| Volume array | 3D integer or float (no object, structured, complex or pickled arrays), ≤ 268,435,456 voxels and ≤ 1 GiB decoded; float volumes must be finite; `.npz` uses key `volume` or the first array, and an empty archive is an error |
+| `volume_path` | only with `--volume_dir`; resolved path inside it, `.npy`/`.npz` suffix |
+| `top_k` / `n_slices` / `forest_n_agents` / `debate_rounds` | 1–32 / 1–128 / 1–4 / 1–3 |
+| `metadata` | ≤ 32 keys of ≤ 64 characters; values string (≤ 256 characters), number, boolean or null; `image_paths`, `source_paths`, `slice_index` are reserved; `rescale_slope`/`rescale_intercept` must be finite numbers |
+
+The HTTP request body itself is capped by `--max_body_mb` (default 256).
 
 ## Calling it
 

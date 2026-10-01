@@ -38,6 +38,7 @@ from pipeline.nodes import (
     make_report_node,
     make_sam3_node,
     make_skip_explainability_node,
+    make_triage_final_node,
     make_triage_node,
     make_verification_node,
 )
@@ -59,6 +60,31 @@ def load_agents(cfg: PipelineConfig) -> tuple:
     return medgemma, cnn, sam3, clip
 
 
+def _triage_only_graph(entry: str, entry_fn, cfg: PipelineConfig):
+    """--triage_only: triage → triage_final → END (no specialists, no FHIR)."""
+    workflow = StateGraph(NeuroimagingState)
+    workflow.add_node(entry, entry_fn)
+    workflow.add_node("triage_final", make_triage_final_node(cfg.routing))
+    workflow.set_entry_point(entry)
+    workflow.add_edge(entry, "triage_final")
+    workflow.add_edge("triage_final", END)
+    return workflow.compile()
+
+
+def make_forest(medgemma: MedGemmaAgent, cfg: PipelineConfig):
+    """AgentForest configured from cfg's forest_* fields."""
+    from agents.forest import AgentForest
+
+    return AgentForest(
+        medgemma,
+        roles=cfg.forest_roles,
+        temperature=cfg.forest_temperature,
+        top_p=cfg.forest_top_p,
+        seed=cfg.forest_seed,
+        vote_mode=cfg.forest_vote,
+    )
+
+
 def assemble_pipeline(
     medgemma: MedGemmaAgent,
     cnn: CNNClassifier,
@@ -74,6 +100,8 @@ def assemble_pipeline(
     """
     # ── Create node functions via factories ───────────────────────────────────
     triage_fn = make_triage_node(medgemma, cfg.routing)
+    if cfg.triage_only:
+        return _triage_only_graph("triage", triage_fn, cfg)
     cnn_fn = make_cnn_node(cnn)
     sam3_fn = make_sam3_node(sam3, cfg.routing)
     biomedclip_fn = make_biomedclip_node(clip, cfg.routing)
@@ -118,23 +146,35 @@ def assemble_debate_pipeline(
     sam3: SAM3Tool,
     clip: BiomedCLIPTool,
     cfg: PipelineConfig,
-    rounds: int = 1,
+    rounds: int | None = None,
+    advocates=None,
 ):
     """
     System B — Multi-Agent Debate pipeline.
     Replaces verification + report with a structured advocate-judge debate node.
     Advocates (CNN, BiomedCLIP, SAM3) are represented by MedGemma instances that
     argue on behalf of each tool's output. MedGemma judges the final verdict.
+
+    rounds / advocates default to cfg.debate_rounds / cfg.debate_advocates.
     """
     from agents.debate import DebateOrchestrator
 
+    if cfg.triage_only:
+        raise ValueError(
+            "--triage_only with the debate pipeline is the standard triage; "
+            "use --pipeline_mode standard --triage_only"
+        )
+    rounds = cfg.debate_rounds if rounds is None else rounds
+    advocates = cfg.debate_advocates if advocates is None else advocates
     orchestrator = DebateOrchestrator(medgemma)
 
     triage_fn      = make_triage_node(medgemma, cfg.routing)
     cnn_fn         = make_cnn_node(cnn)
     sam3_fn        = make_sam3_node(sam3, cfg.routing)
     biomedclip_fn  = make_biomedclip_node(clip, cfg.routing)
-    debate_fn      = make_debate_node(orchestrator, rounds=rounds, routing_cfg=cfg.routing)
+    debate_fn      = make_debate_node(
+        orchestrator, rounds=rounds, routing_cfg=cfg.routing, advocates=advocates
+    )
     fhir_fn        = make_fhir_node(cfg.output_dir)
 
     explainability_fn = (
@@ -170,18 +210,22 @@ def assemble_forest_pipeline(
     sam3: SAM3Tool,
     clip: BiomedCLIPTool,
     cfg: PipelineConfig,
-    n_agents: int = 3,
+    n_agents: int | None = None,
 ):
     """
     System C — Agent Forest pipeline.
     Replaces the single triage node with N role-specialized MedGemma agents and
     a majority vote consensus. All downstream nodes run unchanged on the consensus.
-    """
-    from agents.forest import AgentForest
 
-    forest = AgentForest(medgemma)
+    n_agents defaults to cfg.forest_n_agents; roles / sampling / vote rule come
+    from cfg's forest_* fields.
+    """
+    n_agents = cfg.forest_n_agents if n_agents is None else n_agents
+    forest = make_forest(medgemma, cfg)
 
     forest_triage_fn = make_forest_triage_node(forest, n_agents=n_agents)
+    if cfg.triage_only:
+        return _triage_only_graph("forest_triage", forest_triage_fn, cfg)
     cnn_fn           = make_cnn_node(cnn)
     sam3_fn          = make_sam3_node(sam3, cfg.routing)
     biomedclip_fn    = make_biomedclip_node(clip, cfg.routing)
@@ -218,7 +262,7 @@ def assemble_forest_pipeline(
     return workflow.compile()
 
 
-def build_debate_pipeline(cfg: PipelineConfig = None, rounds: int = 1):
+def build_debate_pipeline(cfg: PipelineConfig = None, rounds: int | None = None):
     """Convenience wrapper: load agents and assemble the debate pipeline."""
     cfg = cfg or DEFAULT_CONFIG
     print("=== Building Multi-Agent Debate pipeline ===")
@@ -228,9 +272,10 @@ def build_debate_pipeline(cfg: PipelineConfig = None, rounds: int = 1):
     return app
 
 
-def build_forest_pipeline(cfg: PipelineConfig = None, n_agents: int = 3):
+def build_forest_pipeline(cfg: PipelineConfig = None, n_agents: int | None = None):
     """Convenience wrapper: load agents and assemble the Agent Forest pipeline."""
     cfg = cfg or DEFAULT_CONFIG
+    n_agents = cfg.forest_n_agents if n_agents is None else n_agents
     print(f"=== Building Agent Forest pipeline (n_agents={n_agents}) ===")
     agents = load_agents(cfg)
     app = assemble_forest_pipeline(*agents, cfg, n_agents=n_agents)

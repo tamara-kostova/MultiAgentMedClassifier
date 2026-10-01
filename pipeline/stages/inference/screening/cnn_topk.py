@@ -5,7 +5,7 @@ from pipeline.stages.base import Stage
 
 def abnormal_score(all_probs: dict, task: str) -> float:
     """1 − p(normal class). Normal class resolved with eval's canonical_label rule."""
-    from eval.tumor_eval import canonical_label
+    from eval.labels import canonical_label
 
     p_normal = sum(p for cls, p in all_probs.items() if canonical_label(cls, task) == "normal")
     return float(1.0 - p_normal)

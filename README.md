@@ -13,6 +13,7 @@ A LangGraph-based multi-agent pipeline for automated classification of neuroimag
 - [Report Output](#report-output)
 - [Explainability Methods](#explainability-methods)
 - [Calibration](#calibration)
+- [Stage pipeline and MCP server](#stage-pipeline-and-mcp-server)
 - [Prior Work](#prior-work)
 - [Project Structure](#project-structure)
 
@@ -21,19 +22,22 @@ A LangGraph-based multi-agent pipeline for automated classification of neuroimag
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements.txt     # see Setup for torch and SAM3
 
 # Set your HuggingFace token (see Setup below)
 cp .env.example .env
 # edit .env and paste your HF_TOKEN
 
-# Launch the web interface
+# Launch the web interface (add --load_4bit on GPUs < 12 GB)
 python app.py
 # Open http://localhost:7860 in a browser
 ```
 
-Upload a brain scan, choose a task, click **Run Pipeline** — the full agent pipeline runs and
-displays the prediction, clinical report, segmentation overlay, and saliency maps.
+Upload a brain scan (or click one of the example scans in `ui/examples/`), choose a task and a
+pipeline mode (Standard, Debate or Forest), and click **Run Pipeline**. Results fill in stage by
+stage: prediction, each agent's output, the clinical report, the SAM3 overlay, saliency maps and
+the FHIR bundle. `app.py` accepts every `run_pipeline.py` config flag, and the UI always enables
+explainability.
 
 ![App interface](app_preview.png)
 
@@ -48,7 +52,7 @@ displays the prediction, clinical report, segmentation overlay, and saliency map
 | `MedGemmaAgent` | google/medgemma-1.5-4b-it | Triage, bbox-guided diagnosis, verification, final report |
 | `CNNClassifier` | VGG16 / DenseNet169 / ResNet101 | Task-specific classification |
 | `SAM3Tool` | SAM3 frozen backbone + linear probe | Lesion segmentation (Dice = 0.836) |
-| `BiomedCLIPTool` | microsoft/BiomedCLIP (ViT-B/16, layer 6) | Linear probe classifier; falls back to zero-shot when no probe checkpoint is available |
+| `BiomedCLIPTool` | microsoft/BiomedCLIP (ViT-B/16) | Linear probe on layer-6 features; falls back to zero-shot (final image embedding) when no probe checkpoint is available |
 
 **Pipeline flow** (linear — every node runs for every image):
 
@@ -63,23 +67,45 @@ triage (MedGemma)
     → fhir_output
 ```
 
+The explainability node (and with it the verification step and the Grad-CAM++/SAM3 IoU penalty)
+only does work with `--generate_explainability`; without it the node is a no-op and verification
+returns `None`.
+
 SAM3 runs only for `binary_tumor` and `multiclass_tumor` — the linear probe was trained on BraTS 2020 and evaluated on BraTS 2021; MS/stroke probes performed poorly, so those tasks skip segmentation automatically. BiomedCLIP runs on all tasks but is most meaningful for multiclass subtype disambiguation.
 
 ## Tasks
 
-| Task | Best CNN | Accuracy |
-|---|---|---|
-| `binary_tumor` | VGG16 | 100.0% |
-| `multiclass_tumor` | DenseNet169 | 99.0% |
-| `stroke` | DenseNet169 | 97.7% |
-| `ms` | ResNet101 | 59.7% |
+| Task | Label space | Best CNN | CNN benchmark accuracy |
+|---|---|---|---|
+| `binary_tumor` | tumor / normal (MRI) | VGG16 | 100.0% |
+| `multiclass_tumor` | 12 tumour types + normal head (MRI) | DenseNet169 | 99.0% |
+| `stroke` | stroke / normal (CT) | DenseNet169 | 97.7% |
+| `ms` | MS / normal (MRI) | ResNet101 | 59.7% |
+
+Accuracies are from the prior CNN benchmark, each on its own test split. They do not carry over
+to the evaluation datasets used here: on 3-class figshare the multiclass CNN scores 0.140
+(0.271–0.314 with the softmax masked to the three figshare classes).
 
 ## Setup
+
+Python 3.12 and a CUDA GPU. Install torch with the CUDA build that matches your driver first,
+then the rest:
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
 pip install -r requirements.txt
+```
+
+`requirements.txt` gives version ranges. For an exact reproduction of the paper's runs use the
+pinned `server_bundle/requirements-server.txt`.
+
+**SAM3** is not on PyPI. Clone it into `./sam3` (the code adds it to `sys.path`), or install it
+with `pip install --no-deps -e ./sam3`. Without it the pipeline runs and segmentation is skipped.
+
+```bash
+git clone https://github.com/facebookresearch/sam3
 ```
 
 **MedGemma** is a gated model — accept the terms of use at [hf.co/google/medgemma-1.5-4b-it](https://huggingface.co/google/medgemma-1.5-4b-it) then authenticate:
@@ -96,12 +122,8 @@ huggingface-cli login
 export HF_TOKEN=hf_...
 ```
 
-**Hardware**: 16 GB VRAM recommended (RTX 5060 Ti or better). For <12 GB, enable 4-bit quantisation:
-
-```python
-# config.py
-ModelConfig(use_4bit_quantization=True)
-```
+**Hardware**: 16 GB VRAM recommended (RTX 5060 Ti or better). For <12 GB, enable 4-bit NF4
+quantisation with `--load_4bit` (any entry point) or `MEDGEMMA_4BIT=1`.
 
 ## Checkpoints
 
@@ -121,29 +143,10 @@ python run_pipeline.py --image scan.png --task binary_tumor
 | [`tamara-kostova/multiagentmed-tumor-segmentation`](https://huggingface.co/tamara-kostova/multiagentmed-tumor-segmentation) | `binary_tumor`, `multiclass_tumor` | SAM3 linear probe (Dice = 0.836) |
 
 <details>
-<summary>Pre-download, manual placement, and local-only mode</summary>
+<summary>Manual placement and local-only mode</summary>
 
-**Pre-download all checkpoints up front:**
-
-```bash
-python checkpoints/download_checkpoints.py
-```
-
-Selective download:
-
-```bash
-# CNN weights only
-python checkpoints/download_checkpoints.py --kinds cnn
-
-# One task
-python checkpoints/download_checkpoints.py --tasks multiclass_tumor
-
-# Both CNN and BiomedCLIP probe for tumor tasks only
-python checkpoints/download_checkpoints.py --tasks binary_tumor multiclass_tumor --kinds cnn biomedclip
-
-# SAM3 segmentation probe only
-python checkpoints/download_checkpoints.py --tasks tumor_segmentation --kinds sam3
-```
+The MCP server (`mcp_server.py`) checks and fetches all nine checkpoints at startup, so
+starting it once is also a way to pre-download them.
 
 **Manual placement** — place files directly in `checkpoints/`:
 
@@ -167,6 +170,8 @@ CHECKPOINT_SOURCE=local
 ```
 
 Missing files fall back to ImageNet pretrained weights (CNN) or zero-shot mode (BiomedCLIP).
+A CNN with ImageNet weights has an untrained head, so its predictions are meaningless; the
+pipeline only prints a warning. Checkpoint paths are relative, so run from the repo root.
 
 </details>
 
@@ -196,7 +201,9 @@ python run_pipeline.py --eval \
   --stroke_dir        data/test/stroke
 ```
 
-Results (accuracy, F1, ECE, normal specificity, SAM3-rate, latency) are saved to `outputs/eval/comparison_summary.csv`.
+Results (accuracy, F1, ECE, normal specificity, SAM3-rate, latency) for the agent pipeline are saved to `outputs/eval/comparison_summary.csv`.
+This path scores differently from `eval/eval_analysis.py` (no strict binarisation), so its numbers
+are not comparable to the paper tables; those come from the resumable JSONL path below.
 
 **Single-dataset tumor evaluation (resumable, all models, rich JSONL output):**
 
@@ -286,8 +293,7 @@ Forest replaces the single `triage` node. N role-specialized MedGemma instances 
 
 ### Running these on a shared GPU server (`server_bundle/`)
 
-The six remaining runs below are executed on the faculty GPU servers by someone else, from
-their account, so they are packaged as a self-contained hand-off in
+The Forest/Debate runs below were executed on a GPU server and packaged as a self-contained hand-off in
 [`server_bundle/`](server_bundle/): a Singularity definition (`container.def`, CUDA 12.6 /
 Python 3.12 / torch 2.10+cu126, versions pinned to the environment that produced the
 existing JSONLs), numbered one-command step scripts, a preflight that proves both pipelines
@@ -298,15 +304,14 @@ run before a night of GPU time is committed, and TSV/CSV export of every result.
 python server_bundle/scripts/prepack_models.py     # build offline hf_cache/ (~12.5 GB)
 bash   server_bundle/scripts/pack_bundle.sh        # → maclf-code-data.tar.gz + maclf-models.tar
 
-# on the server (see server_bundle/README_SERVER.md — Macedonian + English)
+# on the server (see server_bundle/README_SERVER.md)
 singularity build --remote container.sif container.def
 bash server_bundle/00_preflight.sh                 # must print PREFLIGHT OK
 nohup bash server_bundle/run_all.sh &              # or run_parallel.sh 0 1 2
 bash server_bundle/90_export_results.sh            # → results_<host>_<date>.tar.gz
 ```
 
-`server_bundle/PLAN.md` holds the campaign plan and the measured facts behind it;
-`server_bundle/SEND_CHECKLIST.md` is the pre-send checklist.
+`server_bundle/PLAN.md` holds the campaign plan and the measured facts behind it.
 
 ### Guide — reproducing paper-comparable Forest / Debate results
 
@@ -324,7 +329,11 @@ from:
 | `binary_tumor` | `data/Br35H` | `yes`, `no` |
 | `multiclass_tumor` | `data/figshare` | `1`, `2`, `3` |
 | `ms` | `data/sclerosis/MS` | `MS Axial_crop`, `MS Saggital_crop`, `Control Axial_crop`, `Control Saggital_crop` |
-| `stroke` | `data/stroke/Brain_Stroke_CT_Dataset` | `Bleeding/OVERLAY`, `Ischemia/OVERLAY`, `Normal/PNG` |
+| `stroke` | `data/stroke/Brain_Stroke_CT_Dataset` | `Bleeding/PNG`, `Ischemia/PNG`, `Normal/PNG` |
+
+The stroke `OVERLAY/` folders have the lesion painted on and are excluded by
+`_DEFAULT_EXCLUDE_DIRS` in `eval/tumor_eval.py`. An earlier stroke baseline read them (label
+leakage); it is kept only as `outputs/eval/stroke_dataset_eval.jsonl.bak` and must not be used.
 
 Note that `data/processed` is a *separate* copy of the figshare data that no paper run
 used — point `multiclass_tumor` at `data/figshare` to stay comparable to the existing
@@ -335,31 +344,17 @@ not, so the sweep path needs a directory whose class folders hold images directl
 `--max_samples 500` samples class-balanced up to that cap (binary 250/250, multiclass
 167/167/166, MS 125×4, stroke 167/167/166).
 
-**Campaign status and run order.** Forest N=4 on both tumour tasks is done; the six runs
-below are the remaining work, in execution order. Debate R=2 costs roughly 1.5–2× a Forest
-N=4 run on the same task (9 image-conditioned MedGemma calls vs 7), so the debate runs are
-the ones at risk of not fitting a single overnight slot.
+**Status.** All eight runs are complete (n=500 each) and live in `outputs/eval/`:
+`{binary,multiclass,stroke,ms}_forest_n4.jsonl` and `{binary,multiclass,stroke,ms}_debate_r2.jsonl`.
+The commands below are the recipe to reproduce them. Measured cost: Forest N=4 took 8.9–9.6 h
+per 500 images; Debate R=2 is roughly 1.5–2× that (9 image-conditioned MedGemma calls vs 7).
 
-| # | Run | Status | Est. wall clock (500 imgs) |
-|---|---|---|---|
-| — | Forest N=4, `binary_tumor` | **done** (n=500) | 8.9 h measured |
-| — | Forest N=4, `multiclass_tumor` | **done** (n=465) | 9.6 h measured |
-| 1 | Forest N=4, `stroke` | — | ~8 h |
-| 2 | Forest N=4, `ms` | — | ~8 h |
-| 3 | Debate R=2, `binary_tumor` | — | ~13–16 h |
-| 4 | Debate R=2, `stroke` | — | ~12–16 h |
-| 5 | Debate R=2, `ms` | — | ~12–16 h |
-| 6 | Debate R=2, `multiclass_tumor` | — | ~14–16 h |
+On `multiclass_tumor` the CNN has a 12-class head evaluated on 3-class figshare (accuracy
+0.140, and 0.271–0.314 after masking the softmax to the three figshare classes) and BiomedCLIP
+scores 0.163, so both tool advocates the debate judge arbitrates between are at or below chance.
 
-Step 6 is last deliberately: the multiclass CNN checkpoint has a 12-class head evaluated on
-3-class figshare (accuracy 0.140, and 0.271–0.314 even after masking the softmax to the
-three figshare classes) and BiomedCLIP scores 0.163, so both tool advocates the judge
-arbitrates between are at or below chance on that task. Drop step 6 first if time runs short.
-
-**0. Prove the debate path** — 10 images, MS, capped. The debate graph has never run at
-scale, so spend 15 minutes confirming it before committing a night. Because resume keys on
-the output file, re-running step 5's command later continues from image 11 rather than
-restarting, so this costs nothing:
+**0. Smoke test** — 10 images, MS, capped. Because resume keys on the output file, re-running
+step 5's command later continues from image 11 rather than restarting:
 
 ```bash
 python run_pipeline.py --dataset_eval --task ms     --label_map ms_binary \
@@ -386,7 +381,7 @@ python run_pipeline.py --dataset_eval --task ms     --label_map ms_binary \
   --dataset_eval_output outputs/eval/ms_forest_n4.jsonl
 ```
 
-For reference, the two completed Forest runs were produced by:
+Tumour tasks:
 
 ```bash
 python run_pipeline.py --tumor_eval   --task binary_tumor     --label_map br35h \
@@ -467,11 +462,16 @@ JSONLs. No separate run is needed for those.
   hold the **standard-pipeline baseline** results; reusing them would append forest/debate
   rows into (and corrupt) the paper's baseline files.
 - **`--max_samples 500` samples class-balanced** on these directories. Drop it to run the
-  full datasets. Note the existing baseline JSONLs in `outputs/eval/` were run at
-  `--max_samples 1000` on the old dataset paths — the forest/debate splits above are not
-  the same images, just the same class-balanced sampling method at a smaller cap.
+  full datasets. The tumour and MS baseline JSONLs in `outputs/eval/` were run at
+  `--max_samples 1000`, so compare them on the Forest/Debate image set only
+  (`eval/paired_system_comparison.py` does this). The stroke baseline was re-run on exactly
+  the 500 Forest/Debate images.
 - **Do not add `--skip_report` for forest** — the report node produces the forest's final
-  prediction. (Debate replaces the report node, so it doesn't apply there.)
+  prediction, and without it the final class falls back to the CNN. (Debate replaces the
+  report node, so it doesn't apply there.)
+- **Verification and the IoU penalty need `--generate_explainability`.** The commands above
+  (and `server_bundle/`) do not pass it, so those runs have no verification result and no
+  Grad-CAM++/SAM3 IoU.
 - **SAM3** contributes only to the tumour tasks, and only if `checkpoints/sam3_probe.pth`
   is present on the machine.
 - The **dissent-rate / verdict-stability tables** are produced from these same JSONLs by
@@ -541,24 +541,28 @@ The report is returned in `state["final_report"]` (plain text, ≤150 words). Th
 
 | Field | Description |
 |---|---|
-| `final_predicted_class` | CNN label (or BiomedCLIP top label if no CNN ran) |
-| `final_confidence` | Confidence of the final prediction (may be capped by verification) |
-| `requires_human_review` | `True` if confidence < `human_review_threshold` or MedGemma disagrees with CNN |
+| `final_predicted_class` | MedGemma's fused report diagnosis (`diagnosis_detailed` on `multiclass_tumor`, `diagnosis_name` otherwise); falls back to the CNN, then BiomedCLIP, then triage when the report has none. Debate: the judge's verdict. |
+| `final_confidence` | Confidence of the final prediction, scaled down when the Grad-CAM++/SAM3 IoU is below `low_iou_penalty_threshold` (0.30) |
+| `requires_human_review` | `True` if the final confidence < `human_review_threshold` (0.45), the Grad-CAM++/SAM3 IoU < 0.30, verification disagrees with the CNN, or the report could not be parsed |
 | `explainability_result` | Paths to `gradcam_pp_*.png` and `ig_*.png` (if enabled) |
-| `verification_result` | MedGemma post-hoc agreement check against Grad-CAM++ saliency map (if explainability enabled) |
-| `fhir_report` | FHIR R4 DiagnosticReport dict; saved to `outputs/fhir/fhir_<id>.json` |
+| `verification_result` | MedGemma post-hoc agreement check against the Grad-CAM++ saliency map (if explainability enabled) |
+| `fhir_report` | FHIR R4 DiagnosticReport dict; saved to `outputs/fhir/fhir_<id>.json`. Status is `preliminary` when `requires_human_review`, else `final`. |
+
+On disagreement, `verification_node` caps the confidence at 0.55 and sets
+`requires_human_review`, and the report keeps both. The IoU penalty never scales confidence
+below half (`low_iou_penalty_floor`).
 
 ## Explainability Methods
 
 | Method | Location | Notes |
 |---|---|---|
-| Grad-CAM | `saliency.py` | Baseline; criticised for uniform channel weights |
-| Grad-CAM++ | `saliency.py` | Per-pixel α weights; sharper localisation |
-| Integrated Gradients | `saliency.py` | Model-agnostic, satisfies Completeness axiom |
+| Grad-CAM | `explainability/saliency.py` | Baseline; criticised for uniform channel weights |
+| Grad-CAM++ | `explainability/saliency.py` | Per-pixel α weights; sharper localisation (used by the pipeline) |
+| Integrated Gradients | `explainability/saliency.py` | Model-agnostic, satisfies Completeness axiom (used by the pipeline) |
 
 ## Calibration
 
-Post-hoc calibration is available via `eval/evaluate.py`:
+Post-hoc temperature scaling is available via `eval/evaluate.py`:
 
 ```python
 from eval.evaluate import TemperatureScaler, compute_ece
@@ -568,6 +572,33 @@ scaler.fit(val_logits, val_labels)          # optimises T via NLL
 calibrated_probs = scaler.calibrate(test_logits)
 ece = compute_ece(confidences, correct)     # binning-based ECE
 ```
+
+Fitted temperatures go in `config.py:ModelConfig.cnn_temperatures` or are loaded at runtime
+with `--calibration_file temps.json`. The default is T=1.0 (no calibration).
+
+## Stage pipeline and MCP server
+
+A config-driven version of the same agents runs as an ordered list of stages
+(`configs/pipelines/{standard,forest,debate}.yaml`), including slice extraction from 3D volumes,
+CNN screening of every slice and study-level aggregation:
+
+```bash
+python run_stages.py --config configs/pipelines/standard.yaml --task binary_tumor --image scan.png
+python run_stages.py --config configs/pipelines/standard.yaml --task stroke --volume vol.npy --modality CT
+python run_stages.py --list_stages
+```
+
+`mcp_server.py` exposes it as MCP tools (`classify`, `classify_slices`, `classify_volume`,
+`list_capabilities`) over Streamable HTTP or stdio:
+
+```bash
+NEURO_MCP_TOKEN=... python mcp_server.py --host 0.0.0.0 --port 8765 --load_4bit
+python mcp_client.py --stdio --task binary_tumor --images scan.png -- --load_4bit   # smoke test
+```
+
+The Docker image (`Dockerfile`, published as `tamarakostova/neuro-mcp`) and the `classify`
+input/output contract are documented in [`docker/README.md`](docker/README.md). The paper's
+numbers all come from the LangGraph path above, not from the stage pipeline.
 
 ## Prior Work
 
@@ -582,41 +613,50 @@ This pipeline builds on three prior thesis components:
 ```
 MultiAgentMedClassifier/
 ├── agents/
-│   ├── medgemma_agent.py   # MedGemma: triage, bbox diagnosis, report, debate judge/advocate, forest role
+│   ├── medgemma_agent.py   # MedGemma: triage, report, verification, debate judge/advocate, forest role
 │   ├── cnn_tool.py         # CNN classifier (VGG16 / DenseNet / ResNet)
 │   ├── sam3_tool.py        # SAM3 segmentation + linear probe head
-│   ├── biomedclip_tool.py  # BiomedCLIP zero-shot / linear probe
+│   ├── biomedclip_tool.py  # BiomedCLIP linear probe / zero-shot
 │   ├── debate.py           # System B: DebateOrchestrator (3 advocates + judge, 1–3 rounds)
-│   └── forest.py           # System C: AgentForest (4 roles, majority vote)
+│   ├── forest.py           # System C: AgentForest (4 roles, majority vote)
+│   └── few_shot_loader.py  # Few-shot examples for triage (few_shot_examples.csv)
 ├── pipeline/
-│   ├── graph.py            # LangGraph StateGraph assembly
+│   ├── graph.py            # LangGraph assembly: standard / debate / forest
 │   ├── nodes.py            # Node factory functions
 │   ├── state.py            # NeuroimagingState TypedDict
-│   └── fhir_output.py      # FHIR R4 DiagnosticReport serialiser
+│   ├── fhir_output.py      # FHIR R4 bundle serialiser
+│   ├── stages/             # Stage pipeline (slice extraction, screening, agents, aggregation)
+│   ├── registry.py, runner.py, resources.py, context.py   # stage registry and runner
+├── configs/pipelines/      # Stage pipeline YAMLs (standard / forest / debate)
 ├── explainability/
-│   ├── saliency.py         # GradCAM, GradCAM++, Integrated Gradients (used by pipeline)
-│   ├── cnns.py             # Standalone CNN explainability experiment script
-│   ├── multimodal.py       # Standalone CLIP/BiomedCLIP experiment script
+│   ├── saliency.py         # Grad-CAM, Grad-CAM++, Integrated Gradients (used by pipeline)
 │   └── uncertainty.py      # Standalone calibration experiment script
 ├── eval/
-│   ├── evaluate.py         # Metrics: accuracy, F1, ECE, specificity, SAM3-rate, latency
-│   └── tumor_eval.py       # Resumable JSONL eval for single class-folder datasets
-├── prompts/
-│   ├── system_prompt.txt           # MedGemma radiologist persona + JSON schema
-│   ├── system_prompt_bbox.txt      # Same schema, bbox-overlay context
-│   ├── forest_radiologist.txt      # Forest role: visual pattern recognition
-│   ├── forest_conservative.txt     # Forest role: specificity-focused
-│   ├── forest_emergency.txt        # Forest role: sensitivity-focused
-│   └── forest_differential.txt     # Forest role: uncertainty-aware
-├── checkpoints/            # PyTorch state dicts (auto-downloaded on first run)
-├── outputs/
-│   ├── explainability/     # Saliency maps: gradcam_pp_*.png, ig_*.png
-│   ├── fhir/               # FHIR R4 bundles: fhir_<id>.json
-│   └── eval/               # comparison_summary.csv, <task>_tumor_eval.jsonl, <task>_dataset_eval.jsonl
-├── app.py                  # Gradio web GUI (python app.py → http://localhost:7860)
+│   ├── tumor_eval.py               # Resumable JSONL eval (--tumor_eval / --dataset_eval)
+│   ├── eval_analysis.py            # Per-system tables from a JSONL (paper numbers)
+│   ├── paired_system_comparison.py # Base vs Forest vs Debate: McNemar + Holm, Wilson CIs
+│   ├── evaluate.py                 # --eval / sweep metrics, TemperatureScaler, ECE
+│   ├── judge_attribution.py, backfill_labels.py, plot_analysis.py
+│   └── tumor_eval_analysis.py, report_analysis.py   # older analysis scripts
+├── experiments/            # Research sweep orchestrator (run_research.py)
+├── prompts/                # MedGemma system prompts (JSON schema) and forest role prompts
+├── ui/
+│   ├── demo.py             # Gradio UI (launched by app.py)
+│   ├── styles/app.css
+│   └── examples/<task>/    # Example scans shown in the UI
+├── server_bundle/          # Faculty GPU server hand-off (Singularity, step scripts, PLAN.md)
+├── docker/                 # MCP image docs and pinned requirements (Dockerfile at repo root)
+├── checkpoints/            # Weights (auto-downloaded) + upload_*.py scripts for the HF repos
+├── utils/convert.py        # figshare .mat -> PNG conversion
+├── outputs/                # segmentation/, explainability/, fhir/, eval/, analysis/
+├── app.py                  # Gradio entry point (python app.py → http://localhost:7860)
+├── run_pipeline.py         # CLI: single image, --eval, --tumor_eval, --dataset_eval
+├── run_research.py         # CLI: research sweeps
+├── run_stages.py           # CLI: stage pipeline
+├── mcp_server.py, mcp_client.py   # MCP endpoint and reference client
 ├── config.py               # Central config dataclasses
-├── run_pipeline.py         # CLI entry point
-├── .env.example            # API key template — copy to .env and fill in HF_TOKEN
+├── Dockerfile, .dockerignore
+├── .env.example            # Copy to .env and fill in HF_TOKEN
 └── requirements.txt
 ```
 ![Repo Card](https://githubcard.com/tamara-kostova/MultiAgentMedClassifier.svg?d=NzYN0S3U)

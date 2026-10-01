@@ -1,8 +1,9 @@
 """
 Preflight check for the faculty GPU server runs.
 
-Verifies — in this order, cheapest first — that everything the six evaluation runs
-need is present and working, then actually pushes one image through the Forest
+Verifies — in this order, cheapest first — that everything the v2 evaluation runs
+need is present and working (including every image of the published run set in
+server_bundle/image_lists/), then actually pushes one image through the Forest
 pipeline and one through the Debate pipeline. Prints a measured seconds/image
 figure so the wall clock of the full runs can be projected before committing a
 night of GPU time.
@@ -180,7 +181,26 @@ def check_datasets() -> dict[str, str]:
             ok(f"{task}: {len(selected)} images selected, all class folders recognised")
             usable[task] = data_dir
 
+        check_image_list(task, data_dir, samples)
+
     return usable
+
+
+def check_image_list(task: str, data_dir: str, samples: list[dict]) -> None:
+    """Every v2 run is restricted to server_bundle/image_lists/<task>.txt."""
+    from eval.tumor_eval import _samples_from_list, load_image_list
+
+    list_path = PROJECT_ROOT / "server_bundle" / "image_lists" / f"{task}.txt"
+    if not list_path.exists():
+        fail(f"{task}: image list missing: {list_path}")
+        return
+    paths, info = load_image_list(list_path)
+    try:
+        _samples_from_list(samples, paths)
+    except ValueError as exc:
+        fail(f"{task}: image list does not match {data_dir}: {exc}")
+        return
+    ok(f"{task}: all {info['n']} images of the published run set are present")
 
 
 # ── 3. Checkpoints ────────────────────────────────────────────────────────────

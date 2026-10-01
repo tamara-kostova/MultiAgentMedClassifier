@@ -34,7 +34,8 @@ Usage (both options are equivalent)
 
   # Optional flags (work with any dataset):
   --max_samples 100          stop after N images total (across resumed runs)
-  --tumor_eval_output path   custom JSONL path (default: outputs/eval/<task>_tumor_eval.jsonl)
+  --tumor_eval_output path   custom JSONL path (default: outputs/eval/<task>_tumor_eval<mode suffix>.jsonl)
+  --image_list FILE          run exactly these images (text list or a prior run's JSONL)
 
 Key properties
 --------------
@@ -51,6 +52,7 @@ from pathlib import Path
 
 from sklearn.metrics import accuracy_score, f1_score
 
+from eval.labels import canonical_label  # noqa: F401  (re-exported for callers)
 from pipeline.state import NeuroimagingState, initial_state
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
@@ -182,85 +184,13 @@ def _class_counts(samples: list[dict]) -> dict[str, int]:
     return counts
 
 
-_TUMOR_SUBTYPES = (
-    "carcinoma",
-    "germinoma",
-    "glioma",
-    "granuloma",
-    "medulloblastoma",
-    "meningioma",
-    "neurocytoma",
-    "papilloma",
-    "schwannoma",
-    "tuberculoma",
-)
-
-
-def canonical_label(value: object, task: str | None = None) -> str:
-    """Normalize labels/predictions so metrics survive wording differences.
-
-    The prompt schema uses the literal string "null" as the sentinel for an
-    indeterminable field, so it must normalize to "" (absent) rather than being
-    treated as a class name. Kept in sync with eval_analysis.canonical_label.
-    """
-    text = str(value or "").strip().lower()
-    if not text or text in ("none", "null", "nan"):
-        return ""
-
-    normalized = (
-        text.replace("_", " ")
-        .replace("-", " ")
-        .replace("/", " ")
-        .replace("tumour", "tumor")
-    )
-
-    # "abnormal" / "other abnormalities" contains the substring "normal", so it must
-    # be caught first — otherwise an abnormality assertion scores as a normal read.
-    # The debate judge's schema offers "other abnormalities" as a verdict.
-    if "abnormal" in normalized:
-        return "abnormal"
-    if "normal" in normalized or "control" in normalized:
-        return "normal"
-    if (
-        normalized == "ms"
-        or normalized.startswith("ms ")
-        or " multiple sclerosis" in f" {normalized}"
-    ):
-        return "ms"
-    if any(
-        token in normalized
-        for token in ("stroke", "ischemic", "ischemia", "hemorrhagic", "bleeding", "infarct")
-    ):
-        return "stroke"
-
-    tumor_subtype = next(
-        (subtype for subtype in _TUMOR_SUBTYPES if subtype in normalized),
-        None,
-    )
-    tumorish = (
-        tumor_subtype is not None
-        or "pituitary" in normalized
-        or "brain tumor" in normalized
-        or normalized == "tumor"
-        or " tumor" in normalized
-    )
-    if task == "binary_tumor" and tumorish:
-        return "tumor"
-    if "pituitary" in normalized:
-        return "pituitary_tumor"
-    if tumor_subtype is not None:
-        return tumor_subtype
-    if tumorish:
-        return "tumor"
-
-    return text
-
-
-def load_processed_paths(jsonl_path: Path) -> set[str]:
-    """Return image_path values that are already written in the JSONL file."""
+def _read_jsonl_rows(jsonl_path: Path) -> list[dict]:
+    """Parsable rows of a JSONL file; unparsable lines (e.g. a write cut short by a
+    kill) are skipped with a warning."""
+    rows: list[dict] = []
     if not jsonl_path.exists():
-        return set()
-    done: set[str] = set()
+        return rows
+    bad = 0
     with jsonl_path.open(encoding="utf-8") as f:
         for line in f:
             line = line.strip()
@@ -268,11 +198,196 @@ def load_processed_paths(jsonl_path: Path) -> set[str]:
                 continue
             try:
                 rec = json.loads(line)
-                if rec.get("image_path") and rec.get("error") is None:
-                    done.add(rec["image_path"])
             except json.JSONDecodeError:
-                pass
-    return done
+                bad += 1
+                continue
+            if isinstance(rec, dict):
+                rows.append(rec)
+    if bad:
+        print(f"[tumor_eval] WARNING: skipped {bad} unparsable line(s) in {jsonl_path}")
+    return rows
+
+
+def _ensure_trailing_newline(path: Path) -> None:
+    """A truncated last line must not swallow the next appended record."""
+    if not path.exists() or path.stat().st_size == 0:
+        return
+    with path.open("rb+") as f:
+        f.seek(-1, 2)
+        if f.read(1) != b"\n":
+            f.write(b"\n")
+
+
+def load_processed_paths(jsonl_path: Path) -> set[str]:
+    """image_path values with at least one non-error row (error rows are retried)."""
+    return {
+        rec["image_path"]
+        for rec in _read_jsonl_rows(Path(jsonl_path))
+        if rec.get("image_path") and rec.get("error") is None
+    }
+
+
+# ── Run provenance ────────────────────────────────────────────────────────────
+
+# run_config keys that do not change what a row means (excluded from the resume check).
+_RUN_CONFIG_IGNORED_KEYS = frozenset({"git_commit", "git_dirty", "image_list"})
+
+
+def git_provenance() -> tuple[str | None, bool | None]:
+    """(HEAD commit, dirty-tracked-files flag) of the repo, or (None, None).
+
+    A packed server bundle has no .git; server_bundle/scripts/pack_bundle.sh writes
+    the commit into CODE_VERSION (JSON: commit, dirty) at the project root instead.
+    """
+    import subprocess
+
+    root = Path(__file__).resolve().parent.parent
+    try:
+        commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=root, capture_output=True, text=True,
+            check=True, timeout=10,
+        ).stdout.strip() or None
+        status = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=no"], cwd=root,
+            capture_output=True, text=True, check=True, timeout=30,
+        ).stdout
+        return commit, bool(status.strip())
+    except Exception:
+        pass
+    try:
+        stamp = json.loads((root / "CODE_VERSION").read_text(encoding="utf-8"))
+        return stamp.get("commit"), stamp.get("dirty")
+    except Exception:
+        return None, None
+
+
+def build_run_config(cfg, image_list: dict | None = None) -> dict:
+    """Everything about the run that changes its outputs; written into every row.
+
+    Parameters of a mode that is not running are recorded as None.
+    """
+    mode = getattr(cfg, "pipeline_mode", "standard")
+    forest = mode == "forest"
+    debate = mode == "debate"
+    roles = None
+    if forest:
+        from agents.forest import ROLE_NAMES
+
+        base = tuple(cfg.forest_roles or ROLE_NAMES)
+        roles = [base[i % len(base)] for i in range(cfg.forest_n_agents)]
+    commit, dirty = git_provenance()
+    return {
+        "pipeline_mode": mode,
+        "forest_n_agents": cfg.forest_n_agents if forest else None,
+        "forest_roles": roles,
+        "forest_temperature": cfg.forest_temperature if forest else None,
+        "forest_top_p": cfg.forest_top_p if forest else None,
+        "forest_seed": cfg.forest_seed if forest else None,
+        "forest_vote": cfg.forest_vote if forest else None,
+        "debate_rounds": cfg.debate_rounds if debate else None,
+        "debate_advocates": list(cfg.debate_advocates) if debate else None,
+        "generate_explainability": bool(cfg.generate_explainability),
+        "skip_report": bool(cfg.skip_report),
+        "triage_only": bool(cfg.triage_only),
+        "load_4bit": bool(cfg.model.use_4bit_quantization),
+        "medgemma_model_id": cfg.model.medgemma_model_id,
+        "few_shot": bool(cfg.model.use_few_shot),
+        "low_iou_penalty_floor": cfg.routing.low_iou_penalty_floor,
+        "image_list": image_list,
+        "git_commit": commit,
+        "git_dirty": dirty,
+    }
+
+
+def _infer_legacy_config(rec: dict) -> dict:
+    """Mode (and its size) of a row written before run_config existed."""
+    routing = str(rec.get("routing_path") or "")
+    votes = rec.get("forest_votes")
+    if votes is not None:
+        return {"pipeline_mode": "forest", "forest_n_agents": len(votes), "triage_only": False}
+    if rec.get("debate_rounds_completed") is not None or "debate" in routing:
+        return {
+            "pipeline_mode": "debate",
+            "debate_rounds": rec.get("debate_rounds_completed"),
+            "triage_only": False,
+        }
+    return {"pipeline_mode": "standard", "triage_only": False}
+
+
+class ResumeConfigMismatch(ValueError):
+    pass
+
+
+def check_resume_compatible(output_file: Path, run_config: dict) -> None:
+    """Refuse to append to a JSONL whose existing rows came from a different run config."""
+    for rec in _read_jsonl_rows(Path(output_file)):
+        old = rec.get("run_config")
+        if old is None:
+            if rec.get("error") is not None:
+                continue  # legacy error rows carry no pipeline outputs to infer from
+            old = _infer_legacy_config(rec)
+            keys = old.keys()
+            note = " (legacy row without run_config; mode inferred from its fields)"
+        else:
+            keys = (set(old) | set(run_config)) - _RUN_CONFIG_IGNORED_KEYS
+            note = ""
+        diff = {
+            k: (old.get(k), run_config.get(k))
+            for k in sorted(keys)
+            if old.get(k) != run_config.get(k)
+        }
+        if diff:
+            details = ", ".join(f"{k}: file={a!r} vs this run={b!r}" for k, (a, b) in diff.items())
+            raise ResumeConfigMismatch(
+                f"Refusing to resume into {output_file}: row for {rec.get('image_path')} was "
+                f"written with a different run config{note}: {details}. Pass a different "
+                f"output path (e.g. --tumor_eval_output/--dataset_eval_output)."
+            )
+
+
+def load_image_list(path: str | Path) -> tuple[list[str], dict]:
+    """Image paths from a text file (one per line) or a JSONL (each row's image_path).
+
+    Order is kept, duplicates dropped. Returns (paths, provenance dict).
+    """
+    import hashlib
+
+    path = Path(path)
+    data = path.read_bytes()
+    if path.suffix.lower() == ".jsonl":
+        raw = [rec.get("image_path") for rec in _read_jsonl_rows(path)]
+    else:
+        raw = [ln.strip() for ln in data.decode("utf-8").splitlines()]
+        raw = [ln for ln in raw if ln and not ln.startswith("#")]
+    paths = list(dict.fromkeys(p for p in raw if p))
+    return paths, {"path": str(path), "sha256": hashlib.sha256(data).hexdigest(), "n": len(paths)}
+
+
+def _samples_from_list(dataset: list[dict], image_paths: list[str]) -> list[dict]:
+    """Restrict/order dataset samples to image_paths (strings kept as listed)."""
+    root = Path(__file__).resolve().parent.parent
+    by_path = {Path(s["image_path"]).resolve(): s for s in dataset}
+    missing, outside, samples = [], [], []
+    for p in image_paths:
+        cand = Path(p)
+        if not cand.is_absolute() and not cand.exists():
+            cand = root / p
+        if not cand.exists():
+            missing.append(p)
+            continue
+        sample = by_path.get(cand.resolve())
+        if sample is None:
+            outside.append(p)
+            continue
+        samples.append({**sample, "image_path": p})
+    if missing or outside:
+        parts = []
+        if missing:
+            parts.append(f"{len(missing)} missing on disk (e.g. {missing[:3]})")
+        if outside:
+            parts.append(f"{len(outside)} not in the dataset dir (e.g. {outside[:3]})")
+        raise ValueError("--image_list: " + "; ".join(parts))
+    return samples
 
 
 def extract_row(
@@ -281,6 +396,7 @@ def extract_row(
     latency: float,
     label_map: dict[str, str] | None = None,
     error: str | None = None,
+    run_config: dict | None = None,
 ) -> dict:
     """Build the rich JSONL record from a completed pipeline state."""
     seg = final_state.get("segmentation_result") or {}
@@ -289,6 +405,8 @@ def extract_row(
     expl = final_state.get("explainability_result") or {}
     verif = final_state.get("verification_result") or {}
     fhir = final_state.get("fhir_report") or {}
+    consensus = final_state.get("forest_consensus") or {}
+    verdict = final_state.get("debate_verdict") or {}
 
     raw_label = sample["label"]
     label_name = (label_map or {}).get(raw_label, raw_label)
@@ -303,11 +421,19 @@ def extract_row(
         "true_label_canonical": canonical_label(label_name, sample["task"]),
         "task": sample["task"],
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "pipeline_mode": (run_config or {}).get("pipeline_mode"),
+        "run_config": run_config,
         # ── Final prediction ──────────────────────────────────────────────────
         "predicted_class": predicted_class,
         "predicted_class_canonical": canonical_label(predicted_class, sample["task"]),
         "final_confidence": final_state.get("final_confidence", 0.0),
         "requires_human_review": final_state.get("requires_human_review", False),
+        "confidence_penalty_factor": final_state.get("confidence_penalty_factor"),
+        # ── MedGemma parse failures ───────────────────────────────────────────
+        "triage_parse_failed": bool(final_state.get("triage_parse_failed")),
+        "verification_parse_failed": bool(final_state.get("verification_parse_failed")),
+        "report_parse_failed": bool(final_state.get("report_parse_failed")),
+        "judge_parse_failed": bool(final_state.get("judge_parse_failed")),
         # ── Routing ───────────────────────────────────────────────────────────
         "routing_path": " → ".join(final_state.get("routing_path", [])),
         "routing_decision": final_state.get("routing_decision"),
@@ -346,15 +472,30 @@ def extract_row(
         "verification_agreement": verif.get("agreement"),
         "verification_alternative_dx": verif.get("alternative_diagnosis"),
         "verification_reasoning": verif.get("reasoning"),
+        "verification_confidence": verif.get("verification_confidence"),
         # ── Agent Forest (System C) — None outside --pipeline_mode forest ─────
-        "dissent_rate": (final_state.get("forest_consensus") or {}).get("dissent_rate"),
-        "vote_fraction": (final_state.get("forest_consensus") or {}).get("vote_fraction"),
+        "dissent_rate": consensus.get("dissent_rate"),
+        "vote_fraction": consensus.get("vote_fraction"),
+        "forest_winner": consensus.get("winner"),
+        "forest_winner_detailed": consensus.get("winner_detailed"),
+        "forest_winner_canonical": consensus.get("winner_canonical"),
+        "forest_vote_counts": consensus.get("vote_counts"),
+        "forest_vote_mode": consensus.get("vote_mode"),
+        "forest_n_agents": consensus.get("n_agents"),
+        "forest_n_abstain": consensus.get("n_abstain"),
+        "forest_tie_broken": consensus.get("tie_broken"),
         "forest_votes": final_state.get("forest_votes"),
         # ── Multi-Agent Debate (System B) — None outside --pipeline_mode debate ─
         "debate_rounds_completed": final_state.get("debate_rounds_completed"),
-        "debate_round_changed": (final_state.get("debate_verdict") or {}).get("round_changed"),
-        "debate_winner": (final_state.get("debate_verdict") or {}).get("winner"),
-        "debate_judge_parse_failed": (final_state.get("debate_verdict") or {}).get("judge_parse_failed", False),
+        # Computed from the per-round verdict labels (not the judge's own claim).
+        "debate_round_changed": final_state.get("debate_round_changed"),
+        "debate_judge_claimed_round_changed": final_state.get("debate_judge_claimed_round_changed"),
+        "debate_round_verdicts": final_state.get("debate_round_verdicts"),
+        "debate_advocates": verdict.get("advocates"),
+        "debate_winner": verdict.get("winner"),
+        "debate_winner_detailed": verdict.get("winner_detailed"),
+        "debate_confidence": verdict.get("confidence"),
+        "debate_judge_parse_failed": verdict.get("judge_parse_failed", False),
         # ── Full MedGemma report ──────────────────────────────────────────────
         "final_report": final_state.get("final_report"),
         # ── FHIR ──────────────────────────────────────────────────────────────
@@ -368,12 +509,15 @@ def extract_row(
 def _print_progress(i: int, total: int, row: dict, elapsed: float) -> None:
     eta_s = (elapsed / i) * (total - i) if i > 0 else 0.0
     pred = row.get("predicted_class") or row.get("error") or "?"
-    pred_short = (pred[:28] + "…") if len(str(pred)) > 29 else pred
+    pred = str(pred)
+    pred_short = (pred[:28] + "…") if len(pred) > 29 else pred
+    conf = row.get("final_confidence")
+    conf_text = "None " if conf is None else f"{conf:.3f}"
     print(
         f"  [{i:>4}/{total}] {Path(row['image_path']).name:<28} "
         f"true={row.get('true_label_name', row.get('true_label', '?')):<12} "
         f"pred={pred_short:<29} "
-        f"conf={row.get('final_confidence', 0.0):.3f}  "
+        f"conf={conf_text}  "
         f"lat={row['latency_s']:.1f}s  ETA={eta_s/60:.0f}min"
     )
 
@@ -444,6 +588,8 @@ def run_tumor_eval(
     label_map: dict[str, str] | None = None,
     max_samples: int | None = None,
     exclude_dirs: set[str] | None = None,
+    run_config: dict | None = None,
+    image_list: list[str] | None = None,
 ) -> list[dict]:
     """
     Run the full pipeline on every image in data_dir, writing results to output_file.
@@ -451,8 +597,12 @@ def run_tumor_eval(
     Returns the list of row dicts produced in this run (does not include rows from
     a prior resumed run).
 
-    max_samples caps the total number of images processed across all runs combined.
+    max_samples caps the total number of images processed across all runs combined
+    (counting only rows for images of this dataset / image list).
     label_map=None uses the task default; label_map={} uses raw folder names.
+    run_config is written into every row; resuming into a file whose rows carry a
+    different run config raises ResumeConfigMismatch.
+    image_list restricts and orders the run to exactly these image paths.
     """
     if label_map is None:
         label_map = LABEL_MAPS.get(TASK_DEFAULT_LABEL_MAP.get(task, ""), {})
@@ -460,7 +610,11 @@ def run_tumor_eval(
     output_file = Path(output_file)
     output_file.parent.mkdir(parents=True, exist_ok=True)
 
-    samples = _interleave_by_label(load_dataset(data_dir, task, exclude_dirs=exclude_dirs))
+    dataset = load_dataset(data_dir, task, exclude_dirs=exclude_dirs)
+    if image_list is not None:
+        samples = _samples_from_list(dataset, image_list)
+    else:
+        samples = _interleave_by_label(dataset)
     if not samples:
         print(f"No images found in {data_dir}")
         return []
@@ -469,7 +623,10 @@ def run_tumor_eval(
         f"classes={_class_counts(samples)}"
     )
 
-    done = load_processed_paths(output_file)
+    if run_config is not None:
+        check_resume_compatible(output_file, run_config)
+    sample_paths = {s["image_path"] for s in samples}
+    done = load_processed_paths(output_file) & sample_paths
     pending = [s for s in samples if s["image_path"] not in done]
 
     if max_samples is not None:
@@ -492,6 +649,7 @@ def run_tumor_eval(
     rows_this_run: list[dict] = []
     t_start = time.perf_counter()
 
+    _ensure_trailing_newline(output_file)
     with output_file.open("a", encoding="utf-8") as f:
         for i, sample in enumerate(pending, start=1):
             t0 = time.perf_counter()
@@ -499,11 +657,13 @@ def run_tumor_eval(
                 state = initial_state(sample["image_path"], sample["task"])
                 final_state: NeuroimagingState = app.invoke(state)
                 latency = time.perf_counter() - t0
-                row = extract_row(sample, final_state, latency, label_map)
+                row = extract_row(sample, final_state, latency, label_map, run_config=run_config)
             except Exception as exc:
                 latency = time.perf_counter() - t0
                 empty = initial_state(sample["image_path"], sample["task"])
-                row = extract_row(sample, empty, latency, label_map, error=str(exc))
+                row = extract_row(
+                    sample, empty, latency, label_map, error=str(exc), run_config=run_config
+                )
                 print(f"\n  [ERROR] {Path(sample['image_path']).name}: {exc}")
 
             f.write(json.dumps(row) + "\n")

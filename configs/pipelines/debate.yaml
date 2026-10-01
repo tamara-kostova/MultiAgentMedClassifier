@@ -1,4 +1,5 @@
 # Stage-pipeline equivalent of pipeline/graph.py:assemble_debate_pipeline (System B).
+# Advocates come from the run config (--debate_advocates); rounds below overrides --debate_rounds (1..3).
 name: debate
 stages:
   - inference.slice_extraction.from_files

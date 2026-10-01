@@ -18,18 +18,33 @@ from pathlib import Path
 import pandas as pd
 from sklearn.metrics import precision_recall_fscore_support
 
-from eval.evaluate import compute_ece
+from eval.labels import canonical_label
+from eval.metrics import compute_ece, parse_bool
 
 
 def _label_cols(df: pd.DataFrame) -> tuple[str, str]:
     """
-    Return (true_col, pred_col), preferring the canonical label columns written
-    by eval/evaluate.py so correctness is computed on normalized labels rather
-    than raw dataset folder names. Falls back to raw columns for older CSVs.
+    Return (true_col, pred_col) for scoring. Both are the *scored* columns
+    `_true` / `_pred` added by `_scored()` (canonical_label + eval_analysis.prep
+    strict binarization, the paper path; abstentions = "unknown", counted wrong).
+    Kept as a function so the call sites stay unchanged.
     """
-    true_col = "true_label_canonical" if "true_label_canonical" in df.columns else "true_label"
-    pred_col = "predicted_class_canonical" if "predicted_class_canonical" in df.columns else "predicted_class"
-    return true_col, pred_col
+    return "_true", "_pred"
+
+
+def _scored(df: pd.DataFrame) -> pd.DataFrame:
+    """Add _true/_pred/_correct/_conf with eval.evaluate.score_frame (row task)."""
+    if "_true" in df.columns and "_pred" in df.columns:
+        return df
+    from eval.evaluate import score_frame
+
+    if df.empty:
+        return df.assign(_true=[], _pred=[], _correct=[], _conf=[])
+    parts = [score_frame(g, task) for task, g in df.groupby("task", sort=False)] \
+        if "task" in df.columns else [score_frame(df)]
+    out = pd.concat(parts).loc[df.index]
+    # Rows whose ground truth cannot be canonicalized cannot be scored.
+    return out[out["_true"] != "unknown"]
 
 
 # ── Loader ────────────────────────────────────────────────────────────────────
@@ -47,7 +62,9 @@ def load_sweep_predictions(results_dir: str) -> pd.DataFrame:
             df = pd.read_csv(pred_file)
             df["experiment_id"] = subdir.name
             dfs.append(df)
-    return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+    if not dfs:
+        return pd.DataFrame()
+    return _scored(pd.concat(dfs, ignore_index=True))
 
 
 # ── Analysis functions ────────────────────────────────────────────────────────
@@ -112,6 +129,7 @@ def calibration_by_routing_path(preds_df: pd.DataFrame) -> pd.DataFrame:
     Use this to show whether SAM3-routed cases are better or worse calibrated
     than directly-classified cases.
     """
+    preds_df = _scored(preds_df)
     true_col, pred_col = _label_cols(preds_df)
     rows = []
     for (exp_id, task, path), grp in preds_df.groupby(
@@ -119,8 +137,8 @@ def calibration_by_routing_path(preds_df: pd.DataFrame) -> pd.DataFrame:
     ):
         if len(grp) < 5:
             continue
-        confs = grp["final_confidence"].values
-        correct = (grp[true_col] == grp[pred_col]).values.astype(float)
+        confs = grp["_conf"].values.astype(float)
+        correct = grp["_correct"].values.astype(float)
         rows.append({
             "experiment_id": exp_id,
             "task": task,
@@ -150,6 +168,7 @@ def per_class_failure_breakdown(preds_df: pd.DataFrame) -> pd.DataFrame:
     Useful for answering: which tumor subtypes benefit most from SAM3/BiomedCLIP,
     and where does the pipeline still systematically fail?
     """
+    preds_df = _scored(preds_df)
     true_col, pred_col = _label_cols(preds_df)
     rows = []
     for (exp_id, task), grp in preds_df.groupby(["experiment_id", "task"]):
@@ -213,12 +232,27 @@ def medgemma_agreement_analysis(preds_df: pd.DataFrame) -> pd.DataFrame:
     if "medgemma_class" not in preds_df.columns:
         return pd.DataFrame()
 
+    preds_df = _scored(preds_df)
     true_col, pred_col = _label_cols(preds_df)
+    from eval.eval_analysis import prep
+
     df = preds_df.dropna(subset=["medgemma_class"]).copy()
-    df["_mg"] = df["medgemma_class"].astype(str).str.strip().str.lower()
-    df["_pred"] = df[pred_col].astype(str).str.strip().str.lower()
-    df["_agree"] = df["_mg"] == df["_pred"]
-    df["_correct"] = df[true_col].astype(str).str.strip().str.lower() == df["_pred"]
+
+    def _mg(row) -> str:
+        # Canonicalize MedGemma's triage label exactly like the prediction side
+        # (canonical_label + prep, task-aware). multiclass_tumor uses the subtype.
+        task = row.get("task")
+        raw = row.get("medgemma_class")
+        if task == "multiclass_tumor":
+            det = row.get("medgemma_class_detailed")
+            if isinstance(det, str) and det.strip():
+                raw = det
+        lbl = canonical_label(raw if isinstance(raw, str) else "", task)
+        return prep(lbl, task) if lbl else "unknown"
+
+    df["_mg"] = [_mg(r) for _, r in df.iterrows()]
+    df["_agree"] = (df["_mg"] == df[pred_col]) & (df["_mg"] != "unknown")
+    df["_correct"] = df["_correct"].astype(bool)
 
     rows = []
     for (exp_id, task), grp in df.groupby(["experiment_id", "task"]):
@@ -268,13 +302,14 @@ def calibration_per_task(preds_df: pd.DataFrame) -> pd.DataFrame:
 
     Use this to show the MS calibration problem: high confidence despite low accuracy.
     """
+    preds_df = _scored(preds_df)
     true_col, pred_col = _label_cols(preds_df)
     rows = []
     for (exp_id, task), grp in preds_df.groupby(["experiment_id", "task"]):
         if len(grp) < 10:
             continue
-        confs = grp["final_confidence"].values
-        correct = (grp[true_col] == grp[pred_col]).values.astype(float)
+        confs = grp["_conf"].values.astype(float)
+        correct = grp["_correct"].values.astype(float)
         mean_conf = float(confs.mean())
         acc = float(correct.mean())
         rows.append({
@@ -309,24 +344,27 @@ def forest_voting_analysis(preds_df: pd.DataFrame) -> pd.DataFrame:
     Use this to show whether agent agreement correlates with correctness
     (connects to Li et al.: larger forests reduce uncertainty on hard cases).
     """
-    if "dissent_rate" not in preds_df.columns:
+    if "dissent_rate" not in preds_df.columns or preds_df["dissent_rate"].isna().all():
         return pd.DataFrame()
+    preds_df = preds_df[preds_df["dissent_rate"].notna()]
 
+    preds_df = _scored(preds_df)
     true_col, pred_col = _label_cols(preds_df)
     rows = []
     for (exp_id, task), grp in preds_df.groupby(["experiment_id", "task"]):
-        unanimous = grp[grp["dissent_rate"] == 0.0]
-        split = grp[grp["dissent_rate"] > 0.0]
-        correct = grp[true_col] == grp[pred_col]
+        dr = pd.to_numeric(grp["dissent_rate"], errors="coerce")
+        unanimous = grp[dr == 0.0]
+        split = grp[dr > 0.0]
+        correct = grp["_correct"].astype(bool)
 
         rows.append({
             "experiment_id": exp_id,
             "task": task,
             "n": len(grp),
-            "mean_dissent_rate": round(float(grp["dissent_rate"].mean()), 4),
+            "mean_dissent_rate": round(float(dr.mean()), 4),
             "unanimous_pct": round(len(unanimous) / len(grp) * 100, 1) if len(grp) > 0 else float("nan"),
-            "accuracy_unanimous": round(float((unanimous[true_col] == unanimous[pred_col]).mean()), 4) if len(unanimous) > 0 else float("nan"),
-            "accuracy_split": round(float((split[true_col] == split[pred_col]).mean()), 4) if len(split) >= 5 else float("nan"),
+            "accuracy_unanimous": round(float(unanimous["_correct"].mean()), 4) if len(unanimous) > 0 else float("nan"),
+            "accuracy_split": round(float(split["_correct"].mean()), 4) if len(split) >= 5 else float("nan"),
             "accuracy_overall": round(float(correct.mean()), 4),
         })
 
@@ -354,37 +392,42 @@ def debate_round_analysis(preds_df: pd.DataFrame) -> pd.DataFrame:
     Use this to test Du et al.'s claim that additional rounds improve reasoning
     on hard cases and whether verdict instability correlates with miscalibration.
     """
-    if "debate_rounds_completed" not in preds_df.columns:
+    if ("debate_rounds_completed" not in preds_df.columns
+            or preds_df["debate_rounds_completed"].isna().all()):
         return pd.DataFrame()
+    preds_df = preds_df[preds_df["debate_rounds_completed"].notna()]
 
+    preds_df = _scored(preds_df)
     true_col, pred_col = _label_cols(preds_df)
     rows = []
     for (exp_id, task), grp in preds_df.groupby(["experiment_id", "task"]):
-        multi_round = grp[grp["debate_rounds_completed"] > 1]
-        if len(multi_round) == 0:
-            changed = pd.DataFrame()
-            unchanged = grp
-        else:
-            changed = grp[grp.get("debate_round_changed", pd.Series(False, index=grp.index))]
-            unchanged = grp[~grp.index.isin(changed.index)]
+        # Legacy judge-reported flag; parse real booleans ("False" from CSV is False).
+        # all_predictions.csv does not carry per-round verdicts, so this is the
+        # judge's own round_changed claim, labelled as such in the output.
+        rounds = pd.to_numeric(grp["debate_rounds_completed"], errors="coerce")
+        flags = grp["debate_round_changed"] if "debate_round_changed" in grp.columns \
+            else pd.Series([None] * len(grp), index=grp.index)
+        changed_mask = [(parse_bool(f) is True) and (r > 1) for f, r in zip(flags, rounds)]
+        changed = grp[changed_mask]
+        unchanged = grp[[not m for m in changed_mask]]
 
-        confs_all = grp["final_confidence"].values
-        correct_all = (grp[true_col] == grp[pred_col]).values.astype(float)
+        confs_all = grp["_conf"].values.astype(float)
+        correct_all = grp["_correct"].values.astype(float)
 
         def _ece_safe(subset):
             if len(subset) < 5:
                 return float("nan")
-            c = subset["final_confidence"].values
-            ok = (subset[true_col] == subset[pred_col]).values.astype(float)
-            return round(compute_ece(c, ok), 4)
+            return round(compute_ece(subset["_conf"].values.astype(float),
+                                     subset["_correct"].values.astype(float)), 4)
 
         rows.append({
             "experiment_id": exp_id,
             "task": task,
             "n": len(grp),
+            "changed_source": "judge-reported (legacy)",
             "pct_verdict_changed": round(len(changed) / len(grp) * 100, 1) if len(grp) > 0 else float("nan"),
-            "accuracy_changed": round(float((changed[true_col] == changed[pred_col]).mean()), 4) if len(changed) >= 5 else float("nan"),
-            "accuracy_unchanged": round(float((unchanged[true_col] == unchanged[pred_col]).mean()), 4) if len(unchanged) >= 5 else float("nan"),
+            "accuracy_changed": round(float(changed["_correct"].mean()), 4) if len(changed) >= 5 else float("nan"),
+            "accuracy_unchanged": round(float(unchanged["_correct"].mean()), 4) if len(unchanged) >= 5 else float("nan"),
             "ece_changed": _ece_safe(changed),
             "ece_unchanged": _ece_safe(unchanged),
             "ece_overall": round(compute_ece(confs_all, correct_all), 4),

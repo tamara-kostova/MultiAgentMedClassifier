@@ -31,7 +31,7 @@ from typing import Optional
 
 import torch
 from PIL import Image
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, PrivateAttr, ValidationError, field_validator
 from transformers import AutoModelForImageTextToText, AutoProcessor, BitsAndBytesConfig
 
 from config import DEFAULT_CONFIG, ModelConfig, RoutingConfig, resolve_torch_device
@@ -60,6 +60,10 @@ SYSTEM_PROMPT_BBOX = (_PROMPTS_DIR / "system_prompt_bbox.txt").read_text()
 # an already-closed empty thought makes generation start in the answer channel.
 NO_THINK_PREFILL = "<unused94>thought\n<unused95>"
 
+# Verification emits a small JSON object: same budget/retry scheme as the debate judge.
+VERIFY_MAX_NEW_TOKENS = 400
+VERIFY_RETRY_MAX_NEW_TOKENS = 1500
+
 
 # ── Pydantic schema matching system_prompt.txt output ────────────────────────
 
@@ -76,6 +80,13 @@ class MedicalDiagnosis(BaseModel):
     severity_score: Optional[float]
     diagnosis_confidence: float
     severity_confidence: Optional[float]
+    # True when this object is the low-confidence default returned after every
+    # parse attempt failed (not part of model_dump()).
+    _parse_failed: bool = PrivateAttr(default=False)
+
+    @property
+    def parse_failed(self) -> bool:
+        return self._parse_failed
 
     @field_validator(
         "modality", "specialized_sequence", "plane", "diagnosis_name",
@@ -117,13 +128,15 @@ class RoutingDecision(BaseModel):
         return v
 
 class VerificationResult(BaseModel):
-    agreement: bool
-    saliency_plausible: bool
-    alternative_diagnosis: Optional[str]
-    verification_confidence: float
-    reasoning: str
+    # None = no verdict (unparsable output); only an explicit False is a disagreement.
+    agreement: Optional[bool]
+    saliency_plausible: Optional[bool] = None
+    alternative_diagnosis: Optional[str] = None
+    verification_confidence: Optional[float] = None
+    reasoning: str = ""
+    parse_failed: bool = False
 
-    @field_validator("alternative_diagnosis", mode="before")
+    @field_validator("alternative_diagnosis", "agreement", "saliency_plausible", mode="before")
     @classmethod
     def normalize_null_string(cls, v):
         return _none_if_null_str(v)
@@ -131,6 +144,9 @@ class VerificationResult(BaseModel):
     @field_validator("verification_confidence", mode="before")
     @classmethod
     def clamp(cls, v):
+        v = _none_if_null_str(v)
+        if v is None:
+            return v
         return max(0.0, min(1.0, float(v)))
 
 
@@ -427,7 +443,12 @@ class MedGemmaAgent:
             initial_medgemma_dx=fmt(initial_medgemma_dx),
             sam3_medgemma_dx=fmt(sam3_medgemma_dx),
             cnn_result=fmt(cnn_result),
-            sam3_result=fmt(sam3_result),
+            sam3_result=(
+                "SAM3 ran and segmented no lesion (empty mask): no lesion was detected, "
+                "so no bounding box or overlay image is provided."
+                if sam3_result and sam3_result.get("mask_empty")
+                else fmt(sam3_result)
+            ),
             biomedclip_result=fmt(biomedclip_result),
             explainability_result=fmt(explainability_result),
             verification_result=fmt(verification_result),
@@ -453,6 +474,8 @@ class MedGemmaAgent:
                 return report, dx
         except (json.JSONDecodeError, ValueError):
             pass
+        # Caller treats final_dx=None (with a report requested) as report_parse_failed.
+        print("[MedGemmaAgent] WARNING: report STRUCTURED DIAGNOSIS parse failed.", flush=True)
         return raw, None
 
     # ── Internal helpers ──────────────────────────────────────────────────────
@@ -462,9 +485,15 @@ class MedGemmaAgent:
         image: Image.Image,
         prompt: str,
         few_shot: list[tuple[Image.Image, str]] | None = None,
+        sampling: dict | None = None,
     ) -> MedicalDiagnosis:
-        """Run a diagnostic prompt and parse the JSON output with retries."""
-        raw = self._generate(image, prompt, few_shot=few_shot)
+        """Run a diagnostic prompt and parse the JSON output with retries.
+
+        `sampling` ({temperature, top_p, seed}) is forwarded to _generate; None keeps
+        greedy decoding.
+        """
+        sampling = sampling or {}
+        raw = self._generate(image, prompt, few_shot=few_shot, **sampling)
         for attempt in range(self.routing_cfg.max_parse_retries):
             try:
                 return self._parse_diagnosis(raw)
@@ -474,12 +503,14 @@ class MedGemmaAgent:
                         f"Your previous output was not valid JSON: {raw[:200]}\n"
                         f"Error: {e}\nOutput ONLY valid JSON matching the schema."
                     )
-                    raw = self._generate(image, prompt + "\n" + fix, few_shot=few_shot)
+                    raw = self._generate(
+                        image, prompt + "\n" + fix, few_shot=few_shot, **sampling
+                    )
                 else:
                     print(
                         f"[MedGemmaAgent] JSON parse failed after {self.routing_cfg.max_parse_retries} attempts. \n Raw output: {raw}\n Error: {e}\n Returning default diagnosis with low confidence."
                     )
-                    return MedicalDiagnosis(
+                    dx = MedicalDiagnosis(
                         modality=None,
                         specialized_sequence=None,
                         plane=None,
@@ -490,6 +521,8 @@ class MedGemmaAgent:
                         diagnosis_confidence=0.5,
                         severity_confidence=None,
                     )
+                    dx._parse_failed = True
+                    return dx
 
     def _get_few_shot_examples(
         self, task: str | None
@@ -519,7 +552,12 @@ class MedGemmaAgent:
         max_new_tokens: int = 2048,
         few_shot: list[tuple[Image.Image, str]] | None = None,
         prefill: str | None = None,
+        temperature: float = 0.0,
+        top_p: float = 1.0,
+        seed: int | None = None,
     ) -> str:
+        """temperature=0 is greedy decoding (the published default); >0 samples
+        with `top_p`, seeding torch's RNG with `seed` first for reproducibility."""
         images = image if isinstance(image, list) else [image]
         messages = []
         if few_shot:
@@ -566,12 +604,17 @@ class MedGemmaAgent:
             )
         inputs = self._move_inputs_to_model_device(inputs)
 
+        if temperature and temperature > 0:
+            if seed is not None:
+                torch.manual_seed(int(seed))
+            decode_kwargs = {"do_sample": True, "temperature": float(temperature), "top_p": float(top_p)}
+        else:
+            decode_kwargs = {"do_sample": False, "temperature": 1.0}
         with torch.no_grad():
             output_ids = self.model.generate(
                 **inputs,
                 max_new_tokens=max_new_tokens,
-                do_sample=False,
-                temperature=1.0,
+                **decode_kwargs,
                 pad_token_id=self.model.generation_config.pad_token_id,
             )
 
@@ -621,14 +664,26 @@ class MedGemmaAgent:
             raise json.JSONDecodeError("No JSON object found", text, 0)
         return parsed_objects[-1]
 
-    def diagnose_with_role(self, image_path: str, role_prompt: str) -> MedicalDiagnosis:
+    def diagnose_with_role(
+        self,
+        image_path: str,
+        role_prompt: str,
+        temperature: float = 0.0,
+        top_p: float = 1.0,
+        seed: int | None = None,
+    ) -> MedicalDiagnosis:
         """
         Run a role-specific prompt against the image and parse a MedicalDiagnosis.
         Used by AgentForest to run N role-specialized instances.
         The role_prompt is a complete prompt (role prefix + JSON schema).
+        temperature=0 (default) is greedy; >0 samples (homogeneous-forest control).
         """
         image = Image.open(image_path).convert("RGB")
-        return self._run_diagnostic_prompt(image, role_prompt)
+        sampling = (
+            {"temperature": temperature, "top_p": top_p, "seed": seed}
+            if temperature and temperature > 0 else None
+        )
+        return self._run_diagnostic_prompt(image, role_prompt, sampling=sampling)
 
     def generate_for_prompt(
         self,
@@ -660,49 +715,39 @@ class MedGemmaAgent:
         """
         prompt = VERIFICATION_PROMPT_TEMPLATE.format(
             task=cnn_result.get("task", "unknown"),
-            predicted_class=cnn_result["predicted_class"],
-            confidence=cnn_result["confidence"],
+            predicted_class=cnn_result.get("predicted_class", "unknown"),
+            confidence=float(cnn_result.get("confidence") or 0.0),
             temperature=cnn_result.get("temperature", 1.0),
         )
 
-        original  = Image.open(original_image_path).convert("RGB")
-        saliency  = Image.open(saliency_image_path).convert("RGB")
+        original = Image.open(original_image_path).convert("RGB")
+        saliency = Image.open(saliency_image_path).convert("RGB")
 
-        # Two-image turn: original scan + saliency overlay
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image",  "image": original},
-                    {"type": "image",  "image": saliency},
-                    {"type": "text",   "text": prompt},
-                ],
-            }
-        ]
-        inputs = self.processor.apply_chat_template(
-            messages, add_generation_prompt=True,
-            tokenize=True, return_dict=True, return_tensors="pt",
+        # Same scheme as the debate judge: skip the hidden thought block first, then
+        # retry once without the prefill and with room for a full thought + JSON.
+        attempts = (
+            (NO_THINK_PREFILL, VERIFY_MAX_NEW_TOKENS),
+            (None, VERIFY_RETRY_MAX_NEW_TOKENS),
         )
-        inputs = self._move_inputs_to_model_device(inputs)
-
-        with torch.no_grad():
-            output_ids = self.model.generate(
-                **inputs,
-                max_new_tokens=300,
-                do_sample=False,
-                temperature=1.0,
-                pad_token_id=self.model.generation_config.pad_token_id,
-            )
-
-        n_input   = inputs["input_ids"].shape[-1]
-        raw       = self.processor.decode(output_ids[0][n_input:], skip_special_tokens=True).strip()
-        try:
-            payload = self._extract_json_object(raw)
-        except json.JSONDecodeError:
-            # Verification failed to parse — treat as non-committal agreement
-            return VerificationResult(
-                agreement=True, saliency_plausible=True,
-                alternative_diagnosis=None, verification_confidence=0.5,
-                reasoning="Verification parse failed — defaulting to CNN prediction.",
-            )
-        return VerificationResult(**payload)
+        raw = ""
+        for prefill, budget in attempts:
+            try:
+                raw = self._generate(
+                    [original, saliency], prompt, max_new_tokens=budget, prefill=prefill
+                )
+                result = VerificationResult(**self._extract_json_object(raw))
+                if result.agreement is None:
+                    raise ValueError("missing 'agreement'")
+                return result
+            except (json.JSONDecodeError, ValidationError, ValueError, TypeError) as exc:
+                print(
+                    f"[MedGemmaAgent] WARNING: verification parse failed "
+                    f"(prefill={prefill is not None}): {exc}; raw={raw[:200]!r}",
+                    flush=True,
+                )
+        return VerificationResult(
+            agreement=None, saliency_plausible=None,
+            alternative_diagnosis=None, verification_confidence=None,
+            reasoning="Verification parse failed — no verdict.",
+            parse_failed=True,
+        )

@@ -8,6 +8,14 @@ Usage:
     python eval/eval_analysis.py --jsonl outputs/eval/stroke_dataset_eval.jsonl
     python eval/eval_analysis.py --jsonl outputs/eval/binary_tumor_tumor_eval.jsonl
     python eval/eval_analysis.py --jsonl outputs/eval/multiclass_tumor_tumor_eval.jsonl
+    python eval/eval_analysis.py --jsonl ... --abstain drop   # reproduce pre-2026-10 tables
+
+Conventions (shared with paired_system_comparison): JSONLs load through
+eval.jsonl_io (last non-error row per image; error-only images scored wrong);
+abstentions count as WRONG by default (--abstain wrong|drop; n and n_abstained are
+always reported); ECE from eval.metrics (first bin [0, 0.1]); forest votes are
+recomputed from canonical ballots (eval.forest_votes); debate "verdict changed"
+prefers per-round verdicts over the judge's self-report.
 
 Outputs (outputs/analysis/<stem>/)
 ────────────────────────────────────
@@ -21,6 +29,7 @@ CSVs:
   forest_voting_quality.csv       (forest runs only)
   forest_agent_accuracy.csv       (forest runs only)
   debate_round_analysis.csv       (debate runs only)
+  load_summary.csv                (rows / duplicates / unparsable / error-only / parse failures)
 Plots:
   model_accuracy.png
   confusion_matrices.png
@@ -49,49 +58,28 @@ from sklearn.metrics import (
     recall_score,
 )
 
+import sys as _sys
+from pathlib import Path as _Path
+
+if __package__ in (None, ""):  # run as `python eval/<script>.py`: make `eval` importable
+    _sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))
+
 # ── label normalization ────────────────────────────────────────────────────────
-
-_TUMOR_SUBTYPES = (
-    "carcinoma", "germinoma", "glioma", "granuloma", "medulloblastoma",
-    "meningioma", "neurocytoma", "papilloma", "schwannoma", "tuberculoma",
+# canonical_label lives in eval/labels.py (single source of truth); re-exported
+# here because paper scripts import it as eval.eval_analysis.canonical_label.
+from eval.labels import (  # noqa: E402,F401
+    MS_TOKENS as _MS_TOKENS,
+    STROKE_TOKENS as _STROKE_TOKENS,
+    TUMOR_SUBTYPES as _TUMOR_SUBTYPES,
+    canonical_label,
 )
-_STROKE_TOKENS = ("stroke", "ischemic", "ischemia", "hemorrhag", "bleeding", "infarct")
-# MedGemma names MS lesions descriptively rather than using the disease name, e.g.
-# "demyelinating plaque", "periventricular white matter lesion". On a FLAIR MS
-# benchmark these are MS assertions, so they must canonicalize to "ms" or strict
-# scoring counts them as negatives.
-_MS_TOKENS = ("multiple sclerosis", "demyelinat", "white matter lesion", "white matter plaque")
+from eval.forest_votes import ballots as forest_ballots  # noqa: E402
+from eval.jsonl_io import ERROR_FLAG, load_df  # noqa: E402
+from eval.metrics import calibration_bins, check_ece_bound, compute_ece, parse_bool  # noqa: E402,F401
 
-
-def canonical_label(value: object, task: str | None = None) -> str:
-    text = str(value or "").strip().lower()
-    if not text or text in ("none", "null", "nan"):
-        return ""
-    n = (text.replace("_", " ").replace("-", " ")
-              .replace("/", " ").replace("tumour", "tumor"))
-    # "abnormal" / "other abnormalities" contains the substring "normal" — catch it
-    # first, or an abnormality assertion is scored as a normal read. Kept in sync
-    # with eval.tumor_eval.canonical_label.
-    if "abnormal" in n:
-        return "abnormal"
-    if "normal" in n or "control" in n:
-        return "normal"
-    if n == "ms" or n.startswith("ms ") or any(tok in n for tok in _MS_TOKENS):
-        return "ms"
-    if any(tok in n for tok in _STROKE_TOKENS):
-        return "stroke"
-    subtype = next((s for s in _TUMOR_SUBTYPES if s in n), None)
-    tumorish = (subtype is not None or "pituitary" in n or "brain tumor" in n
-                or n == "tumor" or " tumor" in n)
-    if task == "binary_tumor" and tumorish:
-        return "tumor"
-    if "pituitary" in n:
-        return "pituitary_tumor"
-    if subtype:
-        return subtype
-    if tumorish:
-        return "tumor"
-    return n
+# Sentinel prediction for an image whose every logged attempt errored. Always
+# scored wrong (under both --abstain modes) and counted separately.
+ERROR_PRED = "error"
 
 
 def is_multiclass(task: str) -> bool:
@@ -122,12 +110,42 @@ def set_scoring(mode: str) -> None:
     SCORING = mode
 
 
+# Abstention convention. An abstention is an empty / unparseable / "null"
+# prediction (prep -> "unknown").
+#   "wrong" — (default, and what paired_system_comparison and the paper's
+#             tab:comparison use) the row stays in n and counts as incorrect:
+#             a miss for its true class (FN for a positive, FP-side miss for a normal).
+#   "drop"  — the row is removed from the denominator (the old eval_analysis
+#             behaviour; kept for reproducing earlier tables).
+# Image paths whose every attempt errored are always scored wrong, in both modes.
+ABSTAIN_MODES = ("wrong", "drop")
+ABSTAIN = "wrong"
+
+
+def set_abstain(mode: str) -> None:
+    if mode not in ABSTAIN_MODES:
+        raise ValueError(f"abstain must be one of {ABSTAIN_MODES}, got {mode!r}")
+    global ABSTAIN
+    ABSTAIN = mode
+
+
+def _keep(true: str, pred: str) -> bool:
+    """Row enters the denominator? Unknown ground truth never does."""
+    if true in ("", "unknown"):
+        return False
+    if pred in ("", "unknown"):
+        return ABSTAIN == "wrong"
+    return True
+
+
 def prep(label: str, task: str, scoring: str | None = None) -> str:
     """Normalize for comparison. Multiclass: keep subtype. Binary: collapse to (pos|normal|unknown).
 
-    "unknown" marks an abstention (empty label / parse failure / "null" sentinel) and
-    is excluded from binary metrics rather than being scored as a prediction.
+    "unknown" marks an abstention (empty label / parse failure / "null" sentinel).
+    How it is scored is decided by ABSTAIN (see set_abstain), not here.
     """
+    if label == ERROR_PRED:
+        return ERROR_PRED
     if is_multiclass(task):
         cl = canonical_label(label, task)
         return cl if cl else "unknown"
@@ -157,24 +175,37 @@ def mg_diag_pred(diag: object, task: str) -> str:
 
 
 def mg_conf(diag: object) -> float:
+    """MedGemma confidence; only a missing/non-numeric value becomes 0.5 (0.0 stays 0.0)."""
     if not isinstance(diag, dict):
         return 0.5
     v = diag.get("diagnosis_confidence")
-    return float(v) if v is not None else 0.5
+    try:
+        return float(v) if v is not None else 0.5
+    except (TypeError, ValueError):
+        return 0.5
 
 
 # ── loader ─────────────────────────────────────────────────────────────────────
 
+# Optional columns written by newer tumor_eval.py versions. Older JSONLs lack them;
+# every section must tolerate their absence.
+_OPTIONAL_COLS = ("forest_votes", "dissent_rate", "vote_fraction", "debate_rounds_completed",
+                  "debate_round_changed", "debate_round_verdicts", "run_config",
+                  "confidence_penalty_factor", "biomedclip_top_label", "biomedclip_top_score",
+                  "cnn_predicted_class", "cnn_confidence", "final_confidence",
+                  "latency_s", "routing_path", "predicted_class", "true_label_name", "true_label")
+
+
 def load(path: str) -> pd.DataFrame:
-    rows = []
-    with open(path, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                rows.append(json.loads(line))
-    df = pd.DataFrame(rows)
+    """Load an eval JSONL through eval.jsonl_io (dedupe: last non-error row per image)."""
+    df, _stats = load_df(path)
+    for col in _OPTIONAL_COLS:
+        if col not in df.columns:
+            df[col] = None
 
     for col in ("medgemma_diagnosis", "final_medgemma_diagnosis"):
+        if col not in df.columns:
+            df[col] = None
         df[col] = df[col].apply(lambda x: x if isinstance(x, dict) else {})
 
     # Older JSONL files (binary/multiclass tumor) omit canonical columns — compute them.
@@ -194,79 +225,93 @@ def load(path: str) -> pd.DataFrame:
     return df
 
 
+def parse_failure_counts(df: pd.DataFrame) -> dict[str, int]:
+    """Count True values of every *_parse_failed column (newer JSONLs only)."""
+    out = {}
+    for col in sorted(c for c in df.columns if c.endswith("_parse_failed")):
+        out[col] = int(sum(parse_bool(v) is True for v in df[col]))
+    return out
+
+
 # ── metric helpers ─────────────────────────────────────────────────────────────
 
+def _abstain_counts(pairs) -> tuple[int, int]:
+    n_abst = sum(1 for _, p in pairs if p in ("", "unknown"))
+    n_err = sum(1 for _, p in pairs if p == ERROR_PRED)
+    return n_abst, n_err
+
+
 def binary_metrics_row(y_true: list, y_pred: list, pos: str, name: str) -> dict | None:
+    """Binary metrics over rows with known ground truth.
+
+    Abstentions follow ABSTAIN: under "wrong" they stay in n as a miss for their
+    true class (lower sensitivity for a positive, lower specificity for a normal),
+    exactly like paired_system_comparison.sens_spec. Error-only rows are always misses.
+    tn/fp/fn/tp count actual normal/pos predictions only.
+    """
     valid = [(t, p) for t, p in zip(y_true, y_pred)
-             if t in (pos, "normal") and p in (pos, "normal")]
+             if t in (pos, "normal") and _keep(t, p)]
     if not valid:
         return None
-    yt, yp = zip(*valid)
-    cm = confusion_matrix(list(yt), list(yp), labels=["normal", pos])
-    tn, fp, fn, tp_ = cm.ravel()
+    yt = [t for t, _ in valid]
+    yp = [p for _, p in valid]
+    tp_ = sum(1 for t, p in valid if t == pos and p == pos)
+    fn = sum(1 for t, p in valid if t == pos and p == "normal")
+    tn = sum(1 for t, p in valid if t == "normal" and p == "normal")
+    fp = sum(1 for t, p in valid if t == "normal" and p == pos)
+    n_pos = sum(1 for t in yt if t == pos)
+    n_neg = len(yt) - n_pos
+    # abstentions are always reported, also under --abstain drop (where they are not in n)
+    n_abst, n_err = _abstain_counts(
+        [(t, p) for t, p in zip(y_true, y_pred) if t in (pos, "normal")])
     return {
         "model":       name,
         "n":           len(yt),
-        "accuracy":    round(accuracy_score(list(yt), list(yp)), 4),
-        "f1_macro":    round(f1_score(list(yt), list(yp), average="macro", zero_division=0), 4),
-        "sensitivity": round(tp_ / (tp_ + fn) if (tp_ + fn) else float("nan"), 4),
-        "specificity": round(tn  / (tn  + fp) if (tn  + fp) else float("nan"), 4),
-        "precision":   round(precision_score(list(yt), list(yp), pos_label=pos, zero_division=0), 4),
+        "n_abstained": n_abst,
+        "n_error":     n_err,
+        "accuracy":    round(sum(t == p for t, p in valid) / len(valid), 4),
+        "f1_macro":    round(f1_score(yt, yp, labels=["normal", pos], average="macro",
+                                      zero_division=0), 4),
+        "sensitivity": round(tp_ / n_pos if n_pos else float("nan"), 4),
+        "specificity": round(tn / n_neg if n_neg else float("nan"), 4),
+        "precision":   round(tp_ / (tp_ + fp) if (tp_ + fp) else 0.0, 4),
         "tn": int(tn), "fp": int(fp), "fn": int(fn), "tp": int(tp_),
     }
 
 
 def multiclass_metrics_row(y_true: list, y_pred: list, name: str) -> dict | None:
-    valid = [(t, p) for t, p in zip(y_true, y_pred)
-             if t not in ("", "unknown") and p not in ("", "unknown")]
+    valid = [(t, p) for t, p in zip(y_true, y_pred) if _keep(t, p)]
     if not valid:
         return None
-    yt, yp = zip(*valid)
-    classes = sorted(set(list(yt) + list(yp)))
+    yt = [t for t, _ in valid]
+    yp = [p for _, p in valid]
+    real = {p for p in yp if p not in ("", "unknown", ERROR_PRED)}
+    classes = sorted(set(yt) | real)
     per_class = {}
     for cls in classes:
-        tp_ = sum(1 for t, p in zip(yt, yp) if t == cls and p == cls)
-        fn_ = sum(1 for t, p in zip(yt, yp) if t == cls and p != cls)
-        fp_ = sum(1 for t, p in zip(yt, yp) if t != cls and p == cls)
+        tp_ = sum(1 for t, p in valid if t == cls and p == cls)
+        fn_ = sum(1 for t, p in valid if t == cls and p != cls)
+        fp_ = sum(1 for t, p in valid if t != cls and p == cls)
         rec = tp_ / (tp_ + fn_) if (tp_ + fn_) else float("nan")
         pre = tp_ / (tp_ + fp_) if (tp_ + fp_) else float("nan")
         per_class[f"recall_{cls}"]    = round(rec, 4)
         per_class[f"precision_{cls}"] = round(pre, 4)
+    n_abst, n_err = _abstain_counts(
+        [(t, p) for t, p in zip(y_true, y_pred) if t not in ("", "unknown")])
     return {
         "model":       name,
         "n":           len(yt),
-        "accuracy":    round(accuracy_score(list(yt), list(yp)), 4),
-        "f1_macro":    round(f1_score(list(yt), list(yp), average="macro",     zero_division=0), 4),
-        "f1_weighted": round(f1_score(list(yt), list(yp), average="weighted",  zero_division=0), 4),
+        "n_abstained": n_abst,
+        "n_error":     n_err,
+        "accuracy":    round(sum(t == p for t, p in valid) / len(valid), 4),
+        "f1_macro":    round(f1_score(yt, yp, labels=classes, average="macro",    zero_division=0), 4),
+        "f1_weighted": round(f1_score(yt, yp, labels=classes, average="weighted", zero_division=0), 4),
         **per_class,
     }
 
 
-def compute_ece(confs: np.ndarray, correct: np.ndarray, n_bins: int = 10) -> float:
-    edges = np.linspace(0, 1, n_bins + 1)
-    n = len(confs)
-    ece = 0.0
-    for lo, hi in zip(edges[:-1], edges[1:]):
-        m = (confs > lo) & (confs <= hi)
-        if m.sum():
-            ece += (m.sum() / n) * abs(confs[m].mean() - correct[m].mean())
-    return float(ece)
-
-
 def calibration_bins_df(confs: np.ndarray, correct: np.ndarray, n_bins: int = 10) -> pd.DataFrame:
-    edges = np.linspace(0, 1, n_bins + 1)
-    rows = []
-    for lo, hi in zip(edges[:-1], edges[1:]):
-        m = (confs > lo) & (confs <= hi)
-        n = int(m.sum())
-        rows.append({
-            "bin_lo":    round(lo, 2),
-            "bin_hi":    round(hi, 2),
-            "n":         n,
-            "mean_conf": round(float(confs[m].mean()), 4) if n else float("nan"),
-            "mean_acc":  round(float(correct[m].mean()), 4) if n else float("nan"),
-        })
-    return pd.DataFrame(rows)
+    return pd.DataFrame(calibration_bins(confs, correct, n_bins))
 
 
 # ── prediction builder ─────────────────────────────────────────────────────────
@@ -279,18 +324,35 @@ def build_model_preds(
     Binary tasks: predictions are binarized to (pos | normal | unknown).
     Multiclass:   predictions are canonical subtype labels.
     """
+    err = (df[ERROR_FLAG].fillna(False).astype(bool).tolist()
+           if ERROR_FLAG in df.columns else [False] * len(df))
+
+    def _mask_err(preds: list) -> list:
+        return [ERROR_PRED if e else p for p, e in zip(preds, err)]
+
     def _prep_col(col: str) -> list:
         return [prep(str(v or ""), task, scoring) for v in df[col].fillna("")]
 
-    return {
+    def _one_conf(v) -> float:
+        # Only a missing/non-numeric value becomes 0.5; a logged 0.0 stays 0.0.
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return 0.5
+        return 0.5 if np.isnan(f) else f
+
+    def _conf_col(col: str) -> list:
+        return [_one_conf(v) for v in df[col].tolist()]
+
+    raw = {
         "cnn": (
             _prep_col("cnn_predicted_class_canonical"),
-            df["cnn_confidence"].fillna(0.5).tolist(),
+            _conf_col("cnn_confidence"),
         ),
         "biomedclip": (
             [prep(canonical_label(str(v or ""), task), task, scoring)
              for v in df["biomedclip_top_label"].fillna("")],
-            df["biomedclip_top_score"].fillna(0.5).tolist(),
+            _conf_col("biomedclip_top_score"),
         ),
         "medgemma_initial": (
             [prep(mg_diag_pred(d, task), task, scoring) for d in df["medgemma_diagnosis"]],
@@ -302,9 +364,10 @@ def build_model_preds(
         ),
         "pipeline_final": (
             _prep_col("predicted_class_canonical"),
-            df["final_confidence"].fillna(0.5).tolist(),
+            _conf_col("final_confidence"),
         ),
     }
+    return {name: (_mask_err(p), c) for name, (p, c) in raw.items()}
 
 
 # ── sections ───────────────────────────────────────────────────────────────────
@@ -331,7 +394,7 @@ def section_model_accuracy(df: pd.DataFrame, task: str) -> pd.DataFrame:
         if not row:
             continue
         row["scoring"] = "multiclass" if multi else SCORING
-        row["n_abstained"] = int(sum(p == "unknown" for p in preds))
+        row["abstain"] = ABSTAIN
         if alt:
             alt_row = binary_metrics_row(alt_gt, alt_preds[name], pos, name)
             if alt_row:
@@ -353,17 +416,23 @@ def section_confusion_matrices(df: pd.DataFrame, task: str) -> dict[str, pd.Data
     for name, (preds, _) in build_model_preds(df, task).items():
         if name == "biomedclip":
             continue
-        valid = [(t, p) for t, p in zip(gt, preds)
-                 if t in valid_labels and p in valid_labels]
+        valid = [(t, p if p not in ("",) else "unknown") for t, p in zip(gt, preds)
+                 if t in valid_labels and _keep(t, p)]
         if not valid:
             continue
         yt, yp = zip(*valid)
-        pred_labels = sorted(set(list(yt) + list(yp)))
-        cm = confusion_matrix(list(yt), list(yp), labels=pred_labels)
+        # Rows: ground-truth classes. Columns: the same classes in the same order
+        # (so the diagonal is the hits), then any off-label predictions and, under
+        # --abstain wrong, "unknown"/"error" columns.
+        row_labels = sorted(set(yt))
+        extra = sorted(set(yp) - set(row_labels))
+        col_labels = row_labels + extra
+        cm = pd.crosstab(pd.Series(yt, name="t"), pd.Series(yp, name="p"))
+        cm = cm.reindex(index=row_labels, columns=col_labels, fill_value=0)
         result[name] = pd.DataFrame(
-            cm,
-            index=[f"true_{l}" for l in pred_labels],
-            columns=[f"pred_{l}" for l in pred_labels],
+            cm.values,
+            index=[f"true_{l}" for l in row_labels],
+            columns=[f"pred_{l}" for l in col_labels],
         )
     return result
 
@@ -374,7 +443,7 @@ def section_medgemma_shift(df: pd.DataFrame, task: str) -> pd.DataFrame:
     fin  = [prep(mg_diag_pred(d, task), task) for d in df["final_medgemma_diagnosis"]]
     rows = []
     for g, i, f in zip(gt, init, fin):
-        if not g or g == "unknown" or not i or i == "unknown" or not f or f == "unknown":
+        if not _keep(g, i) or not _keep(g, f):
             continue
         rows.append({
             "true":         g,
@@ -389,6 +458,33 @@ def section_medgemma_shift(df: pd.DataFrame, task: str) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+_CONF_SOURCE = {"cnn": "cnn_confidence", "biomedclip": "biomedclip_top_score",
+                "pipeline_final": "final_confidence",
+                "medgemma_initial": "medgemma_diagnosis", "medgemma_final": "final_medgemma_diagnosis"}
+
+
+def _n_conf_substituted(df: pd.DataFrame, name: str, mask: list[bool]) -> int:
+    """Rows (among mask) whose confidence was missing and replaced by 0.5.
+
+    E.g. debate rows whose judge failed to parse log final_confidence=None.
+    """
+    col = _CONF_SOURCE.get(name)
+    if col is None or col not in df.columns:
+        return 0
+    n = 0
+    for v, m in zip(df[col].tolist(), mask):
+        if not m:
+            continue
+        if isinstance(v, dict):
+            v = v.get("diagnosis_confidence")
+        try:
+            missing = v is None or np.isnan(float(v))
+        except (TypeError, ValueError):
+            missing = True
+        n += int(missing)
+    return n
+
+
 def section_calibration(df: pd.DataFrame, task: str) -> tuple[pd.DataFrame, dict]:
     gt       = [prep(str(v or ""), task) for v in df["true_label_canonical"].fillna("")]
     valid_gt = set(gt) - {"", "unknown"}
@@ -396,17 +492,22 @@ def section_calibration(df: pd.DataFrame, task: str) -> tuple[pd.DataFrame, dict
 
     for name, (preds, confs) in build_model_preds(df, task).items():
         valid = [(g, p, c) for g, p, c in zip(gt, preds, confs)
-                 if g in valid_gt and p in valid_gt]
+                 if g in valid_gt and _keep(g, p)]
         if not valid:
             continue
         yt, yp, yc = zip(*valid)
         correct   = np.array([int(t == p) for t, p in zip(yt, yp)], dtype=float)
         confs_arr = np.clip(np.array(yc, dtype=float), 0, 1)
-        ece = compute_ece(confs_arr, correct)
+        ece = check_ece_bound(confs_arr, correct)
         bins_dict[name] = calibration_bins_df(confs_arr, correct)
         summary_rows.append({
             "model":          name,
             "n":              len(yt),
+            "n_abstained":    sum(1 for g, p in zip(gt, preds)
+                                  if g in valid_gt and p in ("", "unknown")),
+            "abstain":        ABSTAIN,
+            "n_conf_substituted": _n_conf_substituted(
+                df, name, [g in valid_gt and _keep(g, p) for g, p in zip(gt, preds)]),
             "ece":            round(ece, 4),
             "mean_conf":      round(float(confs_arr.mean()), 4),
             "mean_acc":       round(float(correct.mean()), 4),
@@ -438,72 +539,122 @@ def section_latency(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _row_correct(df: pd.DataFrame, task: str, col: str = "predicted_class_canonical") -> tuple[np.ndarray, np.ndarray]:
+    """(correct, keep) arrays for a prediction column under the current ABSTAIN mode."""
+    gt = [prep(str(v or ""), task) for v in df["true_label_canonical"].fillna("")]
+    pr = [prep(str(v or ""), task) for v in df[col].fillna("")]
+    if ERROR_FLAG in df.columns:
+        pr = [ERROR_PRED if e else p for p, e in zip(pr, df[ERROR_FLAG].fillna(False))]
+    keep = np.array([_keep(t, p) for t, p in zip(gt, pr)], dtype=bool)
+    correct = np.array([int(t == p) for t, p in zip(gt, pr)], dtype=float)
+    return correct, keep
+
+
+def _has_votes(v) -> bool:
+    return isinstance(v, list) and len(v) > 0
+
+
 def section_forest_voting(df: pd.DataFrame, task: str) -> pd.DataFrame:
     """
     Agent Forest voting quality — dissent rate vs. accuracy.
 
-    Empty unless the JSONL carries a `dissent_rate` column (i.e. it was produced by
-    `--pipeline_mode forest`). Shows whether agent disagreement flags harder cases:
-    accuracy on unanimous vs. split votes.
+    Empty unless the JSONL is a forest run. When per-agent ballots (`forest_votes`)
+    are logged, dissent and vote_fraction are RECOMPUTED from canonical ballots
+    (eval.forest_votes): the stored values of older multiclass runs were computed
+    over the raw diagnosis_name and do not match the ballots. Accuracy columns are
+    the final pipeline prediction; triage_accuracy_* score the recomputed vote.
     """
-    if "dissent_rate" not in df.columns or df["dissent_rate"].isna().all():
+    from eval.forest_votes import forest_vote
+
+    has_votes = "forest_votes" in df.columns and df["forest_votes"].apply(_has_votes).any()
+    has_stored = "dissent_rate" in df.columns and df["dissent_rate"].notna().any()
+    if not has_votes and not has_stored:
         return pd.DataFrame()
-    sub = df[df["dissent_rate"].notna()].copy()
-    gt = [prep(str(v or ""), task) for v in sub["true_label_canonical"].fillna("")]
-    pr = [prep(str(v or ""), task) for v in sub["predicted_class_canonical"].fillna("")]
-    correct = np.array([int(t == p) for t, p in zip(gt, pr)], dtype=float)
-    dissent = sub["dissent_rate"].astype(float).values
-    unan, split = dissent == 0.0, dissent > 0.0
 
-    def _acc(mask, min_n=1):
-        return round(float(correct[mask].mean()), 4) if mask.sum() >= min_n else float("nan")
+    if has_votes:
+        sub = df[df["forest_votes"].apply(_has_votes)].copy()
+        fv = [forest_vote(v, task) for v in sub["forest_votes"]]
+        sub["_vote_label"] = [f["label"] for f in fv]
+        dissent = np.array([1.0 - f["vote_fraction"] for f in fv], dtype=float)
+        source = "recomputed_from_ballots"
+        stored = pd.to_numeric(sub["vote_fraction"], errors="coerce").values
+        n_mismatch = int(np.sum(~np.isnan(stored) & (np.abs(stored - (1 - dissent)) > 1e-9)))
+    else:
+        sub = df[df["dissent_rate"].notna()].copy()
+        dissent = pd.to_numeric(sub["dissent_rate"], errors="coerce").astype(float).values
+        source = "stored"
+        n_mismatch = float("nan")
 
-    return pd.DataFrame([{
-        "n": len(sub),
-        "mean_dissent_rate": round(float(dissent.mean()), 4),
-        "unanimous_pct": round(float(unan.mean()) * 100, 1),
-        "accuracy_unanimous": _acc(unan),
-        "accuracy_split": _acc(split, min_n=5),
-        "accuracy_overall": round(float(correct.mean()), 4),
-    }])
+    correct, keep = _row_correct(sub, task)
+    correct, d = correct[keep], dissent[keep]
+    unan, split = d == 0.0, d > 0.0
+
+    def _acc(c, mask, min_n=1):
+        return round(float(c[mask].mean()), 4) if mask.sum() >= min_n else float("nan")
+
+    row = {
+        "n": int(keep.sum()),
+        "dissent_source": source,
+        "n_stored_vote_fraction_mismatch": n_mismatch,
+        "mean_dissent_rate": round(float(d.mean()), 4) if len(d) else float("nan"),
+        "unanimous_pct": round(float(unan.mean()) * 100, 1) if len(d) else float("nan"),
+        "accuracy_unanimous": _acc(correct, unan),
+        "accuracy_split": _acc(correct, split, min_n=5),
+        "accuracy_overall": round(float(correct.mean()), 4) if len(correct) else float("nan"),
+    }
+    if has_votes:
+        tc, tk = _row_correct(sub, task, "_vote_label")
+        tc, td = tc[tk], dissent[tk]
+        row.update({
+            "triage_n": int(tk.sum()),
+            "triage_accuracy_unanimous": _acc(tc, td == 0.0),
+            "triage_accuracy_split": _acc(tc, td > 0.0, min_n=5),
+            "triage_accuracy_overall": round(float(tc.mean()), 4) if len(tc) else float("nan"),
+        })
+    return pd.DataFrame([row])
 
 
 def section_forest_agent_accuracy(df: pd.DataFrame, task: str) -> pd.DataFrame:
     """
-    Agent Forest — per-role accuracy breakdown.
+    Agent Forest — per-agent accuracy breakdown.
 
-    Empty unless the JSONL carries a `forest_votes` column (i.e. it was produced by
-    `--pipeline_mode forest`). Each role's own vote is scored against ground truth
-    the same way medgemma_initial/medgemma_final are scored (binary_metrics_row /
-    multiclass_metrics_row), so roles are directly comparable to the rest of the
-    model_accuracy table.
+    Empty unless the JSONL carries `forest_votes`. Agents are keyed by agent_idx
+    (or list position), never by role, since homogeneous forests repeat roles; the
+    row is named by its role when roles are unique, else "<role>#<agent>". Ballots
+    use eval.forest_votes.ballot_label (multiclass: diagnosis_detailed, falling
+    back to diagnosis_name) and are scored like the rest of model_accuracy.
     """
     if "forest_votes" not in df.columns:
         return pd.DataFrame()
-    sub = df[df["forest_votes"].apply(lambda v: isinstance(v, list) and len(v) > 0)]
+    sub = df[df["forest_votes"].apply(_has_votes)]
     if sub.empty:
         return pd.DataFrame()
 
     multi = is_multiclass(task)
     pos = pos_class(task)
-    field = "diagnosis_detailed" if multi else "diagnosis_name"
 
     gt_list = [prep(str(v or ""), task) for v in sub["true_label_canonical"].fillna("")]
-    votes_list = sub["forest_votes"].tolist()
-    roles = sorted({v.get("role") for votes in votes_list for v in votes if v.get("role")})
+    ballot_list = [{b["agent"]: b for b in forest_ballots(v, task)} for v in sub["forest_votes"]]
+    agents = sorted({a for bl in ballot_list for a in bl})
+    role_of = {}
+    for bl in ballot_list:
+        for a, b in bl.items():
+            role_of.setdefault(a, b["role"])
+    unique_roles = len(set(role_of.values())) == len(role_of)
 
     rows = []
-    for role in roles:
+    for agent in agents:
+        name = role_of[agent] if unique_roles else f"{role_of[agent]}#{agent}"
         preds, confs = [], []
-        for votes in votes_list:
-            v = next((x for x in votes if x.get("role") == role), None)
-            raw = (v.get(field) if v else None) or ""
-            preds.append(prep(canonical_label(str(raw), task), task))
-            confs.append(v.get("diagnosis_confidence") if v else None)
-        row = (multiclass_metrics_row(gt_list, preds, role) if multi
-               else binary_metrics_row(gt_list, preds, pos, role))
+        for bl in ballot_list:
+            b = bl.get(agent)
+            preds.append(prep(b["label"], task) if b else "unknown")
+            confs.append(b["conf"] if b else None)
+        row = (multiclass_metrics_row(gt_list, preds, name) if multi
+               else binary_metrics_row(gt_list, preds, pos, name))
         if row:
             valid_confs = [c for c in confs if c is not None]
+            row["agent"] = agent
             row["mean_conf"] = (
                 round(sum(valid_confs) / len(valid_confs), 4) if valid_confs else float("nan")
             )
@@ -511,22 +662,59 @@ def section_forest_agent_accuracy(df: pd.DataFrame, task: str) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _verdict_label(verdict: object, task: str) -> str:
+    """Canonical label of one judge verdict (multiclass prefers winner_detailed, as debate_node does)."""
+    if not isinstance(verdict, dict):
+        return ""
+    keys = ("winner_detailed", "winner") if is_multiclass(task) else ("winner", "winner_detailed")
+    for k in keys:
+        lbl = canonical_label(verdict.get(k) or "", task)
+        if lbl:
+            return lbl
+    return ""
+
+
+def debate_verdict_changed(row: dict | pd.Series, task: str) -> tuple[bool | None, str]:
+    """(changed, source) for one debate record.
+
+    Preferred: `debate_round_verdicts` (list of per-round verdict dicts) — changed if
+    the canonical label of any round r differs from round r-1. Fallback for old
+    files: the judge's self-reported `debate_round_changed` flag, parsed as a real
+    boolean (the string "false" is False).
+    """
+    verdicts = row.get("debate_round_verdicts") if hasattr(row, "get") else None
+    if isinstance(verdicts, list) and len(verdicts) >= 1:
+        labels = [_verdict_label(v, task) for v in verdicts]
+        changed = any(labels[i] != labels[i - 1] for i in range(1, len(labels)))
+        return changed, "per-round verdicts"
+    if not hasattr(row, "get"):
+        return None, "judge-reported (legacy)"
+    flag = parse_bool(row.get("debate_judge_claimed_round_changed"))
+    if flag is None:
+        flag = parse_bool(row.get("debate_round_changed"))
+    return flag, "judge-reported (legacy)"
+
+
 def section_debate_rounds(df: pd.DataFrame, task: str) -> pd.DataFrame:
     """
     Multi-Agent Debate — verdict stability vs. accuracy/ECE.
 
     Empty unless the JSONL carries a `debate_rounds_completed` column (i.e. it was
-    produced by `--pipeline_mode debate`). Shows whether cases whose verdict flipped
-    across rounds are less accurate / worse calibrated than stable ones.
+    produced by `--pipeline_mode debate`). "Changed" comes from per-round verdicts
+    when logged; older files fall back to the judge's own `round_changed` flag,
+    labelled "judge-reported (legacy)" in the `changed_source` column.
     """
     if "debate_rounds_completed" not in df.columns or df["debate_rounds_completed"].isna().all():
         return pd.DataFrame()
     sub = df[df["debate_rounds_completed"].notna()].copy()
-    gt = [prep(str(v or ""), task) for v in sub["true_label_canonical"].fillna("")]
-    pr = [prep(str(v or ""), task) for v in sub["predicted_class_canonical"].fillna("")]
-    correct = np.array([int(t == p) for t, p in zip(gt, pr)], dtype=float)
-    confs = np.clip(sub["final_confidence"].astype(float).fillna(0.0).values, 0, 1)
-    changed = sub["debate_round_changed"].fillna(False).astype(bool).values
+    correct, keep = _row_correct(sub, task)
+    raw_conf = pd.to_numeric(sub["final_confidence"], errors="coerce").astype(float)
+    n_conf_sub = int(raw_conf[keep].isna().sum())  # e.g. judge parse failures log None
+    confs = np.clip(raw_conf.fillna(0.5).values, 0, 1)
+    ch = [debate_verdict_changed(r, task) for _, r in sub.iterrows()]
+    changed = np.array([bool(c) for c, _ in ch], dtype=bool)
+    sources = Counter(src for _, src in ch)
+    correct, confs, changed = correct[keep], confs[keep], changed[keep]
 
     def _acc(mask):
         return round(float(correct[mask].mean()), 4) if mask.sum() >= 5 else float("nan")
@@ -534,14 +722,18 @@ def section_debate_rounds(df: pd.DataFrame, task: str) -> pd.DataFrame:
     def _ece(mask):
         return round(compute_ece(confs[mask], correct[mask]), 4) if mask.sum() >= 5 else float("nan")
 
+    pf = parse_failure_counts(sub)
     return pd.DataFrame([{
-        "n": len(sub),
-        "pct_verdict_changed": round(float(changed.mean()) * 100, 1),
+        "n": int(keep.sum()),
+        "changed_source": " + ".join(f"{k} (n={v})" for k, v in sources.most_common()),
+        "pct_verdict_changed": round(float(changed.mean()) * 100, 1) if len(changed) else float("nan"),
         "accuracy_changed": _acc(changed),
         "accuracy_unchanged": _acc(~changed),
         "ece_changed": _ece(changed),
         "ece_unchanged": _ece(~changed),
-        "ece_overall": round(compute_ece(confs, correct), 4),
+        "ece_overall": round(check_ece_bound(confs, correct), 4) if len(confs) else float("nan"),
+        "n_conf_substituted": n_conf_sub,
+        **{f"n_{k}": v for k, v in pf.items()},
     }])
 
 
@@ -913,10 +1105,21 @@ def main() -> None:
                             "label counts as positive (abnormality screening). "
                             "Both are written to model_accuracy_summary.csv."
                         ))
+    parser.add_argument("--abstain", default="wrong", choices=list(ABSTAIN_MODES),
+                        help=(
+                            "Abstention convention. 'wrong' (default, paper convention, "
+                            "same as paired_system_comparison): an empty/unparseable "
+                            "prediction stays in n and is scored incorrect. 'drop': "
+                            "remove it from the denominator (older eval_analysis tables). "
+                            "n and n_abstained are always reported. Error-only images are "
+                            "scored wrong in both modes."
+                        ))
     args = parser.parse_args()
     set_scoring(args.scoring)
+    set_abstain(args.abstain)
 
     df   = load(args.jsonl)
+    stats = df.attrs.get("load_stats")
     task = str(df["task"].iloc[0]) if "task" in df.columns and len(df) else "unknown"
     pos  = pos_class(task)
     stem = Path(args.jsonl).stem
@@ -926,6 +1129,20 @@ def main() -> None:
     multi = is_multiclass(task)
     print(f"\nTask: {task}  |  {'multiclass' if multi else f'positive class: {pos}'}  |  n={len(df)}"
           f"{'' if multi else f'  |  scoring: {SCORING}'}")
+    print(f"Abstentions: {ABSTAIN}  |  {stats.summary() if stats else ''}")
+    pf = parse_failure_counts(df)
+    if pf:
+        print("Parse failures: " + ", ".join(f"{k}={v}" for k, v in pf.items()))
+    if "confidence_penalty_factor" in df.columns and df["confidence_penalty_factor"].notna().any():
+        cpf = pd.to_numeric(df["confidence_penalty_factor"], errors="coerce")
+        print(f"Confidence penalty applied (factor < 1): {int((cpf < 1).sum())}/{int(cpf.notna().sum())} rows")
+    if "run_config" in df.columns:
+        rc = [r for r in df["run_config"] if isinstance(r, dict)]
+        if rc:
+            distinct = {json.dumps(r, sort_keys=True, default=str) for r in rc}
+            print(f"run_config: {len(distinct)} distinct value(s) across {len(rc)} rows"
+                  + (f": {next(iter(distinct))[:300]}" if len(distinct) == 1 else
+                     "  [WARNING: rows were produced under different configs]"))
     print(f"Output: {out}/\n")
 
     # ── compute ────────────────────────────────────────────────────────────────
@@ -992,6 +1209,13 @@ def main() -> None:
     shift_df.to_csv(out / "medgemma_shift_analysis.csv",   index=False)
     calib_df.to_csv(out / "confidence_calibration_summary.csv", index=False)
     lat_df.to_csv(out / "latency_stats.csv", index=False)
+    pd.DataFrame([{
+        "jsonl": args.jsonl, "task": task, "scoring": SCORING if not multi else "multiclass",
+        "abstain": ABSTAIN,
+        **({k: getattr(stats, k) for k in ("n_rows", "n_unique", "n_duplicate_rows",
+                                           "n_unparsable", "n_error_only")} if stats else {}),
+        **parse_failure_counts(df),
+    }]).to_csv(out / "load_summary.csv", index=False)
     if not forest_df.empty:
         forest_df.to_csv(out / "forest_voting_quality.csv", index=False)
     if not forest_agent_df.empty:

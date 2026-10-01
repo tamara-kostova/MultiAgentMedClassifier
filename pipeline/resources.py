@@ -49,13 +49,13 @@ class Resources:
 
     @property
     def forest(self):
-        """AgentForest over the shared MedGemma, as in assemble_forest_pipeline."""
+        """AgentForest over the shared MedGemma, configured from cfg as in assemble_forest_pipeline."""
         medgemma = self.medgemma
         with self._lock:
             if self._forest is None:
-                from agents.forest import AgentForest
+                from pipeline.graph import make_forest
 
-                self._forest = AgentForest(medgemma)
+                self._forest = make_forest(medgemma, self.cfg)
             return self._forest
 
     @property

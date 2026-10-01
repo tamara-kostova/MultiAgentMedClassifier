@@ -173,6 +173,7 @@ class CNNClassifier:
         self.preprocess_cfg = preprocess_cfg or DEFAULT_CONFIG.preprocess
         self.device = resolve_torch_device(self.model_cfg.device, caller="CNNClassifier")
         self._models: dict[str, nn.Module] = {}
+        self._archs: dict[str, str] = {}  # architecture actually loaded per task
         self._transform = _get_transform(self.preprocess_cfg)
 
     def _load_model(self, task: str) -> nn.Module:
@@ -236,7 +237,16 @@ class CNNClassifier:
 
         model = model.to(self.device).eval()
         self._models[task] = model
+        self._archs[task] = arch
         return model
+
+    def get_arch(self, task: str) -> str | None:
+        """Architecture of the loaded model for `task` (may differ from
+        BEST_CNN_PER_TASK when the checkpoint's keys say otherwise)."""
+        if task not in NUM_CLASSES:
+            return None
+        self._load_model(task)
+        return self._archs.get(task)
 
     @torch.no_grad()
     def classify(self, image_path: str, task: str) -> dict:

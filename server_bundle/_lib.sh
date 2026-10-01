@@ -13,7 +13,7 @@ source "$BUNDLE_DIR/config.env"
 
 cd "$PROJECT_ROOT"
 
-mkdir -p logs outputs/eval outputs/results_tsv
+mkdir -p logs outputs/eval outputs/results_tsv "$V2_OUT"
 
 # Resolve the .sif (allow an absolute path in config.env or SIF= in the environment).
 case "$SIF" in

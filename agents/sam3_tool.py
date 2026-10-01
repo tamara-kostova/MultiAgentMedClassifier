@@ -296,15 +296,21 @@ class SAM3Tool:
         mask_path = str(self.output_dir / f"mask_{uid}.png")
         mask_pil.save(mask_path)
 
-        # Bounding box from mask
+        # Bounding box from mask. An empty mask means SAM3 found no lesion: no bbox
+        # and no overlay (a full-frame box would read as "lesion detected").
         rows = np.any(mask, axis=1)
         cols = np.any(mask, axis=0)
-        if rows.any() and cols.any():
-            rmin, rmax = np.where(rows)[0][[0, -1]]
-            cmin, cmax = np.where(cols)[0][[0, -1]]
-            bbox = [int(cmin), int(rmin), int(cmax), int(rmax)]
-        else:
-            bbox = [0, 0, image.shape[1], image.shape[0]]
+        if not (rows.any() and cols.any()):
+            return {
+                "mask_path": mask_path,
+                "bbox": None,
+                "guided_image_path": None,
+                "mask_empty": True,
+                "skipped": False,
+            }
+        rmin, rmax = np.where(rows)[0][[0, -1]]
+        cmin, cmax = np.where(cols)[0][[0, -1]]
+        bbox = [int(cmin), int(rmin), int(cmax), int(rmax)]
 
         # Bbox overlay for MedGemma
         overlay = Image.fromarray(image)
@@ -317,7 +323,7 @@ class SAM3Tool:
             "mask_path": mask_path,
             "bbox": bbox,
             "guided_image_path": guided_path,
-
+            "mask_empty": False,
             "skipped": False,
         }
 

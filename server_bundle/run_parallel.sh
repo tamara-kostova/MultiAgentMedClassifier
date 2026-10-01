@@ -1,29 +1,24 @@
 #!/usr/bin/env bash
-# Optional: spread the runs over several GPUs (or several slots on one GPU). The
-# runs are fully independent processes writing to different output files, so
-# this is safe.
+# Spread the v2 runs over several GPUs, or several slots on one GPU. The runs are
+# independent processes writing to different output files, so this is safe.
 #
-#   bash server_bundle/run_parallel.sh 0 1 2        # use GPUs 0, 1 and 2
-#   nohup bash server_bundle/run_parallel.sh 0 1 > logs/run_parallel.log 2>&1 &
+#   bash server_bundle/run_parallel.sh 0 1 2        # GPUs 0, 1 and 2
+#   bash server_bundle/run_parallel.sh 0 0          # two slots on one 80 GB GPU
+#   nohup bash server_bundle/run_parallel.sh 0 0 1 1 > logs/run_parallel.log 2>&1 &
 #
-# Each run needs roughly 14 GB of VRAM (MedGemma bfloat16 ~9 GB + SAM3 ~3.5 GB +
-# CNN/BiomedCLIP ~1 GB), so use one run per GPU of 16 GB or more. On a 40 GB card
-# a GPU id may be listed twice; on an 80 GB card (e.g. A100-SXM4-80GB) it can be
-# listed up to ~5 times, e.g. "0 0 0 0 0", for 5 concurrent runs on the one GPU
-# (~70 GB used, ~10 GB headroom). With LOAD_4BIT=1 in config.env a run fits in
-# about 7 GB, so up to ~10 concurrent runs fit in 80 GB.
+# Each run needs about 14 GB of VRAM in bfloat16 (MedGemma ~9 GB + SAM3 ~3.5 GB +
+# CNN/BiomedCLIP ~1 GB): one slot per 16 GB GPU, two on 40 GB, up to five on 80 GB.
+# With LOAD_4BIT=1 in config.env a run fits in about 7 GB.
 #
-# Defaults to all 6 remaining runs. To re-run only a subset (e.g. just the 4
-# debate steps after a debate-only fix), override STEPS:
-#
-#   STEPS="03_debate_binary_tumor 04_debate_stroke 05_debate_ms 06_debate_multiclass_tumor" \
-#       bash server_bundle/run_parallel.sh 0 0 0 0
-#
-# Preflight is run once, first, before anything is launched.
+# Preflight, the CNN diagnostic and the smoke test run once, first, on the first
+# GPU; nothing is launched unless preflight and smoke pass. To run a subset:
+#   STEPS="debate_binary_tumor debate_stroke" bash server_bundle/run_parallel.sh 0 1
 set -uo pipefail
 
 BUNDLE_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$(cd "$BUNDLE_DIR/.." && pwd)"
+# shellcheck source=steps.sh
+source "$BUNDLE_DIR/steps.sh"
 
 if [ "$#" -lt 1 ]; then
     echo "Usage: bash server_bundle/run_parallel.sh <gpu_id> [<gpu_id> ...]"
@@ -31,55 +26,61 @@ if [ "$#" -lt 1 ]; then
     exit 2
 fi
 
-GPUS=("$@")
+SLOTS=("$@")
 if [ -n "${STEPS:-}" ]; then
-    read -ra STEPS <<< "$STEPS"
+    read -ra RUN_STEPS <<< "$STEPS"
 else
-    STEPS=(
-        01_forest_stroke
-        02_forest_ms
-        03_debate_binary_tumor
-        04_debate_stroke
-        05_debate_ms
-        06_debate_multiclass_tumor
-    )
+    RUN_STEPS=("${V2_STEPS[@]}")
+fi
+
+# A step listed twice would put two processes on one output file.
+dupes=$(printf '%s\n' "${RUN_STEPS[@]}" | sort | uniq -d)
+if [ -n "$dupes" ]; then
+    echo "ERROR: steps listed more than once: $dupes"
+    exit 2
 fi
 
 mkdir -p logs
 
-echo "### Preflight on GPU ${GPUS[0]} ($(date -Is))"
-if ! CUDA_VISIBLE_DEVICES="${GPUS[0]}" bash "$BUNDLE_DIR/00_preflight.sh"; then
-    echo "PREFLIGHT FAILED — nothing launched. Please send back logs/00_preflight.log."
-    exit 1
-fi
+for gate in 00_preflight 05_diagnose_cnn 10_smoke; do
+    echo "### $gate on GPU ${SLOTS[0]} ($(date -Is))"
+    if ! CUDA_VISIBLE_DEVICES="${SLOTS[0]}" bash "$BUNDLE_DIR/${gate}.sh"; then
+        if [ "$gate" = "05_diagnose_cnn" ]; then
+            echo "### 05_diagnose_cnn failed — diagnostic only, continuing"
+        else
+            echo "$gate FAILED — nothing launched. Please send back logs/."
+            exit 1
+        fi
+    fi
+done
 
-# Round-robin: each GPU gets a queue of steps and works through it sequentially.
+# Round-robin: each slot gets a queue of steps and works through it sequentially.
 pids=()
-for i in "${!GPUS[@]}"; do
-    gpu="${GPUS[$i]}"
+for i in "${!SLOTS[@]}"; do
+    gpu="${SLOTS[$i]}"
     queue=()
-    for j in "${!STEPS[@]}"; do
-        if [ $(( j % ${#GPUS[@]} )) -eq "$i" ]; then
-            queue+=("${STEPS[$j]}")
+    for j in "${!RUN_STEPS[@]}"; do
+        if [ $(( j % ${#SLOTS[@]} )) -eq "$i" ]; then
+            queue+=("${RUN_STEPS[$j]}")
         fi
     done
     [ "${#queue[@]}" -eq 0 ] && continue
 
-    echo "GPU $gpu queue: ${queue[*]}"
+    echo "slot $i (GPU $gpu) queue: ${queue[*]}"
     (
         for step in "${queue[@]}"; do
-            echo "### [GPU $gpu] $step start $(date -Is)"
-            CUDA_VISIBLE_DEVICES="$gpu" bash "$BUNDLE_DIR/${step}.sh" \
-                || echo "### [GPU $gpu] $step FAILED — continuing"
-            echo "### [GPU $gpu] $step end   $(date -Is)"
+            echo "### [slot $i GPU $gpu] $step start $(date -Is)"
+            CUDA_VISIBLE_DEVICES="$gpu" bash "$BUNDLE_DIR/step.sh" "$step" \
+                || echo "### [slot $i GPU $gpu] $step FAILED — continuing"
+            echo "### [slot $i GPU $gpu] $step end   $(date -Is)"
         done
-    ) > "logs/gpu${gpu}_queue.log" 2>&1 &
+    ) > "logs/slot${i}_gpu${gpu}_queue.log" 2>&1 &
     pids+=("$!")
 done
 
-echo "Launched ${#pids[@]} GPU queues. Follow progress with:  tail -f logs/gpu*_queue.log"
+echo "Launched ${#pids[@]} queues. Follow progress with:  tail -f logs/slot*_queue.log"
 wait "${pids[@]}"
 
 echo ""
-echo "All GPU queues finished ($(date -Is)). Exporting results..."
+echo "All queues finished ($(date -Is)). Exporting results..."
 bash "$BUNDLE_DIR/90_export_results.sh"

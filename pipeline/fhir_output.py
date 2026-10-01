@@ -228,7 +228,7 @@ def build_diagnostic_report(state: dict, output_dir: Optional[str] = None) -> di
     patient_id = f"patient-{uuid.uuid4().hex[:8]}"
     study_id   = f"study-{uuid.uuid4().hex[:8]}"
     obs_id     = f"obs-{uuid.uuid4().hex[:8]}"
-    report_id  = f"report-{uuid.uuid4().hex[:8]}"
+    report_id  = f"report-{uuid.uuid4().hex}"  # full hex: names the output file
 
     patient = _build_patient(patient_id)
     study   = _build_imaging_study(study_id, patient_id, state)
@@ -250,7 +250,7 @@ def build_diagnostic_report(state: dict, output_dir: Optional[str] = None) -> di
 
     if output_dir:
         Path(output_dir).mkdir(parents=True, exist_ok=True)
-        out = Path(output_dir) / f"fhir_{report_id[:12]}.json"
+        out = Path(output_dir) / f"fhir_{report_id}.json"
         out.write_text(json.dumps(bundle, indent=2))
         print(f"[FHIR] Bundle written → {out}")
 

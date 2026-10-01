@@ -38,7 +38,20 @@ import math
 import re
 from pathlib import Path
 
-from eval.eval_analysis import canonical_label, prep, set_scoring
+import sys as _sys
+from pathlib import Path as _Path
+
+if __package__ in (None, ""):  # run as `python eval/<script>.py`: make `eval` importable
+    _sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))
+
+from eval.eval_analysis import ERROR_PRED, canonical_label, prep, set_scoring
+from eval.jsonl_io import ERROR_FLAG, load_records
+from eval.metrics import parse_bool, wilson_ci
+
+# "wrong" (default): an abstention stays in n and counts as incorrect, the
+# convention of paired_system_comparison and the paper. "drop": the old
+# behaviour of this script (abstentions removed from the denominator).
+ABSTAIN = "wrong"
 
 # Task -> default debate JSONL, and whether the SAM3 probe actually runs there.
 TASKS: dict[str, tuple[str, bool]] = {
@@ -91,14 +104,8 @@ def mentions_any(reason: str) -> bool:
     return any(re.search(p, reason, re.I) for p in ADVOCATES.values())
 
 
-def wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
-    if n == 0:
-        return (float("nan"), float("nan"))
-    p = k / n
-    d = 1 + z * z / n
-    centre = (p + z * z / (2 * n)) / d
-    half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / d
-    return centre - half, centre + half
+def wilson(k: int, n: int) -> tuple[float, float]:
+    return wilson_ci(k, n)
 
 
 def two_prop_z(k1: int, n1: int, k2: int, n2: int) -> tuple[float, float]:
@@ -114,26 +121,42 @@ def two_prop_z(k1: int, n1: int, k2: int, n2: int) -> tuple[float, float]:
     return z, math.erfc(abs(z) / math.sqrt(2))
 
 
+def _pred(r: dict, task: str) -> str:
+    if r.get(ERROR_FLAG):
+        return ERROR_PRED
+    return prep(canonical_label(r.get("predicted_class_canonical")
+                                or r.get("predicted_class") or "", task), task)
+
+
 def accuracy(records: list[dict], task: str) -> tuple[int, int, float, float, float]:
-    """Strict-scored accuracy. Abstentions are dropped, as eval_analysis does."""
+    """Strict-scored accuracy. Abstentions follow ABSTAIN (default: wrong, kept in n);
+    error-only records are always wrong. Unknown ground truth is excluded."""
     hits = []
     for r in records:
-        gt = prep(canonical_label(r["true_label_canonical"], task), task)
-        pr = prep(canonical_label(r["predicted_class_canonical"], task), task)
-        if "unknown" not in (gt, pr):
-            hits.append(gt == pr)
+        gt = prep(canonical_label(r.get("true_label_canonical") or "", task), task)
+        pr = _pred(r, task)
+        if gt == "unknown":
+            continue
+        if pr == "unknown" and ABSTAIN == "drop":
+            continue
+        hits.append(pr not in ("unknown", ERROR_PRED) and gt == pr)
     k, n = sum(hits), len(hits)
     lo, hi = wilson(k, n)
     return k, n, (k / n if n else float("nan")), lo, hi
 
 
+def n_abstained(records: list[dict], task: str) -> int:
+    return sum(1 for r in records if _pred(r, task) == "unknown")
+
+
 def load(path: str) -> list[dict]:
-    return [json.loads(line) for line in Path(path).open() if line.strip()]
+    return load_records(path)[0]
 
 
 def verify_rounds(task: str, recs: list[dict]) -> None:
-    changed = [r for r in recs if r.get("debate_round_changed")]
-    stable = [r for r in recs if not r.get("debate_round_changed")]
+    # Legacy judge-reported flag, parsed as a real boolean ("false" -> False).
+    changed = [r for r in recs if parse_bool(r.get("debate_round_changed")) is True]
+    stable = [r for r in recs if parse_bool(r.get("debate_round_changed")) is not True]
     pct = 100 * len(changed) / len(recs)
     _, _, a_st, _, _ = accuracy(stable, task)
     _, _, a_ch, _, _ = accuracy(changed, task)
@@ -147,9 +170,11 @@ def verify_rounds(task: str, recs: list[dict]) -> None:
 
 
 def report(task: str, recs: list[dict], probe_runs: bool) -> None:
-    _, _, overall, lo, hi = accuracy(recs, task)
+    _, n_scored, overall, lo, hi = accuracy(recs, task)
     flag = "" if probe_runs else "   [SAM3 probe INELIGIBLE: null-evidence advocate]"
-    print(f"\n=== {task}  n={len(recs)}  accuracy={overall:.3f} [{lo:.3f}, {hi:.3f}]{flag}")
+    n_err = sum(1 for r in recs if r.get(ERROR_FLAG))
+    print(f"\n=== {task}  n={len(recs)}  scored={n_scored}  n_abstained={n_abstained(recs, task)}"
+          f"  n_error={n_err}  (abstain={ABSTAIN})  accuracy={overall:.3f} [{lo:.3f}, {hi:.3f}]{flag}")
 
     reasons = {id(r): judge_reason(r) for r in recs}
     named = [r for r in recs if mentions_any(reasons[id(r)])]
@@ -198,6 +223,9 @@ def main() -> None:
     ap.add_argument("--task", choices=sorted(TASKS), action="append",
                     help="Restrict to one task (repeatable). Default: all four.")
     ap.add_argument("--scoring", default="strict", choices=("strict", "abnormal"))
+    ap.add_argument("--abstain", default="wrong", choices=("wrong", "drop"),
+                    help="Abstention convention (default wrong = kept in n, scored incorrect; "
+                         "drop = the published tab:debate_rounds convention).")
     ap.add_argument("--verify", action="store_true",
                     help="Reproduce tab:debate_rounds as a consistency check.")
     ap.add_argument("--sensitivity", action="store_true",
@@ -207,6 +235,8 @@ def main() -> None:
     args = ap.parse_args()
 
     set_scoring(args.scoring)
+    global ABSTAIN
+    ABSTAIN = args.abstain
     tasks = args.task or list(TASKS)
     loaded = {t: load(TASKS[t][0]) for t in tasks if Path(TASKS[t][0]).exists()}
     missing = [t for t in tasks if t not in loaded]
@@ -216,7 +246,8 @@ def main() -> None:
         raise SystemExit("no debate JSONLs found")
 
     if args.verify:
-        print("Reproducing tab:debate_rounds (thesis values in brackets):")
+        print(f"Reproducing tab:debate_rounds (thesis values in brackets; abstain={ABSTAIN}; "
+              "the thesis table dropped abstentions; identical when none exist):")
         for t, recs in loaded.items():
             verify_rounds(t, recs)
 
@@ -235,8 +266,8 @@ def main() -> None:
                 for r in recs:
                     reason = judge_reason(r)
                     if "SAM3" in endorsed(reason):
-                        fh.write(f"[{t}] true={r['true_label_canonical']} "
-                                 f"pred={r['predicted_class_canonical']}\n{reason}\n\n")
+                        fh.write(f"[{t}] true={r.get('true_label_canonical')} "
+                                 f"pred={r.get('predicted_class_canonical')}\n{reason}\n\n")
         print(f"\nwrote SAM3-endorsed judge reasons to {out}")
 
 

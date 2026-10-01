@@ -32,8 +32,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-_REPO_ROOT = Path(__file__).resolve().parent.parent
-
 # ── Pipeline registry (agents loaded once in background) ──────────────────────
 
 _cfg = None
@@ -97,17 +95,22 @@ def _linear_node_order(app) -> list[str]:
 # ── Choices ───────────────────────────────────────────────────────────────────
 
 _TASK_CHOICES = [
-    ("Binary Tumor  (tumor / normal)", "binary_tumor"),
-    ("Multiclass Tumor  (meningioma / glioma / pituitary / ...)", "multiclass_tumor"),
-    ("Multiple Sclerosis  (MS / normal FLAIR)", "ms"),
-    ("Stroke  (ischemic / normal CT)", "stroke"),
+    ("Brain tumor: tumor vs. normal (MRI)", "binary_tumor"),
+    ("Tumor subtype: glioma, meningioma, pituitary + 9 rarer types (MRI)", "multiclass_tumor"),
+    ("Multiple sclerosis: MS vs. normal (MRI)", "ms"),
+    ("Stroke: ischemic or hemorrhagic vs. normal (CT)", "stroke"),
 ]
+_TASK_VALUES = {value for _, value in _TASK_CHOICES}
 
 _MODE_CHOICES = [
     ("Standard", "standard"),
     ("Debate (System B)", "debate"),
     ("Forest (System C)", "forest"),
 ]
+
+# One agent per distinct role. AgentForest would cycle roles beyond 4, but duplicate
+# roles add no diversity and the eval scripts key votes by role.
+_FOREST_ROLE_NAMES = ["radiologist", "conservative", "emergency", "differential"]
 
 _MODE_NOTES = {
     "standard": "Single MedGemma triage, specialist tools, verification and a fused report.",
@@ -247,10 +250,6 @@ _HERO_HTML = """
   <div class="hero-main">
     <div class="hero-kicker">Neuroimaging review workspace</div>
     <h1>Multi-Agent Neuroimaging Classifier</h1>
-    <p>
-      Upload a scan, select the task and pipeline mode, and review the prediction,
-      each agent's evidence, and the report in one focused workspace.
-    </p>
   </div>
   <div class="hero-meta">
     <div class="hero-meta-title">Agents &amp; tools</div>
@@ -794,6 +793,20 @@ def poll_model_status():
     )
 
 
+def _lock_controls():
+    """Disable Run and Clear for the duration of a pipeline run."""
+    return gr.Button(interactive=False, value="Running…"), gr.Button(interactive=False)
+
+
+def _unlock_controls():
+    return gr.Button(interactive=True, value="Run Pipeline"), gr.Button(interactive=True)
+
+
+def clear_all(mode: str) -> tuple:
+    """Reset the input image and every output panel to its placeholder."""
+    return (None, *_render({}, mode, _PROGRESS_PLACEHOLDER, False))
+
+
 def _on_mode_change(mode: str):
     return (
         gr.Slider(visible=mode == "debate"),
@@ -804,13 +817,16 @@ def _on_mode_change(mode: str):
     )
 
 
-def _example_images() -> list[str]:
+_EXAMPLES_DIR = Path(__file__).resolve().parent / "examples"
+
+
+def _example_rows() -> list[list[str]]:
+    """[image, task] rows from ui/examples/<task>/*, so each example selects its own task."""
     exts = {".png", ".jpg", ".jpeg"}
-    found = [p for p in sorted((Path(__file__).resolve().parent / "examples").glob("*")) if p.suffix.lower() in exts]
-    scan = _REPO_ROOT / "scan.jpg"
-    if scan.exists():
-        found.insert(0, scan)
-    return [str(p) for p in found]
+    rows = []
+    for task_dir in sorted(p for p in _EXAMPLES_DIR.glob("*") if p.is_dir() and p.name in _TASK_VALUES):
+        rows += [[str(p), task_dir.name] for p in sorted(task_dir.iterdir()) if p.suffix.lower() in exts]
+    return rows
 
 
 # ── Gradio theme + layout ─────────────────────────────────────────────────────
@@ -850,31 +866,30 @@ def _section_head(title: str, note: str) -> gr.HTML:
 
 def create_demo(default_mode: str = "standard", default_rounds: int = 1, default_agents: int = 3) -> gr.Blocks:
     with gr.Blocks(title="Multi-Agent Neuroimaging Classifier") as app:
-        gr.HTML(_HERO_HTML)
-
-        model_status = gr.HTML(elem_id="status-box")
+        with gr.Row(equal_height=True, elem_classes=["top-row"]):
+            gr.HTML(_HERO_HTML, elem_id="hero-box")
+            model_status = gr.HTML(elem_id="status-box")
         status_timer = gr.Timer(2.0)
 
+        # Three columns side by side (input | progress + summary | evidence tabs) so the
+        # whole workspace fits one screen at 100% zoom instead of stacking vertically.
         with gr.Row(equal_height=False, elem_classes=["panel-row"]):
-            with gr.Column(scale=1, min_width=320, elem_classes=["panel-card"]):
+            with gr.Column(scale=3, min_width=300, elem_classes=["panel-card"]):
                 gr.HTML(
                     """
                     <div class="panel-kicker">Input</div>
                     <h2 class="panel-title">Prepare the scan</h2>
-                    <p class="panel-copy">
-                      Upload the study image, confirm the task and pipeline mode, and start the staged review.
-                    </p>
                     """
                 )
-                _section_head("Study image", "Drag in an MRI or CT scan, or click the frame to browse")
-                image_input = gr.Image(type="filepath", show_label=False, height=260, elem_id="scan-input")
+                _section_head("Study image", "MRI or CT · drag in or click")
+                image_input = gr.Image(type="filepath", show_label=False, height=220, elem_id="scan-input")
 
-                _section_head("Classification task", "Choose the relevant diagnostic pathway")
+                _section_head("Classification task", "Diagnostic pathway")
                 task_input = gr.Dropdown(
                     choices=_TASK_CHOICES, value="binary_tumor", show_label=False, elem_id="task-select"
                 )
 
-                _section_head("Pipeline mode", "Standard, advocate debate, or agent forest")
+                _section_head("Pipeline mode", "Standard, debate, or forest")
                 mode_input = gr.Radio(
                     choices=_MODE_CHOICES, value=default_mode, show_label=False, elem_id="mode-select"
                 )
@@ -884,24 +899,27 @@ def create_demo(default_mode: str = "standard", default_rounds: int = 1, default
                     visible=default_mode == "debate", elem_classes=["mode-slider"],
                 )
                 agents_input = gr.Slider(
-                    1, 8, value=default_agents, step=1, label="Forest agents",
-                    info="Roles cycle radiologist → conservative → emergency → differential.",
+                    1, len(_FOREST_ROLE_NAMES), value=default_agents, step=1, label="Forest agents",
+                    info="Roles are added in order: " + " → ".join(_FOREST_ROLE_NAMES) + ".",
                     visible=default_mode == "forest", elem_classes=["mode-slider"],
                 )
 
-                run_btn = gr.Button(
-                    "Loading models…", variant="primary", size="lg", elem_id="run-btn", interactive=False
-                )
+                with gr.Row(elem_classes=["action-row"]):
+                    run_btn = gr.Button(
+                        "Loading models…", variant="primary", size="lg", elem_id="run-btn",
+                        interactive=False, scale=3,
+                    )
+                    clear_btn = gr.Button("Clear", variant="secondary", size="lg", elem_id="clear-btn", scale=1)
 
-                examples = _example_images()
+                examples = _example_rows()
                 if examples:
                     gr.Examples(
-                        examples=[[p, "binary_tumor"] for p in examples],
+                        examples=examples,
                         inputs=[image_input, task_input],
                         label="Example scans",
                     )
 
-            with gr.Column(scale=2, elem_classes=["panel-card"]):
+            with gr.Column(scale=4, min_width=360, elem_classes=["panel-card"]):
                 gr.HTML(
                     """
                     <div class="panel-kicker">Output</div>
@@ -914,11 +932,13 @@ def create_demo(default_mode: str = "standard", default_rounds: int = 1, default
                 progress_out = gr.HTML(_PROGRESS_PLACEHOLDER, elem_id="progress-out")
                 summary_out = gr.HTML(_SUMMARY_PLACEHOLDER, elem_id="summary-out")
 
+            with gr.Column(scale=6, min_width=420, elem_classes=["panel-card"]):
                 with gr.Tabs(elem_id="result-tabs"):
                     with gr.Tab("Visual evidence"):
                         _section_head("Visual evidence", "SAM3 mask, Grad-CAM++, and Integrated Gradients")
                         gallery_out = gr.Gallery(
-                            show_label=False, columns=2, height=520, object_fit="contain", elem_id="gallery-out"
+                            show_label=False, columns=2, height="calc(100vh - 330px)", object_fit="contain",
+                            elem_id="gallery-out",
                         )
                     with gr.Tab("Agents"):
                         _section_head("Agent outputs", "What each model contributed to the decision")
@@ -941,15 +961,23 @@ def create_demo(default_mode: str = "standard", default_rounds: int = 1, default
             inputs=mode_input,
             outputs=[rounds_input, agents_input, mode_note, ensemble_tab, ensemble_out],
         )
+        result_outputs = [
+            progress_out, summary_out, agents_out, ensemble_out, gallery_out,
+            report_out, fhir_out, fhir_json, fhir_file,
+        ]
+        # Lock Run/Clear before the run starts and unlock afterwards; `.then` fires
+        # even when the run errors, so the buttons never stay disabled.
         run_btn.click(
+            fn=_lock_controls, outputs=[run_btn, clear_btn], queue=False,
+        ).then(
             fn=run_pipeline,
             inputs=[image_input, task_input, mode_input, rounds_input, agents_input],
-            outputs=[
-                progress_out, summary_out, agents_out, ensemble_out, gallery_out,
-                report_out, fhir_out, fhir_json, fhir_file,
-            ],
+            outputs=result_outputs,
             concurrency_limit=1,  # one GPU, one pipeline run at a time
+        ).then(
+            fn=_unlock_controls, outputs=[run_btn, clear_btn], queue=False,
         )
+        clear_btn.click(fn=clear_all, inputs=mode_input, outputs=[image_input, *result_outputs], queue=False)
         status_timer.tick(fn=poll_model_status, outputs=[model_status, run_btn, status_timer])
         app.load(fn=poll_model_status, outputs=[model_status, run_btn, status_timer])
 
@@ -972,7 +1000,7 @@ def launch(argv: list[str] | None = None) -> None:
     demo = create_demo(
         default_mode=args.pipeline_mode,
         default_rounds=max(1, min(args.debate_rounds, 3)),
-        default_agents=max(1, min(args.forest_n_agents, 8)),
+        default_agents=max(1, min(args.forest_n_agents, len(_FOREST_ROLE_NAMES))),
     )
     demo.queue().launch(
         server_name=os.environ.get("GRADIO_SERVER_NAME", "0.0.0.0"),

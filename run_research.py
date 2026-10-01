@@ -40,10 +40,23 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from config import DEFAULT_CONFIG
-from pipeline.graph import load_agents
 from experiments.experiments import EXPERIMENT_FAMILIES
-from experiments.graph import ResearchState, build_research_pipeline
+
+
+def warn_routing_only(family: str, point_ids: list[str] | None) -> list[str]:
+    """Print a warning for selected sweep points whose override changes nothing."""
+    pts = [p for p in EXPERIMENT_FAMILIES[family]
+           if point_ids is None or p.experiment_id in point_ids]
+    ro = [p.experiment_id for p in pts if getattr(p, "routing_only", False)]
+    if ro:
+        print("=" * 72)
+        print("WARNING: these sweep points only change the RECORDED routing label.")
+        print("The pipeline is linear (SAM3/BiomedCLIP run on every image), so their")
+        print("predictions/accuracy/ECE are the same as full_pipeline up to sampling noise.")
+        print("Do not report them as an ablation or threshold effect:")
+        print("  " + ", ".join(ro))
+        print("=" * 72)
+    return ro
 
 
 def main():
@@ -75,6 +88,8 @@ def main():
                         "whole family, e.g. --points debate_r2  (single 2-round debate) "
                         "or --points forest_n4  (single 4-agent forest). "
                         "Run with --list_points to see the ids for a family.")
+    p.add_argument("--seed", type=int, default=0,
+                   help="Seed for the class-balanced --max_samples subset shuffle (default 0).")
     p.add_argument("--list_points", action="store_true",
                    help="Print the sweep points (experiment_ids) for --family and exit.")
     args = p.parse_args()
@@ -83,6 +98,7 @@ def main():
         print(f"Sweep points for family '{args.family}':")
         for pt in EXPERIMENT_FAMILIES[args.family]:
             print(f"  {pt.experiment_id:16s} {pt.description}")
+        warn_routing_only(args.family, None)
         return
 
     if args.points:
@@ -106,18 +122,25 @@ def main():
         p.error("At least one dataset directory (--binary_tumor_dir / --multiclass_dir / "
                 "--ms_dir / --stroke_dir) must be provided.")
 
+    warn_routing_only(args.family, args.points)
+
+    from config import DEFAULT_CONFIG
+    from pipeline.graph import load_agents
+    from experiments.graph import ResearchState, build_research_pipeline
+
     print("Loading pipeline agents (once, shared across all sweep points)...")
     agents = load_agents(DEFAULT_CONFIG)
 
     app = build_research_pipeline()
 
-    initial_state: ResearchState = {
+    initial_state: "ResearchState" = {
         "experiment_family": args.family,
         "dataset_dirs": dataset_dirs,
         "output_base": args.output_dir,
         "base_cfg": DEFAULT_CONFIG,
         "preloaded_agents": agents,
         "max_samples": args.max_samples,
+        "sample_seed": args.seed,
         "point_ids": args.points,
         "results_dir": "",
         "sweep_summary": None,
