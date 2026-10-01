@@ -6,14 +6,36 @@ medical device.
 ## Get the image
 
 Public on Docker Hub: [`tamarakostova/neuro-mcp`](https://hub.docker.com/r/tamarakostova/neuro-mcp)
-(tags `0.1.0`, `latest`). No login needed:
+(tags `0.2.0`, `0.1.0`, `latest` = `0.2.0`). No login needed:
 
 ```bash
-docker pull tamarakostova/neuro-mcp:0.1.0
+docker pull tamarakostova/neuro-mcp:0.2.0
 ```
 
-The image holds only code and prompts: no model weights and no tokens. Pin `0.1.0` rather
-than `latest` so an update never changes a running deployment unexpectedly.
+The image holds only code and prompts: no model weights and no tokens. Pin a version rather
+than `latest` so an update never changes a running deployment unexpectedly. Coming from
+`0.1.0`? Read [Changes in 0.2.0](#changes-in-020) first: one step is needed before the
+new image starts.
+
+## Changes in 0.2.0
+
+The `classify` input and its 9-field output are unchanged.
+
+- **One-off step when upgrading:** the image now runs as the unprivileged user `app`
+  (uid 1000), and an existing `neuro-models` volume created by 0.1.0 is root-owned. Change its
+  owner once before starting 0.2.0, or the server cannot write to `/models`:
+  ```bash
+  docker run --rm --user root -v neuro-models:/models --entrypoint chown tamarakostova/neuro-mcp:0.2.0 -R 1000:1000 /models
+  ```
+- **Results can differ for the same scan** because of pipeline bug fixes.
+- **Stricter input limits**, checked before anything is decoded and listed by
+  `list_capabilities`: `forest_n_agents` at most 4 (was 8); images at most 4096×4096 px and
+  32 MB each; volumes at most 1 GB; `metadata` at most 32 scalar keys. Out-of-range requests
+  get a readable tool error.
+- **Container:** a second volume `/app/outputs` keeps the generated files (SAM3 overlays,
+  saliency maps, FHIR JSON) out of the container layer; a healthcheck makes `docker ps` show
+  `(healthy)` once the server accepts connections; the build fails if SAM3 is missing, so the
+  image can no longer serve `tumor` with segmentation silently skipped.
 
 ## Requirements
 
@@ -37,7 +59,7 @@ docker run -d --name neuro-mcp --gpus all --restart unless-stopped \
   -e NEURO_MCP_TOKEN=<long random secret> \
   -e HF_TOKEN=<your hugging face token> \
   -e MEDGEMMA_4BIT=1 \
-  tamarakostova/neuro-mcp:0.1.0
+  tamarakostova/neuro-mcp:0.2.0
 
 docker logs -f neuro-mcp      # ready when it prints "Uvicorn running on http://0.0.0.0:8765"
 docker ps                     # STATUS shows (healthy) once the port is open
@@ -47,12 +69,8 @@ The server runs as the unprivileged user `app` (uid 1000). New named volumes inh
 right ownership automatically. A host bind mount (`-v /srv/models:/models`) must be writable
 by uid 1000: `sudo chown -R 1000:1000 /srv/models`.
 
-**Upgrading from 0.1.0:** that image ran as root, so an existing `neuro-models` volume is
-root-owned and the new image cannot write to it. Fix it once:
-
-```bash
-docker run --rm --user root -v neuro-models:/models --entrypoint chown tamarakostova/neuro-mcp:<new tag> -R 1000:1000 /models
-```
+Upgrading from 0.1.0 needs a one-off `chown` of the existing volume; see
+[Changes in 0.2.0](#changes-in-020).
 
 Endpoint: `http://<host>:8765/mcp` (MCP Streamable HTTP). Every request needs the header
 `Authorization: Bearer <NEURO_MCP_TOKEN>`. Generate the secret with `openssl rand -hex 32`.
@@ -101,7 +119,7 @@ this (the CNN then falls back to ImageNet weights and results are meaningless).
   `/app/outputs`. These are derived from patient images. Keep them in the `neuro-outputs`
   volume and prune it to your retention policy, or mount `--tmpfs /app/outputs` to drop them
   when the container stops.
-- Extra `mcp_server.py` flags go after the image name, e.g. `tamarakostova/neuro-mcp:0.1.0 --lazy_load`.
+- Extra `mcp_server.py` flags go after the image name, e.g. `tamarakostova/neuro-mcp:0.2.0 --lazy_load`.
 - Research prototype, not a medical device. Outputs are not for clinical use.
 
 ## Input — `classify` arguments
