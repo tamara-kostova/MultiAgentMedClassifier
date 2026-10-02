@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the whole v2 campaign, in order, on one GPU. ~130 GPU-hours (5-6 days).
+# Run the whole v2 campaign, in order, on one GPU. ~170 GPU-hours (about a week).
 #
 #   bash server_bundle/run_all.sh
 #
@@ -29,15 +29,16 @@ fi
 declare -A RESULT
 START_ALL=$(date -Is)
 
-for gate in 00_preflight 05_diagnose_cnn 10_smoke; do
+# SKIP_GATES=1 skips them once they have passed (e.g. a later job under a walltime limit).
+GATES=(00_preflight 10_smoke)
+[ "${SKIP_GATES:-0}" = "1" ] && GATES=()
+for gate in ${GATES[@]+"${GATES[@]}"}; do
     echo ""
     echo "###########################################################"
     echo "#  $gate   ($(date -Is))"
     echo "###########################################################"
     if bash "$BUNDLE_DIR/${gate}.sh"; then
         RESULT[$gate]="OK"
-    elif [ "$gate" = "05_diagnose_cnn" ]; then
-        RESULT[$gate]="FAILED"   # diagnostic only: never blocks the runs
     else
         echo ""
         echo "$gate FAILED — stopping before the long runs."
@@ -64,7 +65,7 @@ echo ""
 echo "==========================================================="
 echo " ALL STEPS FINISHED     started $START_ALL   ended $(date -Is)"
 echo "==========================================================="
-for step in 00_preflight 05_diagnose_cnn 10_smoke "${RUN_STEPS[@]}" 90_export_results; do
+for step in 00_preflight 10_smoke "${RUN_STEPS[@]}" 90_export_results; do
     printf '  %-28s %s\n' "$step" "${RESULT[$step]:-SKIPPED}"
 done
 echo ""

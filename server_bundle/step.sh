@@ -8,7 +8,7 @@
 #   forest    System C: role-diverse Agent Forest, N=4, greedy
 #   debate    System B: advocate debate, 2 rounds
 #   homog     H1: homogeneous forest, 4 x radiologist sampled at FOREST_TEMPERATURE, triage only
-#   rolesamp  H2: the 4 roles sampled at FOREST_TEMPERATURE, triage only (optional)
+#   rolesamp  H2: the 4 roles sampled at FOREST_TEMPERATURE, triage only
 #   nosam     S1: debate without the SAM3 advocate (optional)
 #
 # base, forest and debate run with explainability on, so every system gets the same

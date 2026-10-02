@@ -1,17 +1,24 @@
 # PLAN — Faculty GPU server bundle (Singularity + .py scripts + data)
 
 > **v2 campaign (2026-10-01) supersedes the six-run campaign below.** The bundle now runs
-> RERUN_PLAN.md's Tier 2 + H1: 16 steps `<system>_<task>` (base / forest / debate / homog ×
-> binary_tumor / ms / stroke / multiclass_tumor) through `step.sh`, ordered in `steps.sh`
-> (multiclass last). Gates: `00_preflight` (now also checks every path in
-> `image_lists/`), `05_diagnose_cnn` (multiclass CNN, non-blocking), `10_smoke` (every mode on
-> SMOKE_N images + `scripts/check_smoke.py`). Every run uses `--image_list
+> RERUN_PLAN.md's Tier 2 + H1 + H2: 20 steps `<system>_<task>` (base / forest / debate /
+> homog / rolesamp × binary_tumor / multiclass_tumor / ms / stroke) through `step.sh`,
+> ordered by priority in `steps.sh`. Gates: `00_preflight` (also checks every path in
+> `image_lists/`) and `10_smoke` (every step in `steps.sh` on SMOKE_N=2 images +
+> `scripts/check_smoke.py`). Every run uses `--image_list
 > server_bundle/image_lists/<task>.txt` (the published 500 Forest/Debate images) and writes
 > `outputs/eval/v2/<task>_<system>.jsonl`; base/forest/debate run with explainability on.
 > `pack_bundle.sh` stamps `CODE_VERSION` (commit, dirty) and refuses uncommitted code, so rows
 > record `run_config.git_commit` without `.git`. The old 01–06 step scripts are removed.
-> Optional steps: `rolesamp_<task>` (H2), `nosam_binary_tumor` (S1). History below is kept
-> for the record.
+> Optional step: `nosam_binary_tumor` (S1). History below is kept for the record.
+>
+> **2026-10-02:** `05_diagnose_cnn` was run locally; it found the multiclass CNN's class list
+> was alphabetical instead of the checkpoint's training order (best permutation 0.974 on the
+> CNN's own test split vs 0.147 as-is). Fixed in `agents/cnn_tool.py` (e9d611c), so the gate
+> was dropped from `run_all.sh`/`run_parallel.sh` and multiclass no longer runs last. Figshare
+> stays weak after the fix (best 3-class permutation 0.42): that part is domain shift.
+> Container unchanged since 2026-07-29, so the server's `container.sif` and `hf_cache/` are
+> reused; `SKIP_MODELS=1 pack_bundle.sh` now packs without a local `hf_cache/`.
 
 **Status (six-run campaign):** done. Created 2026-07-29.
 

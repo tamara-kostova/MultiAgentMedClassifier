@@ -10,8 +10,8 @@
 # CNN/BiomedCLIP ~1 GB): one slot per 16 GB GPU, two on 40 GB, up to five on 80 GB.
 # With LOAD_4BIT=1 in config.env a run fits in about 7 GB.
 #
-# Preflight, the CNN diagnostic and the smoke test run once, first, on the first
-# GPU; nothing is launched unless preflight and smoke pass. To run a subset:
+# Preflight and the smoke test run once, first, on the first GPU; nothing is
+# launched unless both pass. To run a subset:
 #   STEPS="debate_binary_tumor debate_stroke" bash server_bundle/run_parallel.sh 0 1
 set -uo pipefail
 
@@ -42,15 +42,14 @@ fi
 
 mkdir -p logs
 
-for gate in 00_preflight 05_diagnose_cnn 10_smoke; do
+# SKIP_GATES=1 skips them once they have passed (e.g. a later job under a walltime limit).
+GATES=(00_preflight 10_smoke)
+[ "${SKIP_GATES:-0}" = "1" ] && GATES=()
+for gate in ${GATES[@]+"${GATES[@]}"}; do
     echo "### $gate on GPU ${SLOTS[0]} ($(date -Is))"
     if ! CUDA_VISIBLE_DEVICES="${SLOTS[0]}" bash "$BUNDLE_DIR/${gate}.sh"; then
-        if [ "$gate" = "05_diagnose_cnn" ]; then
-            echo "### 05_diagnose_cnn failed — diagnostic only, continuing"
-        else
-            echo "$gate FAILED — nothing launched. Please send back logs/."
-            exit 1
-        fi
+        echo "$gate FAILED — nothing launched. Please send back logs/."
+        exit 1
     fi
 done
 

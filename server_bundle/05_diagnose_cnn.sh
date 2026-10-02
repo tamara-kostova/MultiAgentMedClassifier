@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Step 5 — diagnose the 12-class multiclass tumour CNN on figshare (~5 min, GPU).
+# Done 2026-10-01; the label order it found is now in agents/cnn_tool.py, so run_all.sh /
+# run_parallel.sh no longer run it. Kept for a manual re-check.
 # It scores 0.14 on figshare although figshare was in its training data, so this
 # checks for a class-index-order bug (best label permutation) or a preprocessing
 # mismatch (min-max / percentile / inverted variants). Read-only: it changes nothing.

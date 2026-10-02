@@ -11,9 +11,9 @@
 ## Што е ова
 
 Multi-agent pipeline за автоматска класификација на снимки од мозок (MRI и CT).
-Ова е **втората рунда (v2)**: 16 независни експерименти — 4 системи × 4 задачи (Base,
-Forest, Debate и хомоген Forest; тумор да/не, тип на тумор, мултиплекс склероза, мозочен
-удар). Секој експеримент е **еден Python процес на една GPU** — не користи повеќе јазли и
+Ова е **втората рунда (v2)**: 20 независни експерименти — 5 системи × 4 задачи (Base,
+Forest, Debate, хомоген Forest и Forest со улоги и семплирање; тумор да/не, тип на тумор,
+мултиплекс склероза, мозочен удар). Секој експеримент е **еден Python процес на една GPU** — не користи повеќе јазли и
 не бара MPI или Slurm. Секој експеримент ги обработува точно истите 500 слики како
 претходната рунда (листите се во `server_bundle/image_lists/`).
 
@@ -64,16 +64,17 @@ sudo singularity build container.sif container.def
 Градењето трае ~10–20 минути (симнува torch за CUDA 12.6). На крајот печати верзии на
 `torch`, `transformers` итн. — ако тоа се испише, сликата е добра.
 
-## 3. Проверки пред долгите извршувања (~1 час) — ВАЖНО
+## 3. Проверки пред долгите извршувања (~2 часа) — ВАЖНО
 
-`run_all.sh` и `run_parallel.sh` сами ги пуштаат овие три чекори прво и **не стартуваат
-ништо долго** ако 00 или 10 падне. Може да се пуштат и рачно:
+`run_all.sh` и `run_parallel.sh` сами ги пуштаат овие два чекори прво и **не стартуваат
+ништо долго** ако некој падне. Може да се пуштат и рачно:
 
 | Чекор | Команда | Што прави | Време |
 |---|---|---|---|
 | 00 | `bash server_bundle/00_preflight.sh` | GPU, податоци, сите 2000 слики од листите, checkpoints, модели; една слика низ Forest и Debate | ~10–20 мин |
-| 05 | `bash server_bundle/05_diagnose_cnn.sh` | дијагностика на CNN за тип на тумор (само чита; никогаш не блокира) | ~5 мин |
-| 10 | `bash server_bundle/10_smoke.sh` | секој систем на 6 слики, па проверка на секое поле во резултатите | ~45 мин |
+| 10 | `bash server_bundle/10_smoke.sh` | секој од 20-те експерименти на 2 слики, па проверка на секое поле во резултатите | ~1.5 ч |
+
+(`05_diagnose_cnn.sh` е веќе извршен и поправката е во кодот, не треба повторно.)
 
 - `PREFLIGHT OK` и `SMOKE OK` → може да се стартуваат долгите извршувања;
 - `FAILED` → **да не се стартуваат**; ве молам пратете ми ја папката `logs/`.
@@ -88,8 +89,9 @@ sudo singularity build container.sif container.def
 nohup bash server_bundle/run_all.sh > logs/run_all.log 2>&1 &
 ```
 
-Ги извршува проверките, па сите 16 експерименти по редослед. Вкупно ~130 GPU-часа (5–6 дена
-на една GPU). Ако еден експеримент падне, скриптата го запишува тоа и продолжува со следниот.
+Ги извршува проверките, па сите 20 експерименти по редослед. Вкупно ~170 GPU-часа (околу
+недела на една GPU). Ако серверот има ограничување од 24 ч по job, пуштајте ги
+експериментите еден по еден (подолу) — секој поединечен трае помалку од 24 ч. Ако еден експеримент падне, скриптата го запишува тоа и продолжува со следниот.
 
 ### Ако има повеќе слободни GPU (побрзо)
 
@@ -115,10 +117,12 @@ bash server_bundle/step.sh <систем>_<задача>
 | `forest` | Forest, 4 агенти со различни улоги | ~10 ч |
 | `debate` | Debate, 2 рунди | ~12 ч |
 | `homog` | хомоген Forest (4 × иста улога, со семплирање), само тријажа | ~6 ч |
+| `rolesamp` | Forest со 4 различни улоги, со семплирање, само тријажа | ~6 ч |
 
-Задачи: `binary_tumor`, `multiclass_tumor`, `ms`, `stroke`. Целосниот редослед е во
-`server_bundle/steps.sh`. **`multiclass_tumor` е последна намерно** — ако снема време, неа
-прескокнете ја прва. Времињата се од друга GPU; точната проекција ја печати чекор 10.
+Задачи: `binary_tumor`, `multiclass_tumor`, `ms`, `stroke`. Целосниот редослед (по
+приоритет) е во `server_bundle/steps.sh`: прво `base`, `forest`, `debate`, па `homog` и
+`rolesamp`. Ако снема време, прескокнете ги последните. Времињата се од друга GPU; точната
+проекција ја печати чекор 10.
 
 ### Прекин, ресетирање, повторно стартување
 
@@ -194,9 +198,9 @@ results_<host>_<датум>.tar.gz
 ## What this is
 
 A multi-agent pipeline for automated classification of brain scans (MRI and CT).
-This is the **second round (v2)**: 16 independent experiments, 4 systems × 4 tasks (Base,
-Forest, Debate and a homogeneous Forest; tumour yes/no, tumour subtype, multiple sclerosis,
-stroke). Each one is a **single Python process on a single GPU** — no multi-node, no MPI,
+This is the **second round (v2)**: 20 independent experiments, 5 systems × 4 tasks (Base,
+Forest, Debate, a homogeneous Forest and a sampled role-diverse Forest; tumour yes/no, tumour
+subtype, multiple sclerosis, stroke). Each one is a **single Python process on a single GPU** — no multi-node, no MPI,
 no Slurm required. Every experiment processes exactly the same 500 images as the previous
 round (lists in `server_bundle/image_lists/`).
 
@@ -236,16 +240,17 @@ singularity build --remote container.sif container.def
 Takes ~10–20 minutes. It prints the installed `torch` / `transformers` versions at the
 end; if you see those, the build is good.
 
-## 3. Checks before the long runs (~1 h) — important
+## 3. Checks before the long runs (~2 h) — important
 
-`run_all.sh` and `run_parallel.sh` run these three first by themselves and **start nothing
-long** if 00 or 10 fails. They can also be run by hand:
+`run_all.sh` and `run_parallel.sh` run these two first by themselves and **start nothing
+long** if either fails. They can also be run by hand:
 
 | Step | Command | What it does | Time |
 |---|---|---|---|
 | 00 | `bash server_bundle/00_preflight.sh` | GPU, datasets, all 2000 listed images, checkpoints, models; one image through Forest and Debate | ~10–20 min |
-| 05 | `bash server_bundle/05_diagnose_cnn.sh` | diagnostic of the tumour-subtype CNN (read-only; never blocks) | ~5 min |
-| 10 | `bash server_bundle/10_smoke.sh` | every system on 6 images, then a check of every output field | ~45 min |
+| 10 | `bash server_bundle/10_smoke.sh` | each of the 20 experiments on 2 images, then a check of every output field | ~1.5 h |
+
+(`05_diagnose_cnn.sh` has already been run and its fix is in the code; no need to repeat it.)
 
 - `PREFLIGHT OK` and `SMOKE OK` → start the runs.
 - `FAILED` → please **do not** start them; send me the `logs/` directory.
@@ -254,7 +259,8 @@ Step 10 also prints the **projected total runtime** from the measured seconds/im
 
 ## 4. Run
 
-**One GPU, everything in order** (~130 GPU-hours, 5–6 days):
+**One GPU, everything in order** (~170 GPU-hours, about a week; with a 24 h job limit, run
+the experiments one at a time instead — each single one is under 24 h):
 
 ```bash
 nohup bash server_bundle/run_all.sh > logs/run_all.log 2>&1 &
@@ -280,10 +286,12 @@ bash server_bundle/step.sh <system>_<task>
 | `forest` | Forest, 4 role-diverse agents | ~10 h |
 | `debate` | Debate, 2 rounds | ~12 h |
 | `homog` | homogeneous Forest (4 × the same role, sampled), triage only | ~6 h |
+| `rolesamp` | Forest with the 4 distinct roles, sampled, triage only | ~6 h |
 
-Tasks: `binary_tumor`, `multiclass_tumor`, `ms`, `stroke`. The full order is in
-`server_bundle/steps.sh`. **`multiclass_tumor` is last on purpose** — skip it first if time
-runs out. Estimates come from another GPU; step 10 prints the real projection.
+Tasks: `binary_tumor`, `multiclass_tumor`, `ms`, `stroke`. The full order (by priority) is in
+`server_bundle/steps.sh`: `base`, `forest`, `debate` first, then `homog` and `rolesamp`.
+If time runs out, drop from the end. Estimates come from another GPU; step 10 prints the
+real projection.
 
 **Interruptions are safe.** Every image is written to disk as soon as it is processed.
 If a process dies, the node reboots, or you need the GPU back — just run the same command

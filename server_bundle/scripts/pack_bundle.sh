@@ -11,6 +11,9 @@
 #                            stored uncompressed: the weights do not compress)
 #   SHA256SUMS.txt
 #
+# SKIP_MODELS=1 packs only the code archive: it reuses ../bundle_out/maclf-models.tar if
+# it exists, and otherwise writes no model tar at all (the server already has hf_cache/).
+#
 # Two archives on purpose: the small one can be extracted and the container built
 # while the big one is still copying.
 #
@@ -25,11 +28,13 @@ STAGE="${STAGE:-$PROJECT_ROOT/../bundle_stage}"
 BUNDLE_NAME="MultiAgentMedClassifier"
 
 # Local source directories for the four datasets. Override via the environment if
-# they live elsewhere. They are copied under the names the run scripts expect.
+# they live elsewhere. They are copied under the names the run scripts expect. The
+# server layout (data/figshare, ...) is used when present, else the old local names.
+first_dir() { for d in "$@"; do [ -d "$d" ] && { echo "$d"; return; }; done; echo "$1"; }
 SRC_BR35H="${SRC_BR35H:-data/Br35H}"
-SRC_FIGSHARE="${SRC_FIGSHARE:-data/processed}"
-SRC_MS="${SRC_MS:-data/MS}"
-SRC_STROKE="${SRC_STROKE:-data/Brain_Stroke_CT_Dataset}"
+SRC_FIGSHARE="${SRC_FIGSHARE:-$(first_dir data/figshare data/processed)}"
+SRC_MS="${SRC_MS:-$(first_dir data/sclerosis/MS data/MS)}"
+SRC_STROKE="${SRC_STROKE:-$(first_dir data/stroke/Brain_Stroke_CT_Dataset data/Brain_Stroke_CT_Dataset)}"
 
 SAM3_REPO_URL="${SAM3_REPO_URL:-https://github.com/facebookresearch/sam3.git}"
 
@@ -75,7 +80,9 @@ for d in "$SRC_BR35H" "$SRC_FIGSHARE" "$SRC_MS" "$SRC_STROKE"; do
         missing=1
     fi
 done
-if [ ! -d hf_cache ]; then
+if [ "${SKIP_MODELS:-0}" = "1" ]; then
+    echo "   hf_cache: not needed (SKIP_MODELS=1)"
+elif [ ! -d hf_cache ]; then
     echo "   MISSING hf_cache/ — run: python server_bundle/scripts/prepack_models.py"
     missing=1
 else
@@ -205,15 +212,21 @@ echo "   maclf-code-data.tar.gz  $(du -h "$OUT_DIR/maclf-code-data.tar.gz" | cut
 # Model cache: already-compressed weights, so store without gzip for speed.
 # SKIP_MODELS=1 reuses an existing maclf-models.tar (hf_cache rarely changes, and
 # re-writing 12 GB to reshape the code archive is wasted I/O).
-if [ "${SKIP_MODELS:-0}" = "1" ] && [ -f "$OUT_DIR/maclf-models.tar" ]; then
-    echo "   maclf-models.tar        reused (SKIP_MODELS=1)"
+if [ "${SKIP_MODELS:-0}" = "1" ]; then
+    if [ -f "$OUT_DIR/maclf-models.tar" ]; then
+        echo "   maclf-models.tar        reused (SKIP_MODELS=1)"
+    else
+        echo "   maclf-models.tar        not written (SKIP_MODELS=1; the server keeps its hf_cache/)"
+    fi
 else
     tar -C "$PROJECT_ROOT" -cf "$OUT_DIR/maclf-models.tar" hf_cache
 fi
-echo "   maclf-models.tar        $(du -h "$OUT_DIR/maclf-models.tar" | cut -f1)"
+[ -f "$OUT_DIR/maclf-models.tar" ] && echo "   maclf-models.tar        $(du -h "$OUT_DIR/maclf-models.tar" | cut -f1)"
 
 say "Checksums"
-( cd "$OUT_DIR" && sha256sum maclf-code-data.tar.gz maclf-models.tar > SHA256SUMS.txt && cat SHA256SUMS.txt )
+SUMS=(maclf-code-data.tar.gz)
+[ -f "$OUT_DIR/maclf-models.tar" ] && SUMS+=(maclf-models.tar)
+( cd "$OUT_DIR" && sha256sum "${SUMS[@]}" > SHA256SUMS.txt && cat SHA256SUMS.txt )
 
 cat <<EOF
 

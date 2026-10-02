@@ -19,7 +19,7 @@ FAILURES: list[str] = []
 WARNINGS: list[str] = []
 
 # Full-run steps per system and the number of tasks each runs on.
-FULL_RUN_STEPS = {"base": 4, "forest": 4, "debate": 4, "homog": 4}
+FULL_RUN_STEPS = {"base": 4, "forest": 4, "debate": 4, "homog": 4, "rolesamp": 4}
 # A parse-failure rate above this on a handful of images means the prompts/token
 # budgets are broken on this setup, not that MedGemma is occasionally verbose.
 MAX_PARSE_FAIL_RATE = 1 / 3
@@ -101,16 +101,22 @@ def check_debate(name: str, rows: list[dict], task: str) -> None:
             fail(name, f"debate_round_verdicts has {len(verdicts)} rounds, expected 2")
             break
     advocates = [r.get("debate_advocates") or [] for r in rows]
-    if task == "stroke" and any("sam" in a for a in advocates):
-        fail(name, "SAM3 advocate took part on stroke (SAM3 is ineligible there)")
-    if task == "binary_tumor" and not all("sam" in a for a in advocates):
-        fail(name, "SAM3 advocate missing on binary_tumor")
+    if task in ("ms", "stroke") and any("sam" in a for a in advocates):
+        fail(name, f"SAM3 advocate took part on {task} (SAM3 is ineligible there)")
+    if task.endswith("tumor") and not all("sam" in a for a in advocates):
+        fail(name, f"SAM3 advocate missing on {task}")
+    if task == "multiclass_tumor":
+        # The judge's coarse `winner` is "tumor"; the subtype must reach the prediction.
+        coarse = [r for r in rows if (r.get("predicted_class") or "").strip().lower() == "tumor"]
+        if coarse:
+            fail(name, f"{len(coarse)} rows predict the coarse 'tumor' instead of a subtype")
     if any(r.get("debate_confidence") is not None and not 0 <= r["debate_confidence"] <= 1
            for r in rows):
         fail(name, "debate confidence outside [0, 1]")
 
 
-def check_forest(name: str, rows: list[dict], sampled: bool, temperature: float) -> None:
+def check_forest(name: str, rows: list[dict], sampled: bool, temperature: float,
+                 homogeneous: bool = False) -> None:
     for r in rows:
         votes = r.get("forest_votes") or []
         if len(votes) != 4:
@@ -123,12 +129,14 @@ def check_forest(name: str, rows: list[dict], sampled: bool, temperature: float)
             if len({v.get("seed") for v in votes}) != 4:
                 fail(name, "the 4 sampled agents do not have distinct seeds")
                 return
+    roles = {v.get("role") for r in rows for v in r["forest_votes"]}
+    if homogeneous and roles != {"radiologist"}:
+        fail(name, f"homogeneous forest has roles {sorted(roles)}")
+    if not homogeneous and len(roles) != 4:
+        fail(name, f"role-diverse forest has roles {sorted(roles)}, expected 4 distinct")
     if sampled:
-        roles = {v.get("role") for r in rows for v in r["forest_votes"]}
-        if roles != {"radiologist"}:
-            fail(name, f"homogeneous forest has roles {sorted(roles)}")
         if not (rows[0].get("run_config") or {}).get("triage_only"):
-            fail(name, "homogeneous forest is not triage_only")
+            fail(name, "sampled forest is not triage_only")
         varied = any(
             len({(v.get("diagnosis_name"), v.get("diagnosis_detailed"), v.get("diagnosis_confidence"))
                  for v in r["forest_votes"]}) > 1
@@ -171,6 +179,9 @@ def main() -> int:
         if system == "forest":
             check_forest(name, rows, sampled=False, temperature=args.temperature)
         if system == "homog":
+            check_forest(name, rows, sampled=True, temperature=args.temperature,
+                         homogeneous=True)
+        if system == "rolesamp":
             check_forest(name, rows, sampled=True, temperature=args.temperature)
         lat = [r["latency_s"] for r in rows if r.get("latency_s")]
         if lat:
