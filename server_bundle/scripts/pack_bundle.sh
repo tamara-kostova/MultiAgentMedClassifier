@@ -142,7 +142,7 @@ rsync -a \
     --exclude='/paper' --exclude='/papers' --exclude='/presentation' --exclude='*.pdf' \
     --exclude='*.tar' --exclude='*.tar.gz' --exclude='*.tgz' --exclude='/logs' \
     --exclude='*.zip' --exclude='*.7z' --exclude='*.rar' --exclude='*.mat' \
-    --exclude='*.jsonl' --exclude='*.sif' \
+    --exclude='*.jsonl' --exclude='*.sif' --exclude='/maclf-code-data.tar*' \
     --exclude='/Master_Thesis' --exclude='/realm review' \
     --exclude='/log.log' --exclude='/00_preflight.log' --exclude='*_report.txt' \
     ./ "$DEST/"

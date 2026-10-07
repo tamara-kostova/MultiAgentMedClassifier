@@ -208,9 +208,12 @@ def biomedclip():
     )
 
 def sam3_weights():
-    from huggingface_hub import snapshot_download
-    p = Path(snapshot_download("facebook/sam3", local_files_only=True))
-    assert (p / "sam3.pt").is_file(), "sam3.pt missing"
+    # The same two hf_hub_download calls sam3/model_builder.py makes. snapshot_download
+    # is wrong here: newer huggingface_hub refuses a partial snapshot offline, and the
+    # cache holds only sam3.pt + config.json on purpose.
+    from huggingface_hub import hf_hub_download
+    hf_hub_download("facebook/sam3", "config.json", local_files_only=True)
+    hf_hub_download("facebook/sam3", "sam3.pt", local_files_only=True)
 
 check("MedGemma processor (offline)", medgemma_processor)
 check("MedGemma config (offline)", medgemma_config)
