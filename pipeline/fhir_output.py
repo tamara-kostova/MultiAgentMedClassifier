@@ -114,15 +114,18 @@ def _build_observation(obs_id: str, patient_id: str, study_id: str, state: dict)
         },
         "component": [
             {
-                "code": {"text": "AI confidence"},
-                "valueDecimal": round(confidence, 4),
-            },
-            {
                 "code": {"text": "Calibration temperature (T)"},
                 "valueDecimal": round(temperature, 4),
             },
         ],
     }
+
+    # None when the debate judge gave no readable confidence; omit it, never invent one.
+    if confidence is not None:
+        obs["component"].insert(0, {
+            "code": {"text": "AI confidence"},
+            "valueDecimal": round(confidence, 4),
+        })
 
     if iou is not None:
         obs["component"].append({
