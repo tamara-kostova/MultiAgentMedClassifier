@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Run one v2 evaluation step:  bash server_bundle/step.sh <system>_<task>
 #
-#   system  base | forest | debate | homog | rolesamp | nosam
+#   system  base | forest | debate | debate1 | homog | rolesamp | nosam
 #   task    binary_tumor | multiclass_tumor | ms | stroke
 #
 #   base      System A: standard pipeline
 #   forest    System C: role-diverse Agent Forest, N=4, greedy
 #   debate    System B: advocate debate, 2 rounds
+#   debate1   System B with 1 round (confirms round 1 of the R=2 runs)
 #   homog     H1: homogeneous forest, 4 x radiologist sampled at FOREST_TEMPERATURE, triage only
 #   rolesamp  H2: the 4 roles sampled at FOREST_TEMPERATURE, triage only
 #   nosam     S1: debate without the SAM3 advocate (optional)
@@ -35,6 +36,7 @@ case "$SYSTEM" in
     base)     SYS_ARGS=(--generate_explainability) ;;
     forest)   SYS_ARGS=(--pipeline_mode forest --forest_n_agents 4 --generate_explainability) ;;
     debate)   SYS_ARGS=(--pipeline_mode debate --debate_rounds 2 --generate_explainability) ;;
+    debate1)  SYS_ARGS=(--pipeline_mode debate --debate_rounds 1 --generate_explainability) ;;
     nosam)    SYS_ARGS=(--pipeline_mode debate --debate_rounds 2 --debate_advocates cnn,clip --generate_explainability) ;;
     homog)    SYS_ARGS=(--pipeline_mode forest --forest_roles radiologist "${SAMPLED[@]}") ;;
     rolesamp) SYS_ARGS=(--pipeline_mode forest "${SAMPLED[@]}") ;;
