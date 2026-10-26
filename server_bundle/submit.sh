@@ -71,7 +71,7 @@ case "$1" in
     *)
         if [ "$1" = all ]; then set -- "${V2_STEPS[@]}"; fi
         for step in "$@"; do
-            case " ${V2_STEPS[*]} nosam_binary_tumor debate1_binary_tumor debate1_multiclass_tumor debate1_ms debate1_stroke " in
+            case " ${V2_STEPS[*]} nosam_binary_tumor debate1_binary_tumor debate1_multiclass_tumor debate1_ms debate1_stroke debate3_binary_tumor debate3_multiclass_tumor debate3_ms debate3_stroke " in
                 *" $step "*) ;;
                 *) echo "unknown step '$step' (see server_bundle/steps.sh)"; exit 2 ;;
             esac

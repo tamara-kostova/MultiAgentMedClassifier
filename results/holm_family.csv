@@ -1,0 +1,17 @@
+test,task,stage,comparison
+1,binary_tumor,triage,debate_vs_base
+2,binary_tumor,triage,debate_vs_forest
+3,binary_tumor,final,debate_vs_base
+4,binary_tumor,final,debate_vs_forest
+5,multiclass_tumor,triage,debate_vs_base
+6,multiclass_tumor,triage,debate_vs_forest
+7,multiclass_tumor,final,debate_vs_base
+8,multiclass_tumor,final,debate_vs_forest
+9,ms,triage,debate_vs_base
+10,ms,triage,debate_vs_forest
+11,ms,final,debate_vs_base
+12,ms,final,debate_vs_forest
+13,stroke,triage,debate_vs_base
+14,stroke,triage,debate_vs_forest
+15,stroke,final,debate_vs_base
+16,stroke,final,debate_vs_forest

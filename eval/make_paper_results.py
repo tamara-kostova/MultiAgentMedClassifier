@@ -229,6 +229,90 @@ for row, adj in zip(EXPLO, holm_bonferroni([r["p_raw"] for r in EXPLO])):
 put("family.exploratory.size", len(EXPLO))
 
 
+# A dedicated R=1 run on the same images, made after the R=2 results, tests the exploratory
+# finding. Its two comparisons per task (vs A and C, final stage) form the confirmatory family.
+def debate1_path(t: str) -> Path:
+    return V2 / f"{t}_debate1.jsonl"
+
+
+HAVE_D1 = all(complete(debate1_path(t)) for t in TASKS)
+put("family.confirmatory.size", 2 * len(TASKS) if HAVE_D1 else 0)
+if HAVE_D1:
+    CONF = []
+    for t in TASKS:
+        df, _ = build_task_frame(t, {"A": PATHS[t]["A"], "C": PATHS[t]["C"], "D": str(debate1_path(t))}, pool=())
+        k = TASK_KEY[t]
+        d1 = df["D_final_correct"].values
+        put(f"{k}.D1.final.acc", d1.mean(), "pct")
+        # agreement with the round-1 verdict saved by the R=2 run, aligned by image, not row order
+        r1 = dict(zip(FRAMES[t]["image_path"], DEBATE[t]["r1"]))
+        put(f"{k}.D1.agree", float(np.mean([h == r1[img] for img, h in zip(df["image_path"], d1)])), "pct")
+        for other in "AC":
+            res = mcnemar_exact(d1, df[f"{other}_final_correct"].values)
+            CONF.append({"task": t, "b": other, **res})
+    for row, adj in zip(CONF, holm_bonferroni([r["p_raw"] for r in CONF])):
+        k = f"{TASK_KEY[row['task']]}.final.D1vs{row['b']}"
+        put(f"{k}.aonly", row["a_only_correct"])
+        put(f"{k}.bonly", row["b_only_correct"])
+        R[f"{k}.ptex"] = p_tex(adj)                    # paper prose: no stars
+        R[f"{k}.ptexs"] = p_tex(adj) + stars(adj)      # thesis prose: with stars
+        RAW[f"{k}.p"] = adj
+    put("thesis.d1.allagree", int(all(RAW[f"{TASK_KEY[t]}.D1.agree"] == 1.0 for t in TASKS)))
+
+
+# A dedicated R=3 run on the same images, made after R=1 and R=2: does a third round undo
+# round 2? Its rounds 1-2 should reproduce the R=2 run (greedy decoding). Tests {D3 vs B,
+# D3 vs A} x 4 tasks at the final stage form their own exploratory Holm family.
+def debate3_path(t: str) -> Path:
+    return V2 / f"{t}_debate3.jsonl"
+
+
+HAVE_D3 = all(complete(debate3_path(t)) for t in TASKS)
+put("family.rounds.size", 2 * len(TASKS) if HAVE_D3 else 0)
+if HAVE_D3:
+    ROUNDS = []
+    for t in TASKS:
+        df, meta = build_task_frame(t, {"A": PATHS[t]["A"], "D": str(debate3_path(t))}, pool=())
+        k = TASK_KEY[t]
+        for row in accuracy_rows(df, t, ["D"], meta):
+            if row["stage"] == "final":
+                for f, src in [("acc", "accuracy"), ("lo", "wilson_lo"), ("hi", "wilson_hi")]:
+                    put(f"{k}.D3.final.{f}", row[src], "pct")
+                put(f"{k}.D3.final.ece", row["ece"], ".3f")
+        recs3, recs2 = by_image_path(load_records(debate3_path(t), verbose=False)[0]), debate_records(t)
+        prefix, changed, back, fixed, broke = 0, 0, 0, 0, 0
+        for img, true in zip(df["image_path"], df["true"]):
+            v3 = [_verdict_label(v, t) for v in recs3[img].get("debate_round_verdicts") or []]
+            v2 = [_verdict_label(v, t) for v in recs2[img].get("debate_round_verdicts") or []]
+            prefix += v3[:2] == v2[:2]
+            if len(v3) == 3 and v3[2] != v3[1]:
+                changed += 1
+                back += v3[2] == v3[0]
+                h2, h3 = _score(_prep_pred(v3[1], t), true, t), _score(_prep_pred(v3[2], t), true, t)
+                fixed += h3 > h2
+                broke += h2 > h3
+        put(f"{k}.D3.prefix", prefix / len(df), "pct")
+        put(f"{k}.D3.r3changed", changed)
+        put(f"{k}.D3.r3changedpct", changed / len(df), "pct")
+        put(f"{k}.D3.r3back", back)
+        put(f"{k}.D3.r3fixed", fixed)
+        put(f"{k}.D3.r3broke", broke)
+        # B (R=2) aligned to this frame by image, not row order
+        b_hit = dict(zip(FRAMES[t]["image_path"], FRAMES[t]["B_final_correct"]))
+        d3 = df["D_final_correct"].values
+        for other, hits in [("B", np.array([b_hit[img] for img in df["image_path"]])),
+                            ("A", df["A_final_correct"].values)]:
+            ROUNDS.append({"task": t, "b": other, **mcnemar_exact(d3, hits)})
+    for row, adj in zip(ROUNDS, holm_bonferroni([r["p_raw"] for r in ROUNDS])):
+        k = f"{TASK_KEY[row['task']]}.final.D3vs{row['b']}"
+        put(f"{k}.aonly", row["a_only_correct"])
+        put(f"{k}.bonly", row["b_only_correct"])
+        R[f"{k}.ptex"] = p_tex(adj)
+        R[f"{k}.ptexs"] = p_tex(adj) + stars(adj)
+        RAW[f"{k}.p"] = adj
+    put("thesis.d3.allprefix", int(all(RAW[f"{TASK_KEY[t]}.D3.prefix"] == 1.0 for t in TASKS)))
+
+
 # Round-2 flips that break a correct verdict: whose position does the new verdict take?
 for t in TASKS:
     df = FRAMES[t]
@@ -397,6 +481,16 @@ for code in "ABCH":
     put(f"{code}.latency.hi", max(meds), ".0f")
     put(f"{code}.ratio.lo", min(ratios), ".1f")
     put(f"{code}.ratio.hi", max(ratios), ".1f")
+# the dedicated R=1 / R=3 debate runs, same images and GPU sharing as the others
+for code, ok, path in [("D1", HAVE_D1, debate1_path), ("D3", HAVE_D3, debate3_path)]:
+    if not ok:
+        continue
+    meds = []
+    for t in TASKS:
+        recs = list(by_image_path(load_records(path(t), verbose=False)[0]).values())
+        meds.append(float(np.median([r["latency_s"] for r in recs if not r.get("error") and r.get("latency_s")])))
+    put(f"{code}.latency.lo", min(meds), ".0f")
+    put(f"{code}.latency.hi", max(meds), ".0f")
 
 
 # ── LaTeX tables ──────────────────────────────────────────────────────────────

@@ -257,3 +257,5 @@ logs/
 # UI example scans are small and must ship with the repo (ui/demo.py loads ui/examples/<task>/*).
 !ui/examples/**
 maclf-code-data.tar 4/
+# Summary CSVs of the final v2 evaluation (derived from the ignored outputs/eval/v2 JSONLs).
+!results/README.md
