@@ -59,9 +59,23 @@ gradio>=6.0,<7
 
 python-dotenv>=1.2
 
+# ── EBRAINS atlas enrichment + DICOM input (optional at runtime) ─────────────
+# PipelineConfig.enable_atlas / --enable_atlas: siibra downloads Julich-Brain maps on
+# first use. Without pydicom the pipeline accepts PNG/JPEG only.
+siibra>=1.0a4
+nibabel>=5.0
+pydicom>=2.4
+# MNI152 registration for non-MNI scans (SiibraAtlasTool(auto_register=True)):
+antspyx>=0.5
+nilearn>=0.10
+
 # ── Optional ─────────────────────────────────────────────────────────────────
-# utils/convert.py (figshare .mat -> PNG) only:
+# utils/convert_mat.py (figshare .mat -> PNG) only:
 # mat73
+# utils/convert_h5.py (BraTS2020 per-slice .h5 -> PNG + NIfTI) only:
+# h5py
+# scripts/brats20_prepare.py --download (Kaggle BraTS20 NIfTI cases) only:
+# kagglehub
 # Formatting:
 # black>=24.0
 # isort>=5.13

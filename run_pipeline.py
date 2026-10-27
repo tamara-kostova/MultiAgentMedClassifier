@@ -2,8 +2,11 @@
 Entry point for the multi-agent neuroimaging pipeline.
 
 Usage examples:
-  # Single image:
-  python run_pipeline.py --image data/processed/1/2.jpg --task binary_tumor
+  # Single image (PNG/JPEG or a single DICOM slice):
+  python run_pipeline.py --image image.jpg --task binary_tumor
+
+  # DICOM series directory (selects the middle slice automatically):
+  python run_pipeline.py --image path/to/dicom_series --task binary_tumor
 
   # Full evaluation across all datasets:
   python run_pipeline.py --eval \
@@ -77,7 +80,11 @@ def parse_args(argv: list[str] | None = None):
 
     # Mode
     mode = p.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--image", type=str, help="Path to a single input image")
+    mode.add_argument(
+        "--image",
+        type=str,
+        help="Path to PNG/JPEG, a single DICOM file, or a directory of DICOM slices",
+    )
     mode.add_argument("--eval", action="store_true", help="Run full evaluation")
     mode.add_argument(
         "--tumor_eval",
@@ -292,6 +299,14 @@ def parse_args(argv: list[str] | None = None):
         action="store_true",
         help="Run Grad-CAM++ and Integrated Gradients after CNN classification",
     )
+    p.add_argument(
+        "--enable_atlas",
+        action="store_true",
+        help=(
+            "Run the EBRAINS/siibra atlas_enrichment node after SAM3 (standard "
+            "pipeline only; needs `siibra`, downloads Julich-Brain maps on first use)"
+        ),
+    )
 
     # Pipeline mode (System B / C)
     p.add_argument(
@@ -475,6 +490,7 @@ def build_config(args) -> PipelineConfig:
         routing=routing_cfg,
         output_dir=args.output_dir,
         generate_explainability=args.generate_explainability,
+        enable_atlas=args.enable_atlas,
         skip_report=args.skip_report,
         pipeline_mode=args.pipeline_mode,
         triage_only=args.triage_only,

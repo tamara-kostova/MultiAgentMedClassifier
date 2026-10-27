@@ -1,0 +1,28 @@
+{
+  "image": "outputs/siibra_test/volume_100_slice_83_t1ce.png",
+  "mask": "outputs/siibra_test/volume_100_slice_83_mask.png",
+  "mask_synthetic": false,
+  "nifti": "outputs/siibra_test/volume_100.nii.gz",
+  "dicom": null,
+  "auto_register": true,
+  "registration_type": "Affine",
+  "atlas_enrichment": {
+    "mni_coords": [
+      -52.23,
+      44.1,
+      5.0
+    ],
+    "assigned_region": "Frontal-I (GapMap) left",
+    "hemisphere": "left",
+    "assignment_scores": [
+      {
+        "region": "Frontal-I (GapMap) left",
+        "score": 0.6053
+      },
+      {
+        "region": "Area 45 (IFG) left",
+        "score": 0.0827
+      }
+    ]
+  }
+}

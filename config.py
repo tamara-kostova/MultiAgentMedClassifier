@@ -358,6 +358,11 @@ class PipelineConfig:
     # accuracy-neutral: without the fused report the final class falls back to the
     # CNN prediction (then BiomedCLIP, then triage).
     skip_report: bool = False
+    # Set True to run the EBRAINS/siibra atlas_enrichment node (standard pipeline
+    # only): SAM3 mask centroid → MNI152 → Julich-Brain region, shown to MedGemma's
+    # report and written to FHIR. Needs `siibra` and network access on first use;
+    # off for the paper/eval runs.
+    enable_atlas: bool = False
 
     # ── Pipeline variant (recorded in every eval row's run_config) ───────────
     pipeline_mode: str = "standard"  # standard | debate | forest

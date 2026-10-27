@@ -53,6 +53,7 @@ explainability.
 | `CNNClassifier` | VGG16 / DenseNet169 / ResNet101 | Task-specific classification |
 | `SAM3Tool` | SAM3 frozen backbone + linear probe | Lesion segmentation (Dice = 0.836) |
 | `BiomedCLIPTool` | microsoft/BiomedCLIP (ViT-B/16) | Linear probe on layer-6 features; falls back to zero-shot (final image embedding) when no probe checkpoint is available |
+| `SiibraAtlasTool` | EBRAINS Julich-Brain v2.9 | Anatomical region assignment via MNI152 coordinates |
 
 **Pipeline flow** (linear — every node runs for every image):
 
@@ -82,9 +83,67 @@ SAM3 runs only for `binary_tumor` and `multiclass_tumor` — the linear probe wa
 | `stroke` | stroke / normal (CT) | DenseNet169 | 97.7% |
 | `ms` | MS / normal (MRI) | ResNet101 | 59.7% |
 
-Accuracies are from the prior CNN benchmark, each on its own test split. They do not carry over
-to the evaluation datasets used here: on 3-class figshare the multiclass CNN scores 0.140
-(0.271–0.314 with the softmax masked to the three figshare classes).
+## Project Structure
+
+```
+MultiAgentMedClassifier/
+├── agents/
+│   ├── medgemma_agent.py   # MedGemma: triage, bbox diagnosis, report
+│   ├── cnn_tool.py         # CNN classifier (VGG16 / DenseNet / ResNet)
+│   ├── sam3_tool.py        # SAM3 segmentation + linear probe head
+│   ├── biomedclip_tool.py  # BiomedCLIP zero-shot / linear probe
+│   └── sibra_tool.py       # EBRAINS siibra: lesion centroid → Julich-Brain region
+├── pipeline/
+│   ├── graph.py            # LangGraph StateGraph assembly
+│   ├── nodes.py            # Node factory functions
+│   ├── state.py            # NeuroimagingState TypedDict
+│   └── fhir_output.py      # FHIR R4 DiagnosticReport serialiser
+├── explainability/
+│   ├── saliency.py         # GradCAM, GradCAM++, Integrated Gradients (used by pipeline)
+│   ├── cnns.py             # Standalone CNN explainability experiment script (not imported by pipeline)
+│   ├── multimodal.py       # Standalone CLIP/BiomedCLIP experiment script (not imported by pipeline)
+│   └── uncertainty.py      # Standalone calibration experiment script (not imported by pipeline)
+├── eval/
+│   ├── evaluate.py         # Metrics: accuracy, F1, ECE, specificity, SAM3-rate, latency
+│   └── tumor_eval.py       # Resumable JSONL eval for single tumor datasets (Figshare / Br35H)
+├── prompts/
+│   ├── system_prompt.txt       # MedGemma radiologist persona + JSON schema
+│   └── system_prompt_bbox.txt  # Same schema, bbox-overlay context
+├── tests/
+│   └── test_atlas_enrichment.py  # Standalone test for atlas node on a single image
+├── checkpoints/            # PyTorch state dicts: {arch}_{dataset}_final.pt
+├── outputs/
+│   ├── explainability/     # Saliency maps: gradcam_pp_*.png, ig_*.png
+│   ├── segmentation/       # SAM3 binary masks (mask_*.png) and bbox overlays (guided_*.png)
+│   ├── fhir/               # FHIR R4 bundles: fhir_<id>.json
+│   └── eval/               # comparison_summary.csv, <task>_tumor_eval.jsonl
+├── app.py                  # Gradio web GUI (python app.py → http://localhost:7860)
+├── config.py               # Central config dataclasses
+├── run_pipeline.py         # CLI entry point
+├── .env.example            # API key template - copy to .env and fill in HF_TOKEN
+└── requirements.txt
+```
+
+## Quick Start (GUI)
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+# Set your HuggingFace token (see Setup section below)
+cp .env.example .env
+# edit .env and paste your HF_TOKEN
+
+# Launch the web interface
+python app.py
+# Open http://localhost:7860 in a browser
+```
+
+Upload a brain scan, choose a task, click **Run Pipeline** - the full agent pipeline runs and
+displays the prediction, clinical report, segmentation overlay, and saliency maps.
+
+![App interface](app_preview.png)
 
 ## Setup
 
@@ -177,11 +236,24 @@ pipeline only prints a warning. Checkpoint paths are relative, so run from the r
 
 ## Usage
 
-**Single image:**
+**Single image (PNG/JPEG):**
 
 ```bash
 python run_pipeline.py --image scan.png --task binary_tumor
 ```
+
+**Single DICOM slice:**
+
+```bash
+python run_pipeline.py --image scan.dcm --task binary_tumor
+```
+
+**DICOM series directory:**
+
+```bash
+python run_pipeline.py --image /path/to/dicom_series --task binary_tumor
+```
+Raw DICOM inputs are converted to `outputs/preprocessed/*.png` before routing. For series inputs, the middle slice is selected as the representative 2D image and the chosen slice path is preserved in `metadata["dicom_path"]` for atlas enrichment.
 
 **With explainability (Grad-CAM++ + Integrated Gradients):**
 
@@ -547,10 +619,57 @@ The report is returned in `state["final_report"]` (plain text, ≤150 words). Th
 | `explainability_result` | Paths to `gradcam_pp_*.png` and `ig_*.png` (if enabled) |
 | `verification_result` | MedGemma post-hoc agreement check against the Grad-CAM++ saliency map (if explainability enabled) |
 | `fhir_report` | FHIR R4 DiagnosticReport dict; saved to `outputs/fhir/fhir_<id>.json`. Status is `preliminary` when `requires_human_review`, else `final`. |
+| `atlas_enrichment` | EBRAINS atlas assignment: `assigned_region`, `hemisphere`, `mni_coords`, `assignment_scores` (standard pipeline with `--enable_atlas`; `None` otherwise or when SAM3 produced no mask) |
 
 On disagreement, `verification_node` caps the confidence at 0.55 and sets
 `requires_human_review`, and the report keeps both. The IoU penalty never scales confidence
 below half (`low_iou_penalty_floor`).
+
+## Atlas Enrichment (EBRAINS / siibra)
+
+With `--enable_atlas` (`PipelineConfig.enable_atlas`), the standard pipeline runs an `atlas_enrichment` node between `sam3_segment` and `biomedclip`: an anatomical assignment step using [siibra-python](https://siibra-python.readthedocs.io) and the [EBRAINS Julich-Brain Cytoarchitectonic Atlas v2.9](https://search.kg.ebrains.eu). It is off by default (none of the paper/eval runs use it), is not part of the forest/debate pipelines or the stage pipeline, and is skipped with a log line when `siibra` is not installed. The first use downloads the Julich-Brain statistical maps.
+
+The SAM3 mask centroid is mapped to MNI152 coordinates, which are then assigned to the nearest cytoarchitectonic region via a statistical probability map. The node only enriches the report prompt and the FHIR bundle; it does not change the final class.
+
+**Coordinate accuracy (best → worst):**
+
+| Input | How it's used |
+|---|---|
+| `metadata["nifti_path"]` (+ `SiibraAtlasTool(auto_register=True)`, needs `antspyx`) | NIfTI affine → native coords → ANTs registration to MNI152. The only option that is actually in MNI space for BraTS (SRI24) or scanner-space data |
+| `metadata["nifti_path"]` alone | NIfTI affine taken as MNI → only right if the scan already is in MNI152 |
+| `metadata["dicom_path"]` | `ImagePositionPatient` + `PixelSpacing` → scanner-space coords (≈ MNI for pre-registered datasets) |
+| PNG only (default) | Pixel centroid normalised to MNI152 range; z locked to axial midplane (0 mm) |
+
+`metadata["slice_index"]` says which axial slice of the NIfTI the 2D image is; without it the
+middle slice is assumed, which can put z tens of mm off. Pass coordinate metadata at inference time:
+```python
+initial_state("scan.png", "binary_tumor", metadata={"nifti_path": "scan.nii.gz", "slice_index": 67})
+```
+
+The assignment is of the mask **centroid** only. For a large lesion (necrotic core + oedema) the centroid
+often lies in white matter, which the Julich-Brain cytoarchitectonic maps do not cover, so the top
+`assignment_scores` entry can be ~0 — read the score, not just the region name.
+
+If the main input itself is DICOM, `initial_state()` injects `metadata["dicom_path"]` automatically after preprocessing the slice or series into a PNG (requires `pydicom`; without it only PNG/JPEG inputs are accepted).
+
+**BraTS 2020 cases from Kaggle** (`awsaf49/brats20-dataset-training-validation`, NIfTI, SRI24 space):
+```bash
+pip install kagglehub   # + ~/.kaggle/access_token from kaggle.com/settings, licence accepted once
+python scripts/brats20_prepare.py --cases 1 2 3 --download     # -> outputs/brats_test/<case>_slice_<z>_{t1ce,mask}.png + _native.nii.gz
+python scripts/brats20_sam3_atlas_check.py --atlas              # SAM3 Dice vs ground truth + registered atlas region per case
+```
+
+**Test the node standalone (without running the full pipeline):**
+```bash
+python tests/test_atlas_enrichment.py --image data/scan.png --mask outputs/segmentation/mask_abc123.png
+# BraTS (SRI24 space): register to MNI152 and give the slice index
+python tests/test_atlas_enrichment.py --image case_slice_67_t1ce.png --mask case_slice_67_mask.png \
+    --nifti case_t1ce.nii.gz --slice 67 --register
+```
+
+The `atlas_enrichment` result flows into the MedGemma report prompt and is serialised as an `ebrains-atlas-assignment` extension in the FHIR bundle.
+
+**Note:** z=0.0 (axial midplane) is assumed when no NIfTI or DICOM is available. Region assignments are anatomically meaningful but spatially approximate. Scores are Julich-Brain probability map values; scores < 0.1 occur near region boundaries or at the midplane.
 
 ## Explainability Methods
 
@@ -647,7 +766,7 @@ MultiAgentMedClassifier/
 ├── server_bundle/          # Faculty GPU server hand-off (Singularity, step scripts, PLAN.md)
 ├── docker/                 # MCP image docs and pinned requirements (Dockerfile at repo root)
 ├── checkpoints/            # Weights (auto-downloaded) + upload_*.py scripts for the HF repos
-├── utils/convert.py        # figshare .mat -> PNG conversion
+├── utils/                  # convert_mat.py (figshare .mat -> PNG), convert_h5.py (BraTS h5 -> PNG+NIfTI)
 ├── outputs/                # segmentation/, explainability/, fhir/, eval/, analysis/
 ├── app.py                  # Gradio entry point (python app.py → http://localhost:7860)
 ├── run_pipeline.py         # CLI: single image, --eval, --tumor_eval, --dataset_eval

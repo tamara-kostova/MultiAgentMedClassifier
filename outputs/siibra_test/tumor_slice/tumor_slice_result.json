@@ -1,0 +1,28 @@
+{
+  "image": "outputs/siibra_test/tumor_slice/tumor_slice.png",
+  "mask": "outputs/siibra_test/tumor_slice/tumor_mask.png",
+  "mask_synthetic": false,
+  "nifti": "data/BraTS2021/BraTS2021_Training_Data/BraTS2021_00000/BraTS2021_00000_t1ce.nii.gz",
+  "dicom": null,
+  "auto_register": true,
+  "registration_type": "Affine",
+  "atlas_enrichment": {
+    "mni_coords": [
+      42.0,
+      -33.0,
+      9.0
+    ],
+    "assigned_region": "Area TE 2.2 (STG) right",
+    "hemisphere": "right",
+    "assignment_scores": [
+      {
+        "region": "Area TE 2.2 (STG) right",
+        "score": 0.2295
+      },
+      {
+        "region": "Area TE 1.1 (HESCHL) right",
+        "score": 0.0022
+      }
+    ]
+  }
+}

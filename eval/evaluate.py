@@ -136,15 +136,24 @@ def compute_oracle_routing(cnn_result: dict, routing_cfg=None) -> str:
 # ── Dataset loader ────────────────────────────────────────────────────────────
 
 
+DICOM_EXTENSIONS = {".dcm", ".dicom", ".ima"}
+
+
+def _is_dicom_series_dir(path: Path) -> bool:
+    """A class-folder subdirectory holding DICOM slices (one sample per series)."""
+    return any(f.suffix.lower() in DICOM_EXTENSIONS for f in path.iterdir() if f.is_file())
+
+
 def load_test_split(dataset_dir: str, task: str) -> list[dict]:
     """
     Load test split from a directory structured as:
-        <dataset_dir>/<class_name>/<image_file>
+        <dataset_dir>/<class_name>/<image_file_or_dicom_series_dir>
 
     Non-recursive (images must sit directly in the class folder). Skips class
     folders named in eval.tumor_eval._DEFAULT_EXCLUDE_DIRS (e.g. stroke's
     lesion-painted OVERLAY) or ending in "_mask", matches extensions
-    case-insensitively (.png/.jpg/.jpeg), and returns a sorted list.
+    case-insensitively (.png/.jpg/.jpeg, plus .dcm/.dicom/.ima single slices and
+    subdirectories of DICOM slices, one sample per series), and returns a sorted list.
 
     Returns list of {"image_path": str, "label": str, "task": str}
     """
@@ -155,14 +164,18 @@ def load_test_split(dataset_dir: str, task: str) -> list[dict]:
             continue
         if class_dir.name.endswith("_mask") or class_dir.name in _DEFAULT_EXCLUDE_DIRS:
             continue
-        for img_file in sorted(class_dir.iterdir()):
-            if not img_file.is_file() or img_file.suffix.lower() not in IMAGE_EXTENSIONS:
-                continue
-            if img_file.stem.endswith("_mask"):
+        for item in sorted(class_dir.iterdir()):
+            if item.is_file():
+                suffix = item.suffix.lower()
+                if suffix not in IMAGE_EXTENSIONS and suffix not in DICOM_EXTENSIONS:
+                    continue
+                if item.stem.endswith("_mask"):
+                    continue
+            elif not (item.is_dir() and _is_dicom_series_dir(item)):
                 continue
             samples.append(
                 {
-                    "image_path": str(img_file),
+                    "image_path": str(item),
                     "label": class_dir.name,
                     "task": task,
                 }
