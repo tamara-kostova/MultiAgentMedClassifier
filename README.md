@@ -635,20 +635,36 @@ The SAM3 mask centroid is mapped to MNI152 coordinates, which are then assigned 
 
 | Input | How it's used |
 |---|---|
-| `metadata["nifti_path"]` | NIfTI affine → exact MNI coords |
+| `metadata["nifti_path"]` (+ `SiibraAtlasTool(auto_register=True)`, needs `antspyx`) | NIfTI affine → native coords → ANTs registration to MNI152. The only option that is actually in MNI space for BraTS (SRI24) or scanner-space data |
+| `metadata["nifti_path"]` alone | NIfTI affine taken as MNI → only right if the scan already is in MNI152 |
 | `metadata["dicom_path"]` | `ImagePositionPatient` + `PixelSpacing` → scanner-space coords (≈ MNI for pre-registered datasets) |
 | PNG only (default) | Pixel centroid normalised to MNI152 range; z locked to axial midplane (0 mm) |
 
-Pass coordinate metadata at inference time:
+`metadata["slice_index"]` says which axial slice of the NIfTI the 2D image is; without it the
+middle slice is assumed, which can put z tens of mm off. Pass coordinate metadata at inference time:
 ```python
-initial_state("scan.png", "binary_tumor", metadata={"nifti_path": "scan.nii.gz"})
+initial_state("scan.png", "binary_tumor", metadata={"nifti_path": "scan.nii.gz", "slice_index": 67})
 ```
 
+The assignment is of the mask **centroid** only. For a large lesion (necrotic core + oedema) the centroid
+often lies in white matter, which the Julich-Brain cytoarchitectonic maps do not cover, so the top
+`assignment_scores` entry can be ~0 — read the score, not just the region name.
+
 If the main input itself is DICOM, `initial_state()` injects `metadata["dicom_path"]` automatically after preprocessing the slice or series into a PNG (requires `pydicom`; without it only PNG/JPEG inputs are accepted).
+
+**BraTS 2020 cases from Kaggle** (`awsaf49/brats20-dataset-training-validation`, NIfTI, SRI24 space):
+```bash
+pip install kagglehub   # + ~/.kaggle/access_token from kaggle.com/settings, licence accepted once
+python scripts/brats20_prepare.py --cases 1 2 3 --download     # -> outputs/brats_test/<case>_slice_<z>_{t1ce,mask}.png + _native.nii.gz
+python scripts/brats20_sam3_atlas_check.py --atlas              # SAM3 Dice vs ground truth + registered atlas region per case
+```
 
 **Test the node standalone (without running the full pipeline):**
 ```bash
 python tests/test_atlas_enrichment.py --image data/scan.png --mask outputs/segmentation/mask_abc123.png
+# BraTS (SRI24 space): register to MNI152 and give the slice index
+python tests/test_atlas_enrichment.py --image case_slice_67_t1ce.png --mask case_slice_67_mask.png \
+    --nifti case_t1ce.nii.gz --slice 67 --register
 ```
 
 The `atlas_enrichment` result flows into the MedGemma report prompt and is serialised as an `ebrains-atlas-assignment` extension in the FHIR bundle.

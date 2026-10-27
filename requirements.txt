@@ -72,6 +72,10 @@ nilearn>=0.10
 # ── Optional ─────────────────────────────────────────────────────────────────
 # utils/convert_mat.py (figshare .mat -> PNG) only:
 # mat73
+# utils/convert_h5.py (BraTS2020 per-slice .h5 -> PNG + NIfTI) only:
+# h5py
+# scripts/brats20_prepare.py --download (Kaggle BraTS20 NIfTI cases) only:
+# kagglehub
 # Formatting:
 # black>=24.0
 # isort>=5.13

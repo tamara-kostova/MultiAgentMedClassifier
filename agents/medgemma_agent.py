@@ -212,10 +212,7 @@ You are given multiple images from the same case:
 Pipeline outputs (use these together with the images to inform your diagnosis):
 Task: {task}
 Route: {routing_path}
-
-Known scan metadata (DICOM/header context, if available):
-{metadata_context}
-
+{metadata_block}
 Initial MedGemma triage diagnosis:
 {initial_medgemma_dx}
 
@@ -239,11 +236,7 @@ Explainability outputs:
 
 Spatial alignment — GradCAM++ ∩ SAM3 mask IoU: {saliency_iou}
 (IoU < 0.3 suggests the CNN attended to background rather than the lesion)
-
-EBRAINS atlas assignment (Julich-Brain parcellation):
-{atlas_enrichment}
-(If available, use the assigned_region and hemisphere to contextualise the finding anatomically)
-
+{atlas_block}
 Your response MUST contain exactly two sections in this order:
 
 FINDINGS:
@@ -454,20 +447,31 @@ class MedGemmaAgent:
 
         iou_str = f"{saliency_iou:.3f}" if saliency_iou is not None else "Not computed."
 
+        # Both blocks are empty on the default (PNG, no atlas) path, so the prompt is
+        # byte-identical to the one behind the published runs.
+        metadata_block = ""
+        metadata_context = self._format_metadata_context(metadata)
+        if metadata_context != "Not available.":
+            metadata_block = (
+                "\nKnown scan metadata (DICOM/header context, if available):\n"
+                f"{metadata_context}\n"
+            )
+        atlas_block = ""
         if atlas_enrichment:
-            atlas_str = (
+            atlas_block = (
+                "\nEBRAINS atlas assignment (Julich-Brain parcellation):\n"
                 f"Region: {atlas_enrichment.get('assigned_region', 'unassigned')} | "
                 f"Hemisphere: {atlas_enrichment.get('hemisphere', 'unknown')} | "
                 f"MNI: {atlas_enrichment.get('mni_coords', [])} | "
-                f"Top candidates: {atlas_enrichment.get('assignment_scores', [])[:3]}"
+                f"Top candidates: {atlas_enrichment.get('assignment_scores', [])[:3]}\n"
+                "(Use the assigned_region and hemisphere to contextualise the finding anatomically)\n"
             )
-        else:
-            atlas_str = "Not available (SAM3 path not taken or siibra query failed)."
 
         prompt = REPORT_PROMPT_TEMPLATE.format(
             task=task,
             routing_path=" → ".join(routing_path),
-            metadata_context=self._format_metadata_context(metadata),
+            metadata_block=metadata_block,
+            atlas_block=atlas_block,
             initial_medgemma_dx=fmt(initial_medgemma_dx),
             sam3_medgemma_dx=fmt(sam3_medgemma_dx),
             cnn_result=fmt(cnn_result),
@@ -481,7 +485,6 @@ class MedGemmaAgent:
             explainability_result=fmt(explainability_result),
             verification_result=fmt(verification_result),
             saliency_iou=iou_str,
-            atlas_enrichment=atlas_str,
         )
         image_paths = [image_path]
         if sam3_result and sam3_result.get("guided_image_path"):

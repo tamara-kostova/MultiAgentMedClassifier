@@ -20,6 +20,10 @@ from pathlib import Path
 from typing import Optional
 
 
+# Top probability below this = no map covers the point; siibra's background entry is 4.2e-05.
+MIN_ASSIGNMENT_SCORE = 1e-3
+
+
 class SiibraAtlasTool:
     """
     Wraps siibra-python for anatomical assignment from lesion centroids.
@@ -69,6 +73,7 @@ class SiibraAtlasTool:
         nifti_path: Optional[str] = None,   # NIfTI for affine (most accurate)
         dicom_path: Optional[str] = None,   # DICOM for scanner-space coords
         voxel_size_mm: float = 1.0,
+        slice_index: Optional[int] = None,  # axial index of the 2D slice in the NIfTI volume
     ) -> dict:
         """
         Assign a SAM3 lesion mask centroid to a brain atlas region.
@@ -77,6 +82,8 @@ class SiibraAtlasTool:
             mask:         binary 2D mask (from SAM3Tool output)
             nifti_path:   path to the NIfTI scan the mask was derived from
             voxel_size_mm: fallback voxel size if no NIfTI affine is available
+            slice_index:  which axial slice of the NIfTI the 2D mask is; defaults to
+                          the middle slice, which can put z tens of mm off
 
         Returns dict with:
             mni_coords:          [x, y, z] in MNI152 mm
@@ -94,6 +101,7 @@ class SiibraAtlasTool:
             pixel_centroid, nifti_path, voxel_size_mm,
             image_size=mask.shape[:2],
             dicom_path=dicom_path,
+            slice_index=slice_index,
         )
 
         # Step 3: siibra anatomical assignment via Map (siibra 1.x API)
@@ -129,11 +137,19 @@ class SiibraAtlasTool:
         top5 = assignments.nlargest(5, "map value")
         best  = top5.iloc[0]
         region_name = str(best["region"])
+        hemisphere = self._hemisphere(region_name)
+        if float(best["map value"]) < MIN_ASSIGNMENT_SCORE:
+            # Where no map covers the point (white matter, outside the cytoarchitectonic
+            # maps — typical for a large lesion's centroid) siibra still returns a
+            # background entry (4.2e-05, "CGL right" at every such point). The name and
+            # its hemisphere are then meaningless.
+            region_name = "unassigned"
+            hemisphere = "left" if float(mni_coords[0]) < 0 else "right"
 
         result = {
             "mni_coords":       [round(float(v), 2) for v in mni_coords],
             "assigned_region":  region_name,
-            "hemisphere":       self._hemisphere(region_name),
+            "hemisphere":       hemisphere,
             "assignment_scores": [
                 {
                     "region": str(row["region"]),
@@ -167,6 +183,7 @@ class SiibraAtlasTool:
         voxel_size_mm: float,
         image_size: tuple = (224, 224),  # (H, W) of the mask
         dicom_path: Optional[str] = None,
+        slice_index: Optional[int] = None,
     ) -> np.ndarray:
         """
         Convert 2D pixel centroid to 3D MNI mm coordinates.
@@ -187,7 +204,7 @@ class SiibraAtlasTool:
         if nifti_path and Path(nifti_path).exists():
             img    = nib.load(nifti_path)
             affine = img.affine
-            z_slice = img.shape[2] // 2
+            z_slice = img.shape[2] // 2 if slice_index is None else int(slice_index)
             voxel   = np.array([col, row, z_slice, 1.0])
             native_coords = (affine @ voxel)[:3]
             if self.auto_register:

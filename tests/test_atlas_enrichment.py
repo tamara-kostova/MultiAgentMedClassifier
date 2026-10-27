@@ -64,6 +64,7 @@ def run(
     output_path: str | None = None,
     auto_register: bool = False,
     registration_type: str = "Affine",
+    slice_index: int | None = None,
 ):
     from agents.sibra_tool import SiibraAtlasTool
     from pipeline.nodes import make_atlas_enrichment_node
@@ -87,6 +88,8 @@ def run(
         state["metadata"]["nifti_path"] = nifti_path
     if dicom_path:
         state["metadata"]["dicom_path"] = dicom_path
+    if slice_index is not None:
+        state["metadata"]["slice_index"] = slice_index
     state["routing_path"] = ["triage", "sam3_segment"]
 
     # ── Run tool directly ─────────────────────────────────────────────────────
@@ -102,6 +105,7 @@ def run(
         mask=mask_arr.astype(np.uint8),
         nifti_path=nifti_path,
         dicom_path=dicom_path,
+        slice_index=slice_index,
     )
     print(json.dumps(atlas_result, indent=2, default=str))
 
@@ -152,6 +156,8 @@ def main():
     parser.add_argument("--mask",   default=None,  help="Binary mask PNG (white = lesion). Auto-generated if omitted.")
     parser.add_argument("--nifti",  default=None,  help="NIfTI file for accurate MNI affine")
     parser.add_argument("--dicom",  default=None,  help="DICOM file for scanner-space coords")
+    parser.add_argument("--slice",  type=int, default=None,
+                        help="Axial index of --image within --nifti (default: middle slice)")
     parser.add_argument("--output", default=None,  help="Save result JSON to this path (default: outputs/siibra_test/<image_stem>_result.json)")
     parser.add_argument("--register", action="store_true",
                         help="Register NIfTI to MNI152 via ANTsPy before siibra lookup. "
@@ -170,7 +176,8 @@ def main():
 
     try:
         run(args.image, args.mask, args.nifti, args.dicom, output_path,
-            auto_register=args.register, registration_type=args.registration_type)
+            auto_register=args.register, registration_type=args.registration_type,
+            slice_index=args.slice)
     except ModuleNotFoundError as e:
         print(f"\nERROR: missing dependency — {e}")
         print("Run:  pip install siibra nibabel pydicom antspyx nilearn")

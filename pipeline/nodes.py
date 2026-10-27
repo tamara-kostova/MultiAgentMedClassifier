@@ -687,6 +687,7 @@ def make_atlas_enrichment_node(siibra_tool=None):
                 mask=mask.astype(np.uint8),
                 nifti_path=nifti_path,
                 dicom_path=dicom_path,
+                slice_index=meta.get("slice_index"),
             )
             print(
                 f"[atlas_enrichment] lesion → {atlas_result['assigned_region']} "
