@@ -1,0 +1,5 @@
+model,n,accuracy,f1_macro,sensitivity,specificity,precision,tn,fp,fn,tp,mean_conf
+conservative,500,0.948,0.9479,0.984,0.912,0.9179,228,22,4,246,0.8153
+differential,500,0.84,0.838,0.952,0.728,0.7778,182,68,12,238,0.9373
+emergency,500,0.932,0.9318,0.984,0.88,0.8913,220,30,4,246,0.8733
+radiologist,500,0.782,0.7727,0.984,0.58,0.7009,145,105,4,246,0.8774

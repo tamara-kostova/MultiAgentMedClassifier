@@ -1,11 +1,12 @@
 """
-Load one few-shot example per class from few_shot_examples.csv.
+Load task-aware few-shot examples from few_shot_examples.csv.
 
 Returns a list of (PIL.Image, json_str) pairs ready to be injected as
-prior conversation turns in MedGemma's _generate call. Missing image
-files are silently skipped so the pipeline degrades gracefully.
+prior conversation turns in MedGemma's _generate call. Missing image files
+are silently skipped so the pipeline degrades gracefully.
 """
 
+import csv
 import json
 from pathlib import Path
 
@@ -46,46 +47,73 @@ _SUBCLASS_MAP = {
     "pituitary":   "pituitary_tumor",
 }
 
+_TASK_FILTERS = {
+    "binary_tumor": {
+        "classes": {"normal", "tumor"},
+        "datasets": {"figshare", "images-17", "images-44c"},
+    },
+    "multiclass_tumor": {
+        "classes": {"normal", "tumor"},
+        "datasets": {"figshare", "images-17", "images-44c"},
+    },
+    "ms": {
+        "classes": {"normal", "multiple sclerosis"},
+        "datasets": {"sclerosis"},
+    },
+    "stroke": {
+        "classes": {"normal", "stroke"},
+        "datasets": {"aisd", "stroke"},
+    },
+}
+
 
 def _parse_csv(path: Path) -> list[dict]:
-    lines = path.read_text().splitlines()
-    header = [h.strip() for h in lines[0].split(",")]
-    rows = []
-    for line in lines[1:]:
-        # Handle quoted fields with commas inside
-        parts = []
-        current = ""
-        in_quotes = False
-        for ch in line:
-            if ch == '"':
-                in_quotes = not in_quotes
-            elif ch == "," and not in_quotes:
-                parts.append(current.strip().strip('"'))
-                current = ""
-            else:
-                current += ch
-        parts.append(current.strip().strip('"'))
-        rows.append(dict(zip(header, parts)))
-    return rows
+    with path.open(newline="", encoding="utf-8") as f:
+        return [
+            {key: (value or "").strip() for key, value in row.items()}
+            for row in csv.DictReader(f)
+        ]
+
+
+def _row_matches_task(row: dict, task: str | None) -> bool:
+    if not task or task not in _TASK_FILTERS:
+        return True
+    filters = _TASK_FILTERS[task]
+    cls = row.get("class", "").lower()
+    dataset = row.get("dataset", "").lower()
+    return cls in filters["classes"] and dataset in filters["datasets"]
+
+
+def _selection_key(row: dict, task: str | None) -> str:
+    cls = row.get("class", "")
+    subclass = row.get("subclass", "").lower()
+    if task in {"multiclass_tumor", "stroke"} and subclass:
+        return f"{cls}:{_SUBCLASS_MAP.get(subclass, subclass)}"
+    return cls
 
 
 def load_few_shot_examples(
     data_dir: str | None,
     csv_path: Path = _CSV_PATH,
+    task: str | None = None,
 ) -> list[tuple[Image.Image, str]]:
     """
-    Returns up to 5 (image, json_str) pairs — one per unique class.
-    Rows whose image file cannot be resolved are skipped.
-    """
-    rows = _parse_csv(csv_path)
+    Returns task-relevant (image, json_str) pairs.
 
-    # Pick first row per class
+    For binary tasks this selects one example per class. For multiclass tumor
+    and stroke it keeps one example per available subtype as well, because
+    MedGemma must emit diagnosis_detailed for those tasks.
+    """
+    rows = [row for row in _parse_csv(csv_path) if _row_matches_task(row, task)]
+    if not rows:
+        rows = _parse_csv(csv_path)
+
     seen: set[str] = set()
     selected: list[dict] = []
     for row in rows:
-        cls = row.get("class", "")
-        if cls and cls not in seen:
-            seen.add(cls)
+        key = _selection_key(row, task)
+        if key and key not in seen:
+            seen.add(key)
             selected.append(row)
 
     examples: list[tuple[Image.Image, str]] = []

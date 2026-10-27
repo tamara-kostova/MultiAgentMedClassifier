@@ -1,4 +1,7 @@
 """
+LEGACY — own label normalisation and the "abnormal" convention; NOT used for
+paper numbers (see eval/eval_analysis.py and eval/paired_system_comparison.py).
+
 Analysis of MedGemma free-text final_report fields from tumor_eval JSONL.
 
 Usage:

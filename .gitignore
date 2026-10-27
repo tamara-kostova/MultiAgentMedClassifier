@@ -227,3 +227,35 @@ papers/
 outputs/
 # Keep the env template (not the actual secrets)
 !.env.example
+*.tex
+*.aux
+*.toc
+*.lot
+*.lof
+*.bbl
+*.blg
+*.bak
+*.bib
+*.db
+*.sty
+*.bst
+*.zip
+*.pdf
+*.pptx
+# Faculty GPU server hand-off artifacts (see server_bundle/)
+hf_cache/
+sam3/
+bundle_out/
+bundle_stage/
+results_*.tar.gz
+maclf-*.tar
+maclf-*.tar.gz
+logs/
+*.md
+*.png
+*.json
+# UI example scans are small and must ship with the repo (ui/demo.py loads ui/examples/<task>/*).
+!ui/examples/**
+maclf-code-data.tar 4/
+# Summary CSVs of the final v2 evaluation (derived from the ignored outputs/eval/v2 JSONLs).
+!results/README.md

@@ -1,4 +1,8 @@
 """
+LEGACY — own label normalisation and the "abnormal" (any pathology = positive)
+convention; NOT used for paper numbers. Use eval/eval_analysis.py and
+eval/paired_system_comparison.py for anything that is reported.
+
 Comprehensive analysis of a binary-tumor tumor_eval JSONL produced by run_pipeline.py.
 
 Usage:
@@ -114,15 +118,14 @@ def binary_metrics_dict(y_true, y_pred) -> dict:
     }
 
 
-def compute_ece(confidences: np.ndarray, correct: np.ndarray, n_bins: int = 10) -> float:
-    bin_edges = np.linspace(0.0, 1.0, n_bins + 1)
-    ece, n = 0.0, len(confidences)
-    for lo, hi in zip(bin_edges[:-1], bin_edges[1:]):
-        mask = (confidences > lo) & (confidences <= hi)
-        if mask.sum() == 0:
-            continue
-        ece += (mask.sum() / n) * abs(confidences[mask].mean() - correct[mask].mean())
-    return float(ece)
+import sys as _sys
+from pathlib import Path as _Path
+
+if __package__ in (None, ""):  # run as `python eval/<script>.py`: make `eval` importable
+    _sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))
+
+# Shared implementation (first bin [0, 0.1], so confidence 0.0 rows are counted).
+from eval.metrics import compute_ece  # noqa: E402
 
 
 def calibration_bins(confidences: np.ndarray, correct: np.ndarray, n_bins: int = 10) -> pd.DataFrame:

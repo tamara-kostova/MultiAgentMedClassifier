@@ -1,0 +1,502 @@
+# ms: the 500 images of the published Forest/Debate runs (outputs/eval/ms_forest_n4.jsonl, sha256 e6fe9c98f1031e0e...)
+# Order = original class-interleaved sampling order, so a lower MAX_SAMPLES stays class-balanced.
+data/sclerosis/MS/Control Axial_crop/kontrol  (1).png
+data/sclerosis/MS/Control Saggital_crop/kontrl 9 (1).png
+data/sclerosis/MS/MS Axial_crop/A1 (1).png
+data/sclerosis/MS/MS Saggital_crop/S1 (1).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (10).png
+data/sclerosis/MS/Control Saggital_crop/kontrl 9 (10).png
+data/sclerosis/MS/MS Axial_crop/A1 (10).png
+data/sclerosis/MS/MS Saggital_crop/S1 (10).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (11).png
+data/sclerosis/MS/Control Saggital_crop/kontrl 9 (11).png
+data/sclerosis/MS/MS Axial_crop/A1 (100).png
+data/sclerosis/MS/MS Saggital_crop/S1 (100).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (12).png
+data/sclerosis/MS/Control Saggital_crop/kontrl 9 (12).png
+data/sclerosis/MS/MS Axial_crop/A1 (101).png
+data/sclerosis/MS/MS Saggital_crop/S1 (101).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (13).png
+data/sclerosis/MS/Control Saggital_crop/kontrl 9 (13).png
+data/sclerosis/MS/MS Axial_crop/A1 (102).png
+data/sclerosis/MS/MS Saggital_crop/S1 (102).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (14).png
+data/sclerosis/MS/Control Saggital_crop/kontrl 9 (14).png
+data/sclerosis/MS/MS Axial_crop/A1 (103).png
+data/sclerosis/MS/MS Saggital_crop/S1 (103).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (15).png
+data/sclerosis/MS/Control Saggital_crop/kontrl 9 (15).png
+data/sclerosis/MS/MS Axial_crop/A1 (104).png
+data/sclerosis/MS/MS Saggital_crop/S1 (104).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (16).png
+data/sclerosis/MS/Control Saggital_crop/kontrl 9 (16).png
+data/sclerosis/MS/MS Axial_crop/A1 (105).png
+data/sclerosis/MS/MS Saggital_crop/S1 (105).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (17).png
+data/sclerosis/MS/Control Saggital_crop/kontrl 9 (17).png
+data/sclerosis/MS/MS Axial_crop/A1 (106).png
+data/sclerosis/MS/MS Saggital_crop/S1 (106).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (18).png
+data/sclerosis/MS/Control Saggital_crop/kontrl 9 (18).png
+data/sclerosis/MS/MS Axial_crop/A1 (107).png
+data/sclerosis/MS/MS Saggital_crop/S1 (107).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (19).png
+data/sclerosis/MS/Control Saggital_crop/kontrl 9 (19).png
+data/sclerosis/MS/MS Axial_crop/A1 (108).png
+data/sclerosis/MS/MS Saggital_crop/S1 (108).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (2).png
+data/sclerosis/MS/Control Saggital_crop/kontrl 9 (2).png
+data/sclerosis/MS/MS Axial_crop/A1 (109).png
+data/sclerosis/MS/MS Saggital_crop/S1 (109).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (20).png
+data/sclerosis/MS/Control Saggital_crop/kontrl 9 (20).png
+data/sclerosis/MS/MS Axial_crop/A1 (11).png
+data/sclerosis/MS/MS Saggital_crop/S1 (11).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (21).png
+data/sclerosis/MS/Control Saggital_crop/kontrl 9 (21).png
+data/sclerosis/MS/MS Axial_crop/A1 (110).png
+data/sclerosis/MS/MS Saggital_crop/S1 (110).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (22).png
+data/sclerosis/MS/Control Saggital_crop/kontrl 9 (22).png
+data/sclerosis/MS/MS Axial_crop/A1 (111).png
+data/sclerosis/MS/MS Saggital_crop/S1 (111).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (23).png
+data/sclerosis/MS/Control Saggital_crop/kontrl 9 (23).png
+data/sclerosis/MS/MS Axial_crop/A1 (112).png
+data/sclerosis/MS/MS Saggital_crop/S1 (112).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (24).png
+data/sclerosis/MS/Control Saggital_crop/kontrl 9 (3).png
+data/sclerosis/MS/MS Axial_crop/A1 (113).png
+data/sclerosis/MS/MS Saggital_crop/S1 (113).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (25).png
+data/sclerosis/MS/Control Saggital_crop/kontrl 9 (4).png
+data/sclerosis/MS/MS Axial_crop/A1 (114).png
+data/sclerosis/MS/MS Saggital_crop/S1 (114).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (26).png
+data/sclerosis/MS/Control Saggital_crop/kontrl 9 (5).png
+data/sclerosis/MS/MS Axial_crop/A1 (115).png
+data/sclerosis/MS/MS Saggital_crop/S1 (115).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (27).png
+data/sclerosis/MS/Control Saggital_crop/kontrl 9 (6).png
+data/sclerosis/MS/MS Axial_crop/A1 (116).png
+data/sclerosis/MS/MS Saggital_crop/S1 (116).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (28).png
+data/sclerosis/MS/Control Saggital_crop/kontrl 9 (7).png
+data/sclerosis/MS/MS Axial_crop/A1 (117).png
+data/sclerosis/MS/MS Saggital_crop/S1 (117).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (29).png
+data/sclerosis/MS/Control Saggital_crop/kontrl 9 (8).png
+data/sclerosis/MS/MS Axial_crop/A1 (118).png
+data/sclerosis/MS/MS Saggital_crop/S1 (118).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (3).png
+data/sclerosis/MS/Control Saggital_crop/kontrl 9 (9).png
+data/sclerosis/MS/MS Axial_crop/A1 (119).png
+data/sclerosis/MS/MS Saggital_crop/S1 (119).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (30).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 1 (1).png
+data/sclerosis/MS/MS Axial_crop/A1 (12).png
+data/sclerosis/MS/MS Saggital_crop/S1 (12).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (31).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 1 (10).png
+data/sclerosis/MS/MS Axial_crop/A1 (120).png
+data/sclerosis/MS/MS Saggital_crop/S1 (120).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (32).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 1 (11).png
+data/sclerosis/MS/MS Axial_crop/A1 (121).png
+data/sclerosis/MS/MS Saggital_crop/S1 (121).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (33).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 1 (12).png
+data/sclerosis/MS/MS Axial_crop/A1 (122).png
+data/sclerosis/MS/MS Saggital_crop/S1 (122).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (34).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 1 (13).png
+data/sclerosis/MS/MS Axial_crop/A1 (123).png
+data/sclerosis/MS/MS Saggital_crop/S1 (123).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (35).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 1 (14).png
+data/sclerosis/MS/MS Axial_crop/A1 (124).png
+data/sclerosis/MS/MS Saggital_crop/S1 (124).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (36).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 1 (15).png
+data/sclerosis/MS/MS Axial_crop/A1 (125).png
+data/sclerosis/MS/MS Saggital_crop/S1 (125).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (37).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 1 (16).png
+data/sclerosis/MS/MS Axial_crop/A1 (126).png
+data/sclerosis/MS/MS Saggital_crop/S1 (126).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (38).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 1 (17).png
+data/sclerosis/MS/MS Axial_crop/A1 (127).png
+data/sclerosis/MS/MS Saggital_crop/S1 (127).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (39).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 1 (18).png
+data/sclerosis/MS/MS Axial_crop/A1 (128).png
+data/sclerosis/MS/MS Saggital_crop/S1 (128).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (4).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 1 (19).png
+data/sclerosis/MS/MS Axial_crop/A1 (129).png
+data/sclerosis/MS/MS Saggital_crop/S1 (129).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (40).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 1 (2).png
+data/sclerosis/MS/MS Axial_crop/A1 (13).png
+data/sclerosis/MS/MS Saggital_crop/S1 (13).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (41).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 1 (20).png
+data/sclerosis/MS/MS Axial_crop/A1 (130).png
+data/sclerosis/MS/MS Saggital_crop/S1 (130).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (42).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 1 (21).png
+data/sclerosis/MS/MS Axial_crop/A1 (131).png
+data/sclerosis/MS/MS Saggital_crop/S1 (131).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (43).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 1 (22).png
+data/sclerosis/MS/MS Axial_crop/A1 (132).png
+data/sclerosis/MS/MS Saggital_crop/S1 (132).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (44).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 1 (3).png
+data/sclerosis/MS/MS Axial_crop/A1 (133).png
+data/sclerosis/MS/MS Saggital_crop/S1 (133).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (45).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 1 (4).png
+data/sclerosis/MS/MS Axial_crop/A1 (134).png
+data/sclerosis/MS/MS Saggital_crop/S1 (134).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (46).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 1 (5).png
+data/sclerosis/MS/MS Axial_crop/A1 (135).png
+data/sclerosis/MS/MS Saggital_crop/S1 (135).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (47).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 1 (6).png
+data/sclerosis/MS/MS Axial_crop/A1 (136).png
+data/sclerosis/MS/MS Saggital_crop/S1 (136).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (48).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 1 (7).png
+data/sclerosis/MS/MS Axial_crop/A1 (137).png
+data/sclerosis/MS/MS Saggital_crop/S1 (137).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (49).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 1 (8).png
+data/sclerosis/MS/MS Axial_crop/A1 (138).png
+data/sclerosis/MS/MS Saggital_crop/S1 (138).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (5).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 1 (9).png
+data/sclerosis/MS/MS Axial_crop/A1 (139).png
+data/sclerosis/MS/MS Saggital_crop/S1 (139).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (50).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 10 (1).png
+data/sclerosis/MS/MS Axial_crop/A1 (14).png
+data/sclerosis/MS/MS Saggital_crop/S1 (14).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (51).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 10 (10).png
+data/sclerosis/MS/MS Axial_crop/A1 (140).png
+data/sclerosis/MS/MS Saggital_crop/S1 (140).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (52).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 10 (11).png
+data/sclerosis/MS/MS Axial_crop/A1 (141).png
+data/sclerosis/MS/MS Saggital_crop/S1 (141).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (53).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 10 (12).png
+data/sclerosis/MS/MS Axial_crop/A1 (142).png
+data/sclerosis/MS/MS Saggital_crop/S1 (142).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (54).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 10 (13).png
+data/sclerosis/MS/MS Axial_crop/A1 (143).png
+data/sclerosis/MS/MS Saggital_crop/S1 (143).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (55).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 10 (14).png
+data/sclerosis/MS/MS Axial_crop/A1 (144).png
+data/sclerosis/MS/MS Saggital_crop/S1 (144).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (56).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 10 (15).png
+data/sclerosis/MS/MS Axial_crop/A1 (145).png
+data/sclerosis/MS/MS Saggital_crop/S1 (145).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (57).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 10 (16).png
+data/sclerosis/MS/MS Axial_crop/A1 (146).png
+data/sclerosis/MS/MS Saggital_crop/S1 (146).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (58).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 10 (17).png
+data/sclerosis/MS/MS Axial_crop/A1 (147).png
+data/sclerosis/MS/MS Saggital_crop/S1 (147).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (59).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 10 (18).png
+data/sclerosis/MS/MS Axial_crop/A1 (148).png
+data/sclerosis/MS/MS Saggital_crop/S1 (148).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (6).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 10 (19).png
+data/sclerosis/MS/MS Axial_crop/A1 (149).png
+data/sclerosis/MS/MS Saggital_crop/S1 (149).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (60).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 10 (2).png
+data/sclerosis/MS/MS Axial_crop/A1 (15).png
+data/sclerosis/MS/MS Saggital_crop/S1 (15).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (61).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 10 (20).png
+data/sclerosis/MS/MS Axial_crop/A1 (150).png
+data/sclerosis/MS/MS Saggital_crop/S1 (150).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (62).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 10 (21).png
+data/sclerosis/MS/MS Axial_crop/A1 (151).png
+data/sclerosis/MS/MS Saggital_crop/S1 (151).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (63).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 10 (3).png
+data/sclerosis/MS/MS Axial_crop/A1 (152).png
+data/sclerosis/MS/MS Saggital_crop/S1 (152).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (64).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 10 (4).png
+data/sclerosis/MS/MS Axial_crop/A1 (153).png
+data/sclerosis/MS/MS Saggital_crop/S1 (153).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (65).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 10 (5).png
+data/sclerosis/MS/MS Axial_crop/A1 (154).png
+data/sclerosis/MS/MS Saggital_crop/S1 (154).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (66).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 10 (6).png
+data/sclerosis/MS/MS Axial_crop/A1 (155).png
+data/sclerosis/MS/MS Saggital_crop/S1 (155).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (67).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 10 (7).png
+data/sclerosis/MS/MS Axial_crop/A1 (156).png
+data/sclerosis/MS/MS Saggital_crop/S1 (156).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (68).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 10 (8).png
+data/sclerosis/MS/MS Axial_crop/A1 (157).png
+data/sclerosis/MS/MS Saggital_crop/S1 (157).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (69).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 10 (9).png
+data/sclerosis/MS/MS Axial_crop/A1 (158).png
+data/sclerosis/MS/MS Saggital_crop/S1 (158).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (7).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 11 (1).png
+data/sclerosis/MS/MS Axial_crop/A1 (159).png
+data/sclerosis/MS/MS Saggital_crop/S1 (159).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (70).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 11 (10).png
+data/sclerosis/MS/MS Axial_crop/A1 (16).png
+data/sclerosis/MS/MS Saggital_crop/S1 (16).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (71).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 11 (11).png
+data/sclerosis/MS/MS Axial_crop/A1 (160).png
+data/sclerosis/MS/MS Saggital_crop/S1 (160).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (72).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 11 (12).png
+data/sclerosis/MS/MS Axial_crop/A1 (161).png
+data/sclerosis/MS/MS Saggital_crop/S1 (161).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (73).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 11 (13).png
+data/sclerosis/MS/MS Axial_crop/A1 (162).png
+data/sclerosis/MS/MS Saggital_crop/S1 (162).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (74).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 11 (14).png
+data/sclerosis/MS/MS Axial_crop/A1 (163).png
+data/sclerosis/MS/MS Saggital_crop/S1 (163).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (75).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 11 (15).png
+data/sclerosis/MS/MS Axial_crop/A1 (164).png
+data/sclerosis/MS/MS Saggital_crop/S1 (164).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (76).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 11 (16).png
+data/sclerosis/MS/MS Axial_crop/A1 (165).png
+data/sclerosis/MS/MS Saggital_crop/S1 (165).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (77).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 11 (17).png
+data/sclerosis/MS/MS Axial_crop/A1 (166).png
+data/sclerosis/MS/MS Saggital_crop/S1 (166).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (78).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 11 (18).png
+data/sclerosis/MS/MS Axial_crop/A1 (167).png
+data/sclerosis/MS/MS Saggital_crop/S1 (167).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (79).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 11 (19).png
+data/sclerosis/MS/MS Axial_crop/A1 (168).png
+data/sclerosis/MS/MS Saggital_crop/S1 (168).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (8).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 11 (2).png
+data/sclerosis/MS/MS Axial_crop/A1 (169).png
+data/sclerosis/MS/MS Saggital_crop/S1 (169).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (80).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 11 (20).png
+data/sclerosis/MS/MS Axial_crop/A1 (17).png
+data/sclerosis/MS/MS Saggital_crop/S1 (17).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (81).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 11 (21).png
+data/sclerosis/MS/MS Axial_crop/A1 (170).png
+data/sclerosis/MS/MS Saggital_crop/S1 (170).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (82).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 11 (22).png
+data/sclerosis/MS/MS Axial_crop/A1 (171).png
+data/sclerosis/MS/MS Saggital_crop/S1 (171).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (83).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 11 (3).png
+data/sclerosis/MS/MS Axial_crop/A1 (172).png
+data/sclerosis/MS/MS Saggital_crop/S1 (172).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (84).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 11 (4).png
+data/sclerosis/MS/MS Axial_crop/A1 (173).png
+data/sclerosis/MS/MS Saggital_crop/S1 (173).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (85).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 11 (5).png
+data/sclerosis/MS/MS Axial_crop/A1 (174).png
+data/sclerosis/MS/MS Saggital_crop/S1 (174).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (86).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 11 (6).png
+data/sclerosis/MS/MS Axial_crop/A1 (175).png
+data/sclerosis/MS/MS Saggital_crop/S1 (175).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (87).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 11 (7).png
+data/sclerosis/MS/MS Axial_crop/A1 (176).png
+data/sclerosis/MS/MS Saggital_crop/S1 (176).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (88).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 11 (8).png
+data/sclerosis/MS/MS Axial_crop/A1 (177).png
+data/sclerosis/MS/MS Saggital_crop/S1 (177).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (89).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 11 (9).png
+data/sclerosis/MS/MS Axial_crop/A1 (178).png
+data/sclerosis/MS/MS Saggital_crop/S1 (178).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (9).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 12 (1).png
+data/sclerosis/MS/MS Axial_crop/A1 (179).png
+data/sclerosis/MS/MS Saggital_crop/S1 (179).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (90).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 12 (10).png
+data/sclerosis/MS/MS Axial_crop/A1 (18).png
+data/sclerosis/MS/MS Saggital_crop/S1 (18).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (91).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 12 (11).png
+data/sclerosis/MS/MS Axial_crop/A1 (180).png
+data/sclerosis/MS/MS Saggital_crop/S1 (180).png
+data/sclerosis/MS/Control Axial_crop/kontrol  (92).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 12 (12).png
+data/sclerosis/MS/MS Axial_crop/A1 (181).png
+data/sclerosis/MS/MS Saggital_crop/S1 (181).png
+data/sclerosis/MS/Control Axial_crop/kontrol 1 (1).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 12 (13).png
+data/sclerosis/MS/MS Axial_crop/A1 (182).png
+data/sclerosis/MS/MS Saggital_crop/S1 (182).png
+data/sclerosis/MS/Control Axial_crop/kontrol 1 (10).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 12 (14).png
+data/sclerosis/MS/MS Axial_crop/A1 (183).png
+data/sclerosis/MS/MS Saggital_crop/S1 (183).png
+data/sclerosis/MS/Control Axial_crop/kontrol 1 (11).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 12 (15).png
+data/sclerosis/MS/MS Axial_crop/A1 (184).png
+data/sclerosis/MS/MS Saggital_crop/S1 (184).png
+data/sclerosis/MS/Control Axial_crop/kontrol 1 (12).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 12 (16).png
+data/sclerosis/MS/MS Axial_crop/A1 (185).png
+data/sclerosis/MS/MS Saggital_crop/S1 (185).png
+data/sclerosis/MS/Control Axial_crop/kontrol 1 (13).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 12 (17).png
+data/sclerosis/MS/MS Axial_crop/A1 (186).png
+data/sclerosis/MS/MS Saggital_crop/S1 (186).png
+data/sclerosis/MS/Control Axial_crop/kontrol 1 (14).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 12 (18).png
+data/sclerosis/MS/MS Axial_crop/A1 (187).png
+data/sclerosis/MS/MS Saggital_crop/S1 (187).png
+data/sclerosis/MS/Control Axial_crop/kontrol 1 (15).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 12 (19).png
+data/sclerosis/MS/MS Axial_crop/A1 (188).png
+data/sclerosis/MS/MS Saggital_crop/S1 (188).png
+data/sclerosis/MS/Control Axial_crop/kontrol 1 (16).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 12 (2).png
+data/sclerosis/MS/MS Axial_crop/A1 (189).png
+data/sclerosis/MS/MS Saggital_crop/S1 (189).png
+data/sclerosis/MS/Control Axial_crop/kontrol 1 (17).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 12 (20).png
+data/sclerosis/MS/MS Axial_crop/A1 (19).png
+data/sclerosis/MS/MS Saggital_crop/S1 (19).png
+data/sclerosis/MS/Control Axial_crop/kontrol 1 (2).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 12 (21).png
+data/sclerosis/MS/MS Axial_crop/A1 (190).png
+data/sclerosis/MS/MS Saggital_crop/S1 (190).png
+data/sclerosis/MS/Control Axial_crop/kontrol 1 (3).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 12 (3).png
+data/sclerosis/MS/MS Axial_crop/A1 (191).png
+data/sclerosis/MS/MS Saggital_crop/S1 (191).png
+data/sclerosis/MS/Control Axial_crop/kontrol 1 (4).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 12 (4).png
+data/sclerosis/MS/MS Axial_crop/A1 (192).png
+data/sclerosis/MS/MS Saggital_crop/S1 (192).png
+data/sclerosis/MS/Control Axial_crop/kontrol 1 (5).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 12 (5).png
+data/sclerosis/MS/MS Axial_crop/A1 (193).png
+data/sclerosis/MS/MS Saggital_crop/S1 (193).png
+data/sclerosis/MS/Control Axial_crop/kontrol 1 (6).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 12 (6).png
+data/sclerosis/MS/MS Axial_crop/A1 (194).png
+data/sclerosis/MS/MS Saggital_crop/S1 (194).png
+data/sclerosis/MS/Control Axial_crop/kontrol 1 (7).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 12 (7).png
+data/sclerosis/MS/MS Axial_crop/A1 (195).png
+data/sclerosis/MS/MS Saggital_crop/S1 (195).png
+data/sclerosis/MS/Control Axial_crop/kontrol 1 (8).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 12 (8).png
+data/sclerosis/MS/MS Axial_crop/A1 (196).png
+data/sclerosis/MS/MS Saggital_crop/S1 (196).png
+data/sclerosis/MS/Control Axial_crop/kontrol 1 (9).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 12 (9).png
+data/sclerosis/MS/MS Axial_crop/A1 (197).png
+data/sclerosis/MS/MS Saggital_crop/S1 (197).png
+data/sclerosis/MS/Control Axial_crop/kontrol 10 (1).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 13 (1).png
+data/sclerosis/MS/MS Axial_crop/A1 (198).png
+data/sclerosis/MS/MS Saggital_crop/S1 (198).png
+data/sclerosis/MS/Control Axial_crop/kontrol 10 (10).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 13 (10).png
+data/sclerosis/MS/MS Axial_crop/A1 (199).png
+data/sclerosis/MS/MS Saggital_crop/S1 (199).png
+data/sclerosis/MS/Control Axial_crop/kontrol 10 (11).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 13 (11).png
+data/sclerosis/MS/MS Axial_crop/A1 (2).png
+data/sclerosis/MS/MS Saggital_crop/S1 (2).png
+data/sclerosis/MS/Control Axial_crop/kontrol 10 (12).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 13 (12).png
+data/sclerosis/MS/MS Axial_crop/A1 (20).png
+data/sclerosis/MS/MS Saggital_crop/S1 (20).png
+data/sclerosis/MS/Control Axial_crop/kontrol 10 (13).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 13 (13).png
+data/sclerosis/MS/MS Axial_crop/A1 (200).png
+data/sclerosis/MS/MS Saggital_crop/S1 (200).png
+data/sclerosis/MS/Control Axial_crop/kontrol 10 (14).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 13 (14).png
+data/sclerosis/MS/MS Axial_crop/A1 (201).png
+data/sclerosis/MS/MS Saggital_crop/S1 (201).png
+data/sclerosis/MS/Control Axial_crop/kontrol 10 (15).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 13 (15).png
+data/sclerosis/MS/MS Axial_crop/A1 (202).png
+data/sclerosis/MS/MS Saggital_crop/S1 (202).png
+data/sclerosis/MS/Control Axial_crop/kontrol 10 (16).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 13 (16).png
+data/sclerosis/MS/MS Axial_crop/A1 (203).png
+data/sclerosis/MS/MS Saggital_crop/S1 (203).png
+data/sclerosis/MS/Control Axial_crop/kontrol 10 (17).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 13 (17).png
+data/sclerosis/MS/MS Axial_crop/A1 (204).png
+data/sclerosis/MS/MS Saggital_crop/S1 (204).png
+data/sclerosis/MS/Control Axial_crop/kontrol 10 (18).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 13 (18).png
+data/sclerosis/MS/MS Axial_crop/A1 (205).png
+data/sclerosis/MS/MS Saggital_crop/S1 (205).png
+data/sclerosis/MS/Control Axial_crop/kontrol 10 (19).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 13 (19).png
+data/sclerosis/MS/MS Axial_crop/A1 (206).png
+data/sclerosis/MS/MS Saggital_crop/S1 (206).png
+data/sclerosis/MS/Control Axial_crop/kontrol 10 (2).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 13 (2).png
+data/sclerosis/MS/MS Axial_crop/A1 (207).png
+data/sclerosis/MS/MS Saggital_crop/S1 (207).png
+data/sclerosis/MS/Control Axial_crop/kontrol 10 (3).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 13 (20).png
+data/sclerosis/MS/MS Axial_crop/A1 (208).png
+data/sclerosis/MS/MS Saggital_crop/S1 (208).png
+data/sclerosis/MS/Control Axial_crop/kontrol 10 (4).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 13 (21).png
+data/sclerosis/MS/MS Axial_crop/A1 (209).png
+data/sclerosis/MS/MS Saggital_crop/S1 (209).png
+data/sclerosis/MS/Control Axial_crop/kontrol 10 (5).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 13 (3).png
+data/sclerosis/MS/MS Axial_crop/A1 (21).png
+data/sclerosis/MS/MS Saggital_crop/S1 (21).png
+data/sclerosis/MS/Control Axial_crop/kontrol 10 (6).png
+data/sclerosis/MS/Control Saggital_crop/kontrol 13 (4).png
+data/sclerosis/MS/MS Axial_crop/A1 (210).png
+data/sclerosis/MS/MS Saggital_crop/S1 (210).png

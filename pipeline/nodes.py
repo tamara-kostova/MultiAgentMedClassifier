@@ -9,10 +9,8 @@ import uuid
 import time
 from pathlib import Path
 
-from agents.sibra_tool import SiibraAtlasTool
 import cv2
 import numpy as np
-import torchvision.transforms as T
 from PIL import Image
 
 from config import BEST_CNN_PER_TASK, DEFAULT_CONFIG, RoutingConfig
@@ -41,6 +39,45 @@ def _log_node_done(node: str, state: NeuroimagingState, t0: float) -> None:
     print(f"[{node}] done {_case_name(state)} in {time.perf_counter() - t0:.1f}s", flush=True)
 
 
+def _usable(value) -> bool:
+    return bool(value) and str(value).strip().lower() not in ("none", "null", "nan")
+
+
+def _dx_label(dx, task: str):
+    """Class label carried by a MedGemma diagnosis (object or dict) for `task`.
+
+    Only multiclass tumor subtyping carries its label in diagnosis_detailed; for
+    every other task diagnosis_name is the class and diagnosis_detailed is a
+    free-text elaboration. Mirrors eval_analysis.mg_diag_pred().
+    """
+    if dx is None:
+        return None
+    fields = (
+        ("diagnosis_detailed", "diagnosis_name")
+        if task == "multiclass_tumor"
+        else ("diagnosis_name", "diagnosis_detailed")
+    )
+    get = dx.get if isinstance(dx, dict) else (lambda f: getattr(dx, f, None))
+    return next((get(f) for f in fields if _usable(get(f))), None)
+
+
+def apply_iou_penalty(conf, saliency_iou, cfg: RoutingConfig):
+    """Low GradCAM++/SAM3 IoU → conf * max(iou / threshold, floor).
+
+    Returns (conf, factor); factor is None when no penalty applies.
+    """
+    if saliency_iou is None or saliency_iou >= cfg.low_iou_penalty_threshold:
+        return conf, None
+    factor = max(saliency_iou / cfg.low_iou_penalty_threshold, cfg.low_iou_penalty_floor)
+    penalised = None if conf is None else conf * factor
+    if conf is not None:
+        print(
+            f"[report] Low GradCAM++/SAM3 IoU={saliency_iou:.3f} → "
+            f"confidence penalised {conf:.3f}→{penalised:.3f} (factor {factor:.3f})"
+        )
+    return penalised, factor
+
+
 def make_triage_node(agent, routing_cfg: RoutingConfig = None):
     """
     Factory: returns an initial MedGemma triage node.
@@ -50,7 +87,7 @@ def make_triage_node(agent, routing_cfg: RoutingConfig = None):
     def triage_node(state: NeuroimagingState) -> dict:
         t0 = _log_node_start("triage", state)
         dx, routing = agent.diagnose(
-            state["image_path"], metadata=state.get("metadata")
+            state["image_path"], task=state["task"], metadata=state.get("metadata")
         )
         _log_node_done("triage", state, t0)
 
@@ -62,10 +99,51 @@ def make_triage_node(agent, routing_cfg: RoutingConfig = None):
             ),
             "suspected_pathology": routing.suspected_pathology,
             "medgemma_diagnosis": dx.model_dump(),
+            "triage_parse_failed": bool(getattr(dx, "parse_failed", False)),
             "routing_path": state["routing_path"] + ["triage"],
         }
 
     return triage_node
+
+
+def make_triage_final_node(routing_cfg: RoutingConfig = None):
+    """
+    Terminal node of the --triage_only graphs: the triage (single or forest
+    consensus) becomes the final prediction so eval rows score the triage stage.
+    """
+    cfg = routing_cfg or DEFAULT_CONFIG.routing
+
+    def triage_final_node(state: NeuroimagingState) -> dict:
+        task = state["task"]
+        consensus = state.get("forest_consensus")
+        if consensus is not None:
+            fields = (
+                ("winner_detailed", "winner") if task == "multiclass_tumor"
+                else ("winner", "winner_detailed")
+            )
+            final_class = next((consensus.get(f) for f in fields if _usable(consensus.get(f))), None)
+            if not consensus.get("winner_canonical"):
+                final_class = None
+            final_conf = consensus.get("confidence_weighted_confidence")
+        else:
+            final_class = _dx_label(state.get("medgemma_diagnosis"), task)
+            final_conf = (state.get("medgemma_diagnosis") or {}).get("diagnosis_confidence")
+        parse_failed = bool(state.get("triage_parse_failed"))
+        if parse_failed:
+            final_class = None
+        final_conf = float(final_conf) if final_conf is not None else 0.0
+        return {
+            "final_predicted_class": final_class or "unknown",
+            "final_confidence": final_conf,
+            "final_medgemma_diagnosis": None,
+            "final_report": "[triage only — no specialist workup]",
+            "requires_human_review": (
+                parse_failed or not final_class or final_conf < cfg.human_review_threshold
+            ),
+            "routing_path": state["routing_path"] + ["triage_final"],
+        }
+
+    return triage_final_node
 
 
 def make_cnn_node(cnn_tool):
@@ -83,61 +161,29 @@ def make_cnn_node(cnn_tool):
     return cnn_node
 
 
-def make_sam3_node(sam3_tool):
-    """SAM3 segmentation node. Produces mask + bbox overlay for downstream nodes."""
+def make_sam3_node(sam3_tool, routing_cfg: RoutingConfig = None):
+    """SAM3 segmentation node. Skips automatically for ineligible tasks (ms, stroke)."""
+    cfg = routing_cfg or DEFAULT_CONFIG.routing
 
     def sam3_node(state: NeuroimagingState) -> dict:
         t0 = _log_node_start("sam3_segment", state)
+        if state["task"] not in cfg.sam3_eligible_tasks:
+            print(f"[sam3_segment] task={state['task']} not eligible — skipping")
+            _log_node_done("sam3_segment", state, t0)
+            return {
+                "segmentation_result": {"skipped": True, "mask_path": None, "bbox": None, "guided_image_path": None},
+                "routing_path": state["routing_path"] + ["sam3_segment"],
+            }
         pathology = state.get("suspected_pathology") or "brain lesion"
         result = sam3_tool.segment(state["image_path"], text_prompt=pathology)
         _log_node_done("sam3_segment", state, t0)
         return {
             "segmentation_result": result,
+            "sam3_mask_empty": bool((result or {}).get("mask_empty")),
             "routing_path": state["routing_path"] + ["sam3_segment"],
         }
 
     return sam3_node
-
-
-def make_cnn_with_mask_node(cnn_tool, agent=None):
-    """
-    CNN node that operates on the SAM3 bbox-guided image.
-    Also runs MedGemma with system_prompt_bbox.txt when SAM3 produced a real
-    overlay image, to get a spatially-informed diagnosis alongside the CNN result.
-    """
-
-    def cnn_with_mask_node(state: NeuroimagingState) -> dict:
-        t0 = _log_node_start("cnn_with_mask", state)
-        seg = state.get("segmentation_result")
-        seg_valid = seg and not seg.get("skipped")
-
-        updates = {
-            "routing_path": state["routing_path"] + ["cnn_with_mask"],
-        }
-
-        if state.get("classification_result") is None:
-            updates["classification_result"] = cnn_tool.classify(
-                state["image_path"], state["task"]
-            )
-
-        # MedGemma gets the red overlay only when SAM3 actually produced one.
-        # If SAM3 is unavailable/skipped, avoid a duplicate MedGemma call on the
-        # original image; the initial triage already covered that view.
-        if agent is not None and seg_valid and seg.get("guided_image_path"):
-            overlay_path = (
-                seg["guided_image_path"]
-                if seg_valid and seg.get("guided_image_path")
-                else state["image_path"]
-            )
-            bbox_dx = agent.diagnose_with_bbox(
-                overlay_path, metadata=state.get("metadata")
-            )
-            updates["medgemma_bbox_diagnosis"] = bbox_dx.model_dump()
-
-        _log_node_done("cnn_with_mask", state, t0)
-        return updates
-
-    return cnn_with_mask_node
 
 
 def make_biomedclip_node(biomedclip_tool, routing_cfg: RoutingConfig = None):
@@ -193,11 +239,10 @@ def make_report_node(agent, routing_cfg: RoutingConfig = None, skip_report: bool
         # Determine final prediction from MedGemma's fused diagnosis when available.
         cnn = state.get("classification_result")
         clip = state.get("biomedclip_result")
-        if final_dx and final_dx.diagnosis_detailed:
-            final_class = final_dx.diagnosis_detailed
-            final_conf = final_dx.diagnosis_confidence
-        elif final_dx and final_dx.diagnosis_name:
-            final_class = final_dx.diagnosis_name
+        report_parse_failed = (not skip_report) and final_dx is None
+        dx_label = _dx_label(final_dx, state["task"])
+        if dx_label:
+            final_class = dx_label
             final_conf = final_dx.diagnosis_confidence
         elif cnn:
             final_class = cnn["predicted_class"]
@@ -209,17 +254,22 @@ def make_report_node(agent, routing_cfg: RoutingConfig = None, skip_report: bool
             final_class = state.get("suspected_pathology", "unknown")
             final_conf = state.get("routing_confidence", 0.0)
 
-        # Apply confidence penalty for poor spatial alignment
         requires_review = final_conf < cfg.human_review_threshold
-        if saliency_iou is not None and saliency_iou < cfg.low_iou_penalty_threshold:
-            penalty = saliency_iou / cfg.low_iou_penalty_threshold
-            penalised = final_conf * penalty
-            print(
-                f"[report] Low GradCAM++/SAM3 IoU={saliency_iou:.3f} → "
-                f"confidence penalised {final_conf:.3f}→{penalised:.3f}"
-            )
-            final_conf = penalised
+        # Penalty for poor spatial alignment
+        final_conf, penalty_factor = apply_iou_penalty(final_conf, saliency_iou, cfg)
+        if penalty_factor is not None:
             requires_review = True
+        # verification_node's verdict: an explicit disagreement caps the confidence.
+        verification = state.get("verification_result") or {}
+        if verification.get("agreement") is False:
+            capped = min(final_conf, VERIFICATION_DISAGREEMENT_CONFIDENCE_CAP)
+            if capped < final_conf:
+                print(f"[report] verification disagreement → confidence capped {final_conf:.3f}→{capped:.3f}")
+            final_conf = capped
+            requires_review = True
+        if report_parse_failed:
+            requires_review = True
+        requires_review = bool(requires_review or state.get("requires_human_review", False))
 
         updates = {
             "final_report": report,
@@ -229,6 +279,8 @@ def make_report_node(agent, routing_cfg: RoutingConfig = None, skip_report: bool
                 final_dx.model_dump() if final_dx is not None else None
             ),
             "requires_human_review": requires_review,
+            "confidence_penalty_factor": penalty_factor,
+            "report_parse_failed": report_parse_failed,
             "routing_path": state["routing_path"] + ["report"],
         }
         _log_node_done("report", state, t0)
@@ -249,14 +301,6 @@ def make_explainability_node(cnn_tool, output_dir: str = "outputs/explainability
     """
     out_path = Path(output_dir)
     out_path.mkdir(parents=True, exist_ok=True)
-
-    _preprocess = T.Compose(
-        [
-            T.Resize((224, 224)),
-            T.ToTensor(),
-            T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        ]
-    )
 
     def explainability_node(state: NeuroimagingState) -> dict:
         t0 = _log_node_start("explainability", state)
@@ -281,23 +325,28 @@ def make_explainability_node(cnn_tool, output_dir: str = "outputs/explainability
             0,
         )
 
-        # Preprocess image (grayscale → 3-channel, same as cnn_tool.classify)
+        # Use the same transform as cnn_tool.classify (grayscale → 3-channel)
         pil_img = Image.open(image_path).convert("L").convert("RGB")
-        img_tensor = _preprocess(pil_img).unsqueeze(0).to(cnn_tool.device)
+        img_tensor = cnn_tool._transform(pil_img).unsqueeze(0).to(cnn_tool.device)
 
         uid = uuid.uuid4().hex[:8]
         paths = {}
         orig_np = np.array(pil_img.resize((224, 224)))
 
         # ── Grad-CAM++ ────────────────────────────────────────────────────────
-        model_name = BEST_CNN_PER_TASK.get(task, "")
+        # The architecture actually loaded (cnn_tool may switch it to match the
+        # checkpoint), not the configured one.
+        get_arch = getattr(cnn_tool, "get_arch", None)
+        model_name = (get_arch(task) if get_arch else None) or BEST_CNN_PER_TASK.get(task, "")
         target_layer_fn = GRADCAM_TARGET_LAYERS.get(model_name)
         _cam_r = None  # retained for IoU computation below
         if target_layer_fn is not None:
             target_layer = target_layer_fn(model)
             gc_pp = GradCAMPlusPlus(model, target_layer)
-            cam = gc_pp.generate_cam(img_tensor, target_idx)
-            gc_pp.cleanup()
+            try:
+                cam = gc_pp.generate_cam(img_tensor, target_idx)
+            finally:
+                gc_pp.cleanup()
 
             _cam_r = cv2.resize(cam, (224, 224))
             hm = cv2.applyColorMap(np.uint8(_cam_r * 255), cv2.COLORMAP_JET)
@@ -348,9 +397,12 @@ def make_explainability_node(cnn_tool, output_dir: str = "outputs/explainability
         updates = {
             "explainability_result": paths,
             "saliency_sam3_iou": saliency_sam3_iou,
-            "sam3_mask_empty": (saliency_sam3_iou is None and
-                                seg_result is not None and
-                                seg_result.get("mask_path") is not None),
+            "sam3_mask_empty": bool(
+                state.get("sam3_mask_empty")
+                or (saliency_sam3_iou is None and
+                    seg_result is not None and
+                    seg_result.get("mask_path") is not None)
+            ),
             "routing_path": state["routing_path"] + ["explainability"],
         }
         _log_node_done("explainability", state, t0)
@@ -415,7 +467,8 @@ def make_verification_node(agent):
         )
 
         current_conf = state.get("final_confidence") or cnn_result.get("confidence", 0.5)
-        if not verification.agreement:
+        # Only an explicit disagreement caps; a parse failure (agreement=None) is no verdict.
+        if verification.agreement is False:
             adjusted_conf = min(current_conf, VERIFICATION_DISAGREEMENT_CONFIDENCE_CAP)
             human_review = True
             print(
@@ -432,11 +485,125 @@ def make_verification_node(agent):
             "final_confidence": adjusted_conf,
             "requires_human_review": human_review,
             "verification_result": verification.model_dump(),
+            "verification_parse_failed": bool(verification.parse_failed),
         }
         _log_node_done("verification", state, t0)
         return updates
 
     return verification_node
+
+
+def make_forest_triage_node(forest, n_agents: int = 3):
+    """
+    Factory: returns a forest triage node that replaces the single MedGemma triage.
+    Runs n_agents role-specialized MedGemma instances, votes, and writes consensus
+    to state. Downstream nodes (CNN, SAM3, BiomedCLIP, report) run unchanged.
+    """
+    forest.roles_for(n_agents)  # fail at build time on an invalid forest
+
+    def forest_triage_node(state: NeuroimagingState) -> dict:
+        from agents.medgemma_agent import diagnosis_to_routing
+        t0 = _log_node_start("forest_triage", state)
+        votes = forest.run(state["image_path"], n_agents=n_agents)
+        consensus, winner_dx = forest.vote(votes, task=state.get("task"))
+        routing = diagnosis_to_routing(winner_dx, forest.medgemma.routing_cfg)
+
+        # Strip internal _dx objects before writing to state
+        serializable_votes = []
+        for vote in votes:
+            row = {k: v for k, v in vote.items() if not k.startswith("_")}
+            row["ballot_canonical"] = forest.ballot(vote, state.get("task"))
+            serializable_votes.append(row)
+        winner_text = consensus["winner"] or "abstain"
+        _log_node_done("forest_triage", state, t0)
+        return {
+            "routing_decision": "full_workup",
+            "routing_confidence": consensus["confidence_weighted_confidence"],
+            "routing_reasoning": (
+                f"Forest consensus ({n_agents} agents): {winner_text} "
+                f"({consensus['vote_fraction'] * 100:.0f}% agreement, "
+                f"dissent={consensus['dissent_rate'] * 100:.0f}%)"
+            ),
+            "suspected_pathology": consensus.get("winner_detailed") or consensus["winner"] or "",
+            "medgemma_diagnosis": winner_dx.model_dump(),
+            "triage_parse_failed": consensus["n_abstain"] == consensus["n_agents"],
+            "forest_votes": serializable_votes,
+            "forest_consensus": consensus,
+            "routing_path": state["routing_path"] + ["forest_triage"],
+        }
+
+    return forest_triage_node
+
+
+def make_debate_node(orchestrator, rounds: int = 1, routing_cfg=None, advocates=None):
+    """
+    Factory: returns a debate node that replaces verification + report.
+    Runs the DebateOrchestrator and resolves final_predicted_class / final_confidence
+    from the judge's verdict.
+    """
+    from agents.debate import ADVOCATES, parse_advocates
+
+    cfg = routing_cfg or DEFAULT_CONFIG.routing
+    advocates = parse_advocates(advocates or ADVOCATES)
+    if not isinstance(rounds, int) or not 1 <= rounds <= orchestrator.MAX_ROUNDS:
+        raise ValueError(f"debate rounds must be in 1..{orchestrator.MAX_ROUNDS}, got {rounds!r}")
+
+    def debate_node(state: NeuroimagingState) -> dict:
+        t0 = _log_node_start("debate", state)
+        verdict = orchestrator.run(state, rounds=rounds, advocates=advocates)
+
+        # The judge's "winner" is coarse (tumor / stroke / multiple sclerosis /
+        # normal) and carries the subtype in "winner_detailed". On multiclass_tumor
+        # the label space *is* the subtype, so scoring "winner" there would mark
+        # every prediction wrong — prefer the detailed field when it is populated.
+        detailed = verdict.get("winner_detailed")
+        if state.get("task") == "multiclass_tumor" and _usable(detailed):
+            final_class = detailed
+        else:
+            final_class = verdict.get("winner") or state.get(
+                "suspected_pathology", "unknown"
+            )
+        # None when the judge gave no readable confidence (flagged, never 0.5).
+        final_conf = verdict.get("confidence")
+        judge_parse_failed = bool(verdict.get("judge_parse_failed"))
+
+        saliency_iou = state.get("saliency_sam3_iou")
+        requires_review = final_conf is None or final_conf < cfg.human_review_threshold
+        final_conf, penalty_factor = apply_iou_penalty(final_conf, saliency_iou, cfg)
+        if penalty_factor is not None:
+            requires_review = True
+        if judge_parse_failed:
+            requires_review = True
+        requires_review = bool(requires_review or state.get("requires_human_review", False))
+
+        conf_text = "unknown" if final_conf is None else f"{final_conf:.2f}"
+        report_text = (
+            f"Debate verdict ({verdict.get('rounds_completed', 1)} round(s)): "
+            f"{final_class} (confidence {conf_text}). "
+            f"Reason: {verdict.get('reason', 'N/A')}"
+        )
+
+        _log_node_done("debate", state, t0)
+        return {
+            "debate_arguments": verdict.get("arguments", []),
+            "debate_verdict": {
+                k: v for k, v in verdict.items() if k not in ("arguments", "round_verdicts")
+            },
+            "debate_rounds_completed": verdict.get("rounds_completed", 1),
+            "debate_round_verdicts": verdict.get("round_verdicts", []),
+            "debate_round_changed": bool(verdict.get("round_changed")),
+            "debate_judge_claimed_round_changed": verdict.get("judge_claimed_round_changed"),
+            "judge_parse_failed": judge_parse_failed,
+            "final_predicted_class": final_class,
+            "final_confidence": final_conf,
+            "final_medgemma_diagnosis": None,
+            "final_report": report_text,
+            "requires_human_review": requires_review,
+            "confidence_penalty_factor": penalty_factor,
+            "routing_path": state["routing_path"] + ["debate"],
+        }
+
+    return debate_node
 
 
 def make_fhir_node(output_dir: str):
@@ -458,14 +625,29 @@ def make_fhir_node(output_dir: str):
 
 
 def route_from_triage(state: NeuroimagingState) -> str:
-    """Legacy helper retained for compatibility with older experiments."""
+    """Legacy helper retained for compatibility with older experiments.
+
+    NOT WIRED INTO ANY GRAPH. This is the only reader of `routing_decision`, and no
+    pipeline in graph.py calls add_conditional_edges — all three graphs (standard,
+    debate, forest) are linear, so every node runs for every image.
+
+    Consequently `routing_decision` gates nothing: both make_triage_node and
+    make_forest_triage_node hardcode it to "full_workup" and discard the
+    diagnosis_to_routing() result. The routing thresholds in RoutingConfig
+    (sam3_threshold, human_review_threshold, biomedclip_rerank_threshold) influence
+    *flags and confidence penalties* — segmentation_result["skipped"],
+    requires_human_review, the BiomedCLIP override — never which nodes execute.
+    Keep this in mind when interpreting the threshold_sweep / human_review_sweep
+    experiment families: they move flags and scores, not execution paths.
+    """
     return state["routing_decision"]
 
-def make_atlas_enrichment_node(siibra_tool: SiibraAtlasTool):
+def make_atlas_enrichment_node(siibra_tool=None):
     """
-    Runs after SAM3 segmentation (sam3_then_cnn path only).
-    Loads the SAM3 binary mask from disk, maps the lesion centroid to a
-    Julich-Brain region via siibra, and stores the result in atlas_enrichment.
+    Runs after sam3_segment. Loads the SAM3 binary mask from disk, maps the
+    lesion centroid to a Julich-Brain region via siibra, and stores the result
+    in atlas_enrichment. With siibra_tool=None (siibra not installed or atlas
+    disabled) or without a mask (SAM3 skipped/empty) it writes None.
 
     Coordinate accuracy (best → worst):
       NIfTI affine   — pass state["metadata"]["nifti_path"]
@@ -473,9 +655,11 @@ def make_atlas_enrichment_node(siibra_tool: SiibraAtlasTool):
       pixel fallback — approximate, axial centre slice only
     """
     def atlas_enrichment_node(state: NeuroimagingState) -> dict:
+        t0 = _log_node_start("atlas_enrichment", state)
         seg_result = state.get("segmentation_result")
 
-        if not seg_result or not seg_result.get("mask_path"):
+        if siibra_tool is None or not seg_result or not seg_result.get("mask_path"):
+            _log_node_done("atlas_enrichment", state, t0)
             return {
                 "atlas_enrichment": None,
                 "routing_path": state["routing_path"] + ["atlas_enrichment"],
@@ -484,6 +668,15 @@ def make_atlas_enrichment_node(siibra_tool: SiibraAtlasTool):
         mask = np.array(
             Image.open(seg_result["mask_path"]).convert("L")
         ) > 127  # binary uint8-like bool array
+        if mask.sum() == 0:
+            # SAM3 found no lesion pixels (bbox=None). SiibraAtlasTool would fall
+            # back to the image centre, i.e. assign the MNI origin — skip instead.
+            print("[atlas_enrichment] SAM3 mask empty (no lesion predicted) — skipped")
+            _log_node_done("atlas_enrichment", state, t0)
+            return {
+                "atlas_enrichment": None,
+                "routing_path": state["routing_path"] + ["atlas_enrichment"],
+            }
 
         meta       = state.get("metadata") or {}
         nifti_path = meta.get("nifti_path")
@@ -503,6 +696,7 @@ def make_atlas_enrichment_node(siibra_tool: SiibraAtlasTool):
             print(f"[atlas_enrichment] siibra query failed: {e}")
             atlas_result = None
 
+        _log_node_done("atlas_enrichment", state, t0)
         return {
             "atlas_enrichment": atlas_result,
             "routing_path": state["routing_path"] + ["atlas_enrichment"],

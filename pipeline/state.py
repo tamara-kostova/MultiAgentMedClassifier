@@ -5,10 +5,10 @@ LangGraph state definition for the neuroimaging multi-agent pipeline.
 from pathlib import Path
 from typing import Optional, TypedDict
 
-from agents.dicom_tool import DICOMPreprocessor
 
-
-_DICOM_PREPROCESSOR: Optional[DICOMPreprocessor] = None
+# agents.dicom_tool needs pydicom, which is optional (not in the MCP image or the
+# server bundle); imported on first use in _prepare_input_image.
+_DICOM_PREPROCESSOR = None
 
 
 class SegmentationResult(TypedDict):
@@ -32,46 +32,88 @@ class BiomedCLIPResult(TypedDict):
 
 class NeuroimagingState(TypedDict):
     # ── Input ─────────────────────────────────────────────────────────────────
-    image_path: str
-    task: str  # "binary_tumor" | "multiclass_tumor" | "ms" | "stroke"
-    metadata: dict  # Optional clinical context (modality, patient info, etc.)
+    image_path: str   # Absolute path to the raw input scan; never mutated after initial_state
+    task: str         # "binary_tumor" | "multiclass_tumor" | "ms" | "stroke"
+    metadata: dict    # Optional clinical context passed in by the caller (modality, patient info, etc.)
 
     # ── Routing ───────────────────────────────────────────────────────────────
-    routing_decision: Optional[
-        str
-    ]  # "cnn_direct" | "sam3_then_cnn" | "biomedclip" | "human_review"
-    routing_confidence: float  # MedGemma's confidence in its routing decision
-    routing_reasoning: str  # Short explanation from MedGemma
-    suspected_pathology: str  # MedGemma's initial assessment
+    # All four fields written by: triage_node
+    routing_decision: Optional[str]  # Always the literal "full_workup" — hardcoded by both
+                                     # triage nodes. All graphs are linear, so this gates
+                                     # nothing; its only reader is the unwired legacy helper
+                                     # route_from_triage(). Informational / for eval grouping
+                                     # only. See that docstring in pipeline/nodes.py.
+    routing_confidence: float        # MedGemma's self-reported confidence in its routing decision
+    routing_reasoning: str           # Short human-readable explanation from MedGemma
+    suspected_pathology: str         # MedGemma's initial pathology label before specialist tools run
 
     # ── MedGemma structured diagnosis outputs ────────────────────────────────
-    medgemma_diagnosis: Optional[dict]  # from system_prompt.txt (raw image)
-    medgemma_bbox_diagnosis: Optional[
-        dict
-    ]  # from system_prompt_bbox.txt (SAM3 overlay)
-    final_medgemma_diagnosis: Optional[dict]  # final evidence-fusion diagnosis
+    # Three separate MedGemma inference passes, each with a different input image and prompt:
+    medgemma_diagnosis: Optional[dict]       # Written by triage_node      — raw scan + system_prompt.txt
+    medgemma_bbox_diagnosis: Optional[dict]  # Written by cnn_with_mask_node — SAM3 bbox overlay +
+                                             # system_prompt_bbox.txt; None when SAM3 was skipped
+    final_medgemma_diagnosis: Optional[dict] # Written by report_node       — evidence-fusion pass that
+                                             # synthesises all tool outputs into the definitive diagnosis
 
     # ── Tool outputs ──────────────────────────────────────────────────────────
-    segmentation_result: Optional[SegmentationResult]
-    classification_result: Optional[ClassificationResult]
-    biomedclip_result: Optional[BiomedCLIPResult]
-    explainability_result: Optional[dict]  # saliency map paths keyed by method name
-    saliency_sam3_iou: Optional[float]    # IoU between GradCAM++ heatmap and SAM3 mask (None when SAM3 mask is empty)
-    sam3_mask_empty: bool                 # True when SAM3 predicted no lesion pixels
+    segmentation_result: Optional[SegmentationResult]   # Written by sam3_node
+    classification_result: Optional[ClassificationResult]  # Written by cnn_node; overwritten by
+                                                            # cnn_with_mask_node if CNN hadn't run yet
+    biomedclip_result: Optional[BiomedCLIPResult]       # Written by biomedclip_node
+    explainability_result: Optional[dict]  # Written by explainability_node; keys: "gradcam_pp" and/or
+                                           # "integrated_gradients" mapping to saved PNG paths
+    saliency_sam3_iou: Optional[float]    # Written by explainability_node; IoU between the GradCAM++
+                                          # heatmap (threshold 0.5) and SAM3 binary mask; None when SAM3
+                                          # was skipped or produced an empty mask
+    sam3_mask_empty: bool                 # Written by sam3_node / explainability_node; True when SAM3
+                                          # ran but predicted zero lesion pixels (bbox and overlay None)
+    confidence_penalty_factor: Optional[float]  # Written by report/debate node; IoU penalty factor
+                                                # max(iou/threshold, floor), None when not applied
+
+    # ── Parse-failure flags (True = that MedGemma call produced no parsable JSON) ──
+    triage_parse_failed: bool         # triage (forest: every ballot abstained)
+    verification_parse_failed: bool   # verification (no cap, no flag change)
+    report_parse_failed: bool         # report structured diagnosis (forces human review)
+    judge_parse_failed: bool          # debate judge, any round (fallback verdict or unreadable confidence)
 
     # ── Atlas enrichment (siibra) ─────────────────────────────────────────────
     atlas_enrichment: Optional[dict]  # assigned_region, mni_coords, hemisphere, scores
 
     # ── Final output ──────────────────────────────────────────────────────────
-    final_report: Optional[str]
-    final_predicted_class: Optional[str]
-    final_confidence: float
-    requires_human_review: bool
-    verification_result: Optional[dict]  # MedGemma vs CNN agreement check
-    fhir_report: Optional[dict]          # FHIR R4 DiagnosticReport resource
+    final_report: Optional[str]       # Written by report_node; free-text synthesis generated by MedGemma
+    final_predicted_class: Optional[str]  # Written by report_node; resolved in priority order:
+                                          # final_medgemma_diagnosis → CNN → BiomedCLIP → suspected_pathology
+    final_confidence: float           # Written by report_node; updated by verification_node; may be
+                                      # penalised by low saliency_sam3_iou or MedGemma–CNN disagreement
+    requires_human_review: bool       # Written by report_node or verification_node; when True the FHIR
+                                      # DiagnosticReport status is set to "preliminary" instead of "final"
+    verification_result: Optional[dict]  # Written by verification_node; MedGemma post-hoc check of the
+                                         # CNN prediction against the Grad-CAM++ saliency map; None when
+                                         # explainability was not run
+    fhir_report: Optional[dict]       # Written by fhir_node; FHIR R4 DiagnosticReport resource dict
+
+    # ── Agent Forest outputs ──────────────────────────────────────────────────
+    # Written by forest_triage_node (System C). None in standard / debate pipelines.
+    forest_votes: Optional[list]     # [{agent_idx, role, temperature, top_p, seed, diagnosis_name,
+                                     #   diagnosis_detailed, diagnosis_confidence, parse_failed,
+                                     #   ballot_canonical}, ...]
+    forest_consensus: Optional[dict] # {winner, winner_detailed, winner_canonical, vote_counts,
+                                     #  vote_fraction, dissent_rate, n_agents, n_abstain, tie_broken,
+                                     #  confidence_weighted_confidence, vote_mode, ...}
+
+    # ── Multi-Agent Debate outputs ────────────────────────────────────────────
+    # Written by debate_node (System B). None in standard / forest pipelines.
+    debate_arguments: Optional[list]       # [{round, role, argument}, ...]
+    debate_verdict: Optional[dict]         # {winner, winner_detailed, confidence, reason,
+                                           #  round_changed, rounds_completed}
+    debate_rounds_completed: Optional[int]
+    debate_round_verdicts: Optional[list]   # one judge verdict per round (+ label_canonical, round_changed)
+    debate_round_changed: Optional[bool]    # computed: some round's verdict label differs from the previous
+    debate_judge_claimed_round_changed: Optional[bool]  # the judge's own last-round claim
 
     # ── Diagnostics ───────────────────────────────────────────────────────────
-    routing_path: list  # Ordered list of nodes visited, for evaluation
+    routing_path: list  # Append-only list; each node appends its own name on entry — used for
+                        # evaluation reporting and debugging (never used for control flow)
 
 
 def initial_state(
@@ -114,6 +156,11 @@ def initial_state(
         explainability_result=None,
         saliency_sam3_iou=None,
         sam3_mask_empty=False,
+        confidence_penalty_factor=None,
+        triage_parse_failed=False,
+        verification_parse_failed=False,
+        report_parse_failed=False,
+        judge_parse_failed=False,
         final_report=None,
         final_predicted_class=None,
         final_confidence=0.0,
@@ -122,11 +169,24 @@ def initial_state(
         atlas_enrichment=None,
         fhir_report=None,
         routing_path=[],
+        forest_votes=None,
+        forest_consensus=None,
+        debate_arguments=None,
+        debate_verdict=None,
+        debate_rounds_completed=None,
+        debate_round_verdicts=None,
+        debate_round_changed=None,
+        debate_judge_claimed_round_changed=None,
     )
 
 
 def _prepare_input_image(image_path: str) -> dict:
     global _DICOM_PREPROCESSOR
     if _DICOM_PREPROCESSOR is None:
+        try:
+            from agents.dicom_tool import DICOMPreprocessor
+        except ImportError:
+            # No pydicom: PNG/JPEG only, as before the DICOM support.
+            return {"image_path": str(Path(image_path))}
         _DICOM_PREPROCESSOR = DICOMPreprocessor()
     return _DICOM_PREPROCESSOR.prepare(image_path)
